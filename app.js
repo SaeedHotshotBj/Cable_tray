@@ -63,7 +63,7 @@ function setTool(tool) {
     select: 'Select an object in the 3D scene or Scene panel.',
     cable: 'Click route points. Press Enter to finish.',
     tray: 'Click route points. Press Enter to finish.',
-    model: 'Use Load Model for GLB/GLTF, OBJ or STL.',
+    model: 'Use Load Model for GLB/GLTF, OBJ or STL. Use Load SolidWorks for SLDASM/SLDPRT.',
     measure: 'Click two points on the ground plane to measure.'
   };
   $('toolHint').textContent = hint[tool] || '';
@@ -255,6 +255,59 @@ async function importModel(file) {
   finally { URL.revokeObjectURL(url); }
 }
 $('modelFile').addEventListener('change', async function(e){ for (const f of e.target.files) await importModel(f); e.target.value = ''; });
+async function loadSolidWorks() {
+  try {
+    status('Select a SolidWorks assembly or part...');
+    const pick = await fetch('/api/solidworks/pick', { method: 'POST' });
+    const picked = await pick.json();
+    if (!pick.ok || !picked.path) throw new Error(picked.error || 'SolidWorks file selection cancelled');
+    status('Converting SolidWorks model...');
+    toast('Opening SolidWorks: ' + picked.name);
+    const response = await fetch('/api/solidworks/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: picked.path })
+    });
+    const result = await response.json();
+    if (!response.ok || !result.url) throw new Error(result.error || 'SolidWorks import failed');
+    const data = await fetch(result.url).then(function(r) {
+      if (!r.ok) throw new Error('Converted model could not be downloaded');
+      return r.arrayBuffer();
+    });
+    const geometry = new STLLoader().parse(data);
+    geometry.computeVertexNormals();
+    const root = new THREE.Mesh(
+      geometry,
+      new THREE.MeshStandardMaterial({ color: 0x9ca8b2, metalness: 0.45, roughness: 0.65 })
+    );
+    const objectId = id('solidworks');
+    root.userData.objectId = objectId;
+    scene.add(root);
+    state.modelRoots.set(objectId, root);
+    const displayName = result.name || picked.name;
+    state.objects.push({
+      id: objectId,
+      kind: 'model',
+      name: displayName,
+      source: picked.path,
+      format: result.format || 'SLDASM',
+      native_format: result.native_format || 'SLDASM',
+      importer: 'SolidWorks Automation',
+      warnings: result.warnings || 0,
+      load_errors: result.load_errors || 0
+    });
+    state.selected = objectId;
+    fitObject(root);
+    render();
+    status('SolidWorks model loaded');
+    toast(displayName + ' loaded');
+  } catch (err) {
+    console.error(err);
+    status('Ready');
+    toast('SolidWorks import failed: ' + err.message);
+  }
+}
+$('solidWorksBtn').addEventListener('click', loadSolidWorks);
 $('projectFile').addEventListener('change', async function(e){
   const f = e.target.files && e.target.files[0]; if (!f) return;
   try { loadProject(JSON.parse(await f.text())); toast('Project loaded'); } catch (err) { toast('Project load failed: ' + err.message); }
