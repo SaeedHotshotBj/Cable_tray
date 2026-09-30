@@ -145,10 +145,33 @@ WScript.Echo "BRIDGE_SELECTION_CLEARED|COM=" & Err.Number
 
 Err.Clear
 WScript.Echo "BRIDGE_SAVEAS_LEGACY|starting|output=" & outputFile
-saveResult = swModel.SaveAs(outputFile)
-saveErr = Err.Number
-saveDescription = Err.Description
-WScript.Echo "BRIDGE_SAVEAS_LEGACY_RESULT|result=" & saveResult & "|COM=" & saveErr & "|" & saveDescription
+
+' SOLIDWORKS can transiently return False with COM=0 when an already-open
+' assembly is still finishing activation/rebuild. Retry the same document
+' instead of failing the whole import. The next attempt is intentionally
+' delayed so SOLIDWORKS can release its internal export state.
+Dim saveAttempt, saveSucceeded
+saveSucceeded = False
+saveAttempt = 0
+
+Do While saveAttempt < 3 And Not saveSucceeded
+    saveAttempt = saveAttempt + 1
+    Err.Clear
+    saveResult = swModel.SaveAs(outputFile)
+    saveErr = Err.Number
+    saveDescription = Err.Description
+    WScript.Echo "BRIDGE_SAVEAS_LEGACY_RESULT|attempt=" & saveAttempt & "|result=" & saveResult & "|COM=" & saveErr & "|" & saveDescription
+
+    If saveResult = True Then
+        saveSucceeded = True
+    Else
+        If saveAttempt < 3 Then
+            WScript.Echo "BRIDGE_SAVEAS_RETRY|next_attempt=" & (saveAttempt + 1)
+            WScript.Sleep 3000
+        End If
+    End If
+Loop
+
 Err.Clear
 
 ' Wait for filesystem completion. Large assemblies can finish asynchronously.
