@@ -1,36 +1,112 @@
 (function () {
   'use strict';
 
-  async function openModelPicker() {
+  window.CableTrayDebugLog = function (level, event, details) {
+    var record = {
+      level: level || 'INFO',
+      event: event || 'UNKNOWN',
+      details: details || null,
+      time: new Date().toISOString()
+    };
     try {
-      document.body.dataset.modelPicker = 'opening';
-      const response = await fetch('/api/model/pick', { method: 'POST', cache: 'no-store' });
-      const result = await response.json();
-      if (!response.ok) throw new Error(result.error || 'Model picker failed.');
+      console.log('[CableTray]', record.level, record.event, record.details || '');
+    } catch (_) {}
+    try {
+      fetch('/api/debug/log', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(record),
+        keepalive: true
+      }).catch(function () {});
+    } catch (_) {}
+  };
+
+  window.addEventListener('error', function (event) {
+    window.CableTrayDebugLog('ERROR', 'WINDOW_ERROR', {
+      message: event.message,
+      source: event.filename,
+      line: event.lineno,
+      column: event.colno
+    });
+  });
+
+  window.addEventListener('unhandledrejection', function (event) {
+    var reason = event.reason || {};
+    window.CableTrayDebugLog('ERROR', 'UNHANDLED_REJECTION', {
+      name: reason.name,
+      message: reason.message || String(reason),
+      stack: reason.stack
+    });
+  });
+
+  async function openModelPicker() {
+    window.CableTrayDebugLog('INFO', 'LOAD_MODEL_CLICK', {
+      readyState: document.readyState,
+      location: window.location.href
+    });
+
+    try {
+      window.CableTrayDebugLog('INFO', 'PICK_REQUEST_START');
+
+      var response = await fetch('/api/model/pick', {
+        method: 'POST',
+        cache: 'no-store'
+      });
+
+      var result = await response.json();
+
+      window.CableTrayDebugLog('INFO', 'PICK_RESPONSE', {
+        status: response.status,
+        ok: response.ok,
+        name: result.name,
+        extension: result.extension,
+        format: result.format,
+        hasPath: !!result.path,
+        hasUrl: !!result.url,
+        nativeFormat: result.native_format
+      });
+
+      if (!response.ok) {
+        throw new Error(result.error || 'Model picker failed.');
+      }
+
       if (!result.path) {
-        document.body.dataset.modelPicker = 'cancelled';
+        window.CableTrayDebugLog('INFO', 'PICK_CANCELLED');
         return;
       }
-      document.body.dataset.modelPicker = 'selected';
+
       if (typeof window.CableTrayAcceptModel !== 'function') {
-        throw new Error('3D model engine is not ready. Refresh the page with Ctrl+F5.');
+        throw new Error('3D model engine is not ready.');
       }
+
+      window.CableTrayDebugLog('INFO', 'HANDOFF_TO_MODEL_ENGINE', {
+        extension: result.extension,
+        format: result.format,
+        name: result.name,
+        hasUrl: !!result.url
+      });
+
       await window.CableTrayAcceptModel(result);
+
+      window.CableTrayDebugLog('INFO', 'MODEL_LOAD_COMPLETE');
     } catch (error) {
-      document.body.dataset.modelPicker = 'error';
+      window.CableTrayDebugLog('ERROR', 'MODEL_LOAD_FAILED', {
+        name: error && error.name,
+        message: error && error.message,
+        stack: error && error.stack
+      });
       console.error(error);
-      alert('Load Model failed:\n' + error.message);
-    } finally {
-      if (document.body.dataset.modelPicker === 'opening') {
-        document.body.dataset.modelPicker = '';
-      }
+      alert('Load Model failed. Check F:\\Cable_tray\\logs\\cable_tray_debug.log');
     }
   }
 
-  window.CableTrayOpenModel = openModelPicker;
-
   document.addEventListener('DOMContentLoaded', function () {
-    const button = document.getElementById('loadModelBtn');
-    if (button) button.addEventListener('click', openModelPicker);
+    var button = document.getElementById('loadModelBtn');
+    if (!button) {
+      window.CableTrayDebugLog('ERROR', 'LOAD_MODEL_BUTTON_MISSING');
+      return;
+    }
+    window.CableTrayDebugLog('INFO', 'LOAD_MODEL_HANDLER_REGISTERED');
+    button.addEventListener('click', openModelPicker);
   });
 })();
