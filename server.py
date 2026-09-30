@@ -172,14 +172,26 @@ $dialog.Dispose()
                 length = int(self.headers.get("Content-Length", "0"))
                 body = self.rfile.read(length) if 0 < length <= 64 * 1024 else b"{}"
                 payload = json.loads(body.decode("utf-8"))
-                log_event("CLIENT_EVENT", level=payload.get("level", "INFO"), event=payload.get("event", "UNKNOWN"), details=payload.get("details"))
-                self.send_response(204)
+                try:
+                    log_event("CLIENT_EVENT", level=str(payload.get("level", "INFO")), event=str(payload.get("event", "UNKNOWN")), details=payload.get("details"))
+                except Exception as exc:
+                    print(f"CLIENT LOG WRITE ERROR: {exc!r}", flush=True)
+                # Keep the browser logger completely non-blocking/non-fatal.
+                data = b'{"ok":true}'
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(data)))
                 self.send_header("Cache-Control", "no-store")
                 self.end_headers()
+                self.wfile.write(data)
                 return
             except Exception as exc:
-                log_event("CLIENT_LOG_ERROR", error=repr(exc))
-                return json_response(self, 500, {"error": str(exc)})
+                print(f"CLIENT LOG REQUEST ERROR: {exc!r}", flush=True)
+                try:
+                    log_event("CLIENT_LOG_ERROR", error=repr(exc))
+                except Exception:
+                    pass
+                return json_response(self, 400, {"error": str(exc)})
 
         if route == "/api/model/pick":
             try:
