@@ -161,13 +161,21 @@ WScript.Echo "BRIDGE_SAVEAS3|starting|output=" & outputFile
 result = swActiveModel.Extension.SaveAs3(outputFile, 0, 1, Nothing, Nothing, saveErrors, saveWarnings)
 WScript.Echo "BRIDGE_SAVEAS3_RESULT|result=" & result & "|saveErrors=" & saveErrors & "|saveWarnings=" & saveWarnings & "|COM=" & Err.Number
 
-If result <> True Or Err.Number <> 0 Then
+' SaveAs3 can complete the STL export successfully and then return a COM
+' disconnect/retry status while SOLIDWORKS is busy finishing the export.
+' The authoritative checks here are the SaveAs3 result/error codes and the
+' existence of the generated STL file, not a stale Err.Number after success.
+If result <> True Or saveErrors <> 0 Then
     comError = Err.Number
     comDescription = Err.Description
     WScript.Echo "ERR|SOLIDWORKS STL export failed. SaveErrors=" & saveErrors & "; Warnings=" & saveWarnings & "; COM=" & comError & "|" & comDescription
     swApp.CloseDoc swModel.GetTitle
     If startedByUs Then swApp.ExitApp
     WScript.Quit 14
+End If
+
+If Not CreateObject("Scripting.FileSystemObject").FileExists(outputFile) Then
+    WScript.Sleep 2000
 End If
 
 If Not CreateObject("Scripting.FileSystemObject").FileExists(outputFile) Then
