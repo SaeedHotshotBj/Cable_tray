@@ -4,6 +4,7 @@ Dim args, sourceFile, outputFile, sourceFolder, fileNameOnly
 Dim swApp, swModel, swActiveModel, swDocSpec, alreadyOpen
 Dim loadErrors, loadWarnings, saveErrors, saveWarnings, result
 Dim docType, startedByUs, attempts, activateErrors, activationAttempts, targetTitle
+Dim oldStlSingleFile, oldStlBinary, oldStlQuality, oldStlUnits, stlPrefOk
 Dim specError, specWarning, comError, comDescription
 
 Set args = WScript.Arguments
@@ -201,6 +202,27 @@ If docType = 2 Then
     WScript.Sleep 1000
 End If
 
+' Force deterministic STL export settings for the Cable_tray importer.
+' In particular, assemblies must be written to ONE STL file. Otherwise
+' SOLIDWORKS can legitimately report a successful conversion while creating
+' component STL files instead of the requested assembly output path.
+Err.Clear
+oldStlSingleFile = swApp.GetUserPreferenceToggle(72) ' swSTLComponentsIntoOneFile
+oldStlBinary = swApp.GetUserPreferenceToggle(69)     ' swSTLBinaryFormat
+oldStlQuality = swApp.GetUserPreferenceIntegerValue(78) ' swExportSTLQuality
+oldStlUnits = swApp.GetUserPreferenceIntegerValue(211)   ' swExportStlUnits
+WScript.Echo "BRIDGE_STL_PREFS_BEFORE|singleFile=" & oldStlSingleFile & "|binary=" & oldStlBinary & "|quality=" & oldStlQuality & "|units=" & oldStlUnits & "|COM=" & Err.Number
+
+Err.Clear
+stlPrefOk = swApp.SetUserPreferenceToggle(72, True)
+WScript.Echo "BRIDGE_STL_PREF_SINGLE_FILE|result=" & stlPrefOk & "|value=True|COM=" & Err.Number
+
+Err.Clear
+swApp.SetUserPreferenceToggle 69, True
+swApp.SetUserPreferenceIntegerValue 78, 2
+swApp.SetUserPreferenceIntegerValue 211, 0
+WScript.Echo "BRIDGE_STL_PREFS_SET|binary=True|quality=Fine|units=mm|COM=" & Err.Number
+
 saveErrors = 0
 saveWarnings = 0
 Err.Clear
@@ -208,29 +230,60 @@ WScript.Echo "BRIDGE_SAVEAS3|starting|output=" & outputFile
 result = swActiveModel.Extension.SaveAs3(outputFile, 0, 1, Nothing, Nothing, saveErrors, saveWarnings)
 WScript.Echo "BRIDGE_SAVEAS3_RESULT|result=" & result & "|saveErrors=" & saveErrors & "|saveWarnings=" & saveWarnings & "|COM=" & Err.Number
 
-' SaveAs3 can complete the STL export successfully and then return a COM
-' disconnect/retry status while SOLIDWORKS is busy finishing the export.
-' The authoritative checks here are the SaveAs3 result/error codes and the
-' existence of the generated STL file, not a stale Err.Number after success.
 If result <> True Or saveErrors <> 0 Then
     comError = Err.Number
     comDescription = Err.Description
-    WScript.Echo "ERR|SOLIDWORKS STL export failed. SaveErrors=" & saveErrors & "; Warnings=" & saveWarnings & "; COM=" & comError & "|" & comDescription
-    swApp.CloseDoc swModel.GetTitle
-    If startedByUs Then swApp.ExitApp
-    WScript.Quit 14
+    WScript.Echo "BRIDGE_SAVEAS3_FAILED|saveErrors=" & saveErrors & ";Warnings=" & saveWarnings & ";COM=" & comError & "|" & comDescription
+Else
+    ' SaveAs3 can return success before Windows has finished materializing the
+    ' output file. Poll for up to 30 seconds instead of assuming 2 seconds is
+    ' always enough for a large assembly.
+    attempts = 0
+    Do While attempts < 30 And Not CreateObject("Scripting.FileSystemObject").FileExists(outputFile)
+        WScript.Sleep 1000
+        attempts = attempts + 1
+    Loop
+    WScript.Echo "BRIDGE_STL_FILE_WAIT|exists=" & CreateObject("Scripting.FileSystemObject").FileExists(outputFile) & "|seconds=" & attempts
 End If
 
 If Not CreateObject("Scripting.FileSystemObject").FileExists(outputFile) Then
-    WScript.Sleep 2000
+    ' Compatibility fallback: SaveAs4 on ModelDoc2 uses the older, simpler
+    ' export entry point and is still present in current SOLIDWORKS versions.
+    saveErrors = 0
+    saveWarnings = 0
+    Err.Clear
+    WScript.Echo "BRIDGE_SAVEAS4_FALLBACK|starting|output=" & outputFile
+    result = swActiveModel.SaveAs4(outputFile, 0, 1, saveErrors, saveWarnings)
+    WScript.Echo "BRIDGE_SAVEAS4_RESULT|result=" & result & "|saveErrors=" & saveErrors & "|saveWarnings=" & saveWarnings & "|COM=" & Err.Number
+
+    attempts = 0
+    Do While attempts < 30 And Not CreateObject("Scripting.FileSystemObject").FileExists(outputFile)
+        WScript.Sleep 1000
+        attempts = attempts + 1
+    Loop
+    WScript.Echo "BRIDGE_STL_FILE_WAIT_AFTER_SAVEAS4|exists=" & CreateObject("Scripting.FileSystemObject").FileExists(outputFile) & "|seconds=" & attempts
 End If
 
 If Not CreateObject("Scripting.FileSystemObject").FileExists(outputFile) Then
-    WScript.Echo "ERR|SOLIDWORKS reported success but STL file was not created."
+    WScript.Echo "ERR|SOLIDWORKS did not create the requested STL output after SaveAs3 and SaveAs4."
+    Err.Clear
+    swApp.SetUserPreferenceToggle 72, oldStlSingleFile
+    swApp.SetUserPreferenceToggle 69, oldStlBinary
+    swApp.SetUserPreferenceIntegerValue 78, oldStlQuality
+    swApp.SetUserPreferenceIntegerValue 211, oldStlUnits
     swApp.CloseDoc swModel.GetTitle
     If startedByUs Then swApp.ExitApp
     WScript.Quit 15
 End If
+
+WScript.Echo "BRIDGE_STL_OUTPUT_READY|path=" & outputFile
+WScript.Echo "BRIDGE_STL_PREFS_RESTORE|starting"
+Err.Clear
+swApp.SetUserPreferenceToggle 72, oldStlSingleFile
+swApp.SetUserPreferenceToggle 69, oldStlBinary
+swApp.SetUserPreferenceIntegerValue 78, oldStlQuality
+swApp.SetUserPreferenceIntegerValue 211, oldStlUnits
+WScript.Echo "BRIDGE_STL_PREFS_RESTORE|done|COM=" & Err.Number
 
 WScript.Echo "BRIDGE_DONE"
 WScript.Echo "OK|0|0"
