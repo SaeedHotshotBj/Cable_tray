@@ -143,7 +143,6 @@ $dialog.Dispose()
                     capture_output=True,
                     text=True,
                     timeout=900,
-                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                 )
 
                 stdout = (completed.stdout or "").strip()
