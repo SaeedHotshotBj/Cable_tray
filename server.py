@@ -173,7 +173,10 @@ $dialog.Dispose()
                 body = self.rfile.read(length) if 0 < length <= 64 * 1024 else b"{}"
                 payload = json.loads(body.decode("utf-8"))
                 log_event("CLIENT_EVENT", level=payload.get("level", "INFO"), event=payload.get("event", "UNKNOWN"), details=payload.get("details"))
-                return json_response(self, 204, {})
+                self.send_response(204)
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                return
             except Exception as exc:
                 log_event("CLIENT_LOG_ERROR", error=repr(exc))
                 return json_response(self, 500, {"error": str(exc)})
