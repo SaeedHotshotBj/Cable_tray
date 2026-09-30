@@ -13,16 +13,11 @@ const $ = id => document.getElementById(id);
 // Register model loading before WebGL initialization so the native Windows
 // picker remains usable even if the graphics context cannot initialize.
 window.CableTrayAcceptModel = async function(selected) {
-  if (!selected || !selected.path) throw new Error('No model was selected.');
-  const ext = selected.extension;
-  if (ext === '.sldasm' || ext === '.sldprt') {
-    status('Opening SolidWorks model...');
-    await loadSolidWorksFromPath(selected.path, selected.name);
-  } else {
-    status('Loading model...');
-    await importModelFile(selected.url, selected.name, selected.format);
-  }
+  if (!selected || !selected.url) throw new Error('The model picker did not return a loadable model.');
+  status('Loading model...');
+  await importModelFile(selected.url, selected.name, selected.format || 'STL');
 };
+
 const viewport = $('viewport');
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x080d12);

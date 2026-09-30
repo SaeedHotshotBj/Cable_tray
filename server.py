@@ -37,6 +37,64 @@ def json_response(handler, status_code, payload):
     handler.wfile.write(data)
 
 
+def convert_solidworks_file(source):
+    cache_dir = Path(tempfile.gettempdir()) / "Cable_tray" / "solidworks"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    token = uuid.uuid4().hex
+    output = cache_dir / f"{token}.stl"
+    bridge = ROOT / "solidworks_bridge.vbs"
+    if not bridge.exists():
+        raise RuntimeError("SolidWorks bridge script is missing.")
+
+    command = ["cscript.exe", "//nologo", str(bridge), str(source), str(output)]
+    completed = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        timeout=900,
+    )
+
+    stdout = (completed.stdout or "").strip()
+    stderr = (completed.stderr or "").strip()
+    print(f"SOLIDWORKS IMPORT: file={source} exit={completed.returncode}", flush=True)
+    if stdout:
+        print(f"SOLIDWORKS STDOUT: {stdout[-4000:]}", flush=True)
+    if stderr:
+        print(f"SOLIDWORKS STDERR: {stderr[-4000:]}", flush=True)
+
+    if completed.returncode != 0 or not output.exists() or output.stat().st_size == 0:
+        detail = stdout or stderr or f"cscript exited with code {completed.returncode}"
+        raise RuntimeError(detail)
+
+    load_errors = 0
+    warnings = 0
+    for line in stdout.splitlines():
+        if line.startswith("OK|"):
+            parts = line.split("|")
+            if len(parts) >= 3:
+                try:
+                    load_errors = int(parts[1])
+                    warnings = int(parts[2])
+                except ValueError:
+                    pass
+
+    SOLIDWORKS_RESULTS[token] = {
+        "path": str(output),
+        "created_at": time.time(),
+        "kind": "solidworks",
+    }
+    cleanup_solidworks_results()
+    return {
+        "name": source.name,
+        "native_format": source.suffix.upper().lstrip("."),
+        "format": "STL",
+        "extension": ".stl",
+        "url": f"/api/solidworks/result/{token}.stl",
+        "load_errors": load_errors,
+        "warnings": warnings,
+    }
+
+
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(ROOT), **kwargs)
@@ -90,12 +148,9 @@ $dialog.Dispose()
                 ext = p.suffix.lower()
                 token = uuid.uuid4().hex
                 if ext in {".sldasm", ".sldprt"}:
-                    return json_response(self, 200, {
-                        "path": str(p),
-                        "name": p.name,
-                        "extension": ext,
-                        "format": "SolidWorks"
-                    })
+                    converted = convert_solidworks_file(p)
+                    converted["path"] = str(p)
+                    return json_response(self, 200, converted)
                 token_path = Path(tempfile.gettempdir()) / "Cable_tray" / "models"
                 token_path.mkdir(parents=True, exist_ok=True)
                 cached = token_path / f"{token}{ext}"
@@ -127,59 +182,13 @@ $dialog.Dispose()
                     return json_response(self, 400, {"error": "Selected SolidWorks file does not exist."})
                 if source.suffix.lower() not in {".sldasm", ".sldprt"}:
                     return json_response(self, 400, {"error": "Only .SLDASM and .SLDPRT are supported by this importer."})
-
-                cache_dir = Path(tempfile.gettempdir()) / "Cable_tray" / "solidworks"
-                cache_dir.mkdir(parents=True, exist_ok=True)
-                token = uuid.uuid4().hex
-                output = cache_dir / f"{token}.stl"
-
-                bridge = ROOT / "solidworks_bridge.vbs"
-                if not bridge.exists():
-                    return json_response(self, 500, {"error": "SolidWorks bridge script is missing."})
-
-                command = ["cscript.exe", "//nologo", str(bridge), str(source), str(output)]
-                completed = subprocess.run(
-                    command,
-                    capture_output=True,
-                    text=True,
-                    timeout=900,
-                )
-
-                stdout = (completed.stdout or "").strip()
-                stderr = (completed.stderr or "").strip()
-                if completed.returncode != 0 or not output.exists() or output.stat().st_size == 0:
-                    detail = stdout or stderr or f"cscript exited with code {completed.returncode}"
-                    return json_response(self, 500, {"error": detail})
-
-                load_errors = 0
-                warnings = 0
-                for line in stdout.splitlines():
-                    if line.startswith("OK|"):
-                        parts = line.split("|")
-                        if len(parts) >= 3:
-                            try:
-                                load_errors = int(parts[1])
-                                warnings = int(parts[2])
-                            except ValueError:
-                                pass
-
-                SOLIDWORKS_RESULTS[token] = {
-                    "path": str(output),
-                    "created_at": time.time(),
-                }
-                cleanup_solidworks_results()
-                return json_response(self, 200, {
-                    "name": source.name,
-                    "format": "SLDASM -> STL" if source.suffix.lower() == ".sldasm" else "SLDPRT -> STL",
-                    "native_format": source.suffix.upper().lstrip("."),
-                    "url": f"/api/solidworks/result/{token}.stl",
-                    "load_errors": load_errors,
-                    "warnings": warnings,
-                    "bridge_output": stdout[-2000:],
-                })
+                result = convert_solidworks_file(source)
+                result["path"] = str(source)
+                return json_response(self, 200, result)
             except subprocess.TimeoutExpired:
                 return json_response(self, 500, {"error": "SolidWorks conversion timed out after 15 minutes."})
             except Exception as exc:
+                print(f"SOLIDWORKS IMPORT ERROR: {exc}", flush=True)
                 return json_response(self, 500, {"error": f"SolidWorks import failed: {exc}"})
 
         return json_response(self, 404, {"error": "Not found."})
