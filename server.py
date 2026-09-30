@@ -2,9 +2,13 @@ from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import urlparse
 import json
+import logging
+from logging.handlers import RotatingFileHandler
 import os
 import shutil
 import subprocess
+import sys
+import platform
 import tempfile
 import time
 import uuid
@@ -14,6 +18,21 @@ PORT = 8765
 ROOT = Path(__file__).resolve().parent
 SOLIDWORKS_RESULTS = {}
 RESULT_TTL_SECONDS = 3600
+LOG_DIR = ROOT / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+LOG_FILE = LOG_DIR / "cable_tray_debug.log"
+logger = logging.getLogger("cable_tray")
+logger.setLevel(logging.INFO)
+if not logger.handlers:
+    handler = RotatingFileHandler(LOG_FILE, maxBytes=2*1024*1024, backupCount=3, encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
+    logger.addHandler(handler)
+
+def log_event(event, **details):
+    payload = {"event": event, **details}
+    logger.info(json.dumps(payload, ensure_ascii=False, default=str))
+
+log_event("SERVER_STARTUP", python=sys.version.split()[0], platform=platform.platform(), executable=sys.executable, root=str(ROOT))
 
 
 def cleanup_solidworks_results():
@@ -28,6 +47,7 @@ def cleanup_solidworks_results():
 
 
 def json_response(handler, status_code, payload):
+    log_event("HTTP_RESPONSE", method=getattr(handler, "command", ""), path=getattr(handler, "path", ""), status=status_code, keys=list(payload.keys()) if isinstance(payload, dict) else None)
     data = json.dumps(payload).encode("utf-8")
     handler.send_response(status_code)
     handler.send_header("Content-Type", "application/json; charset=utf-8")
@@ -47,6 +67,7 @@ def convert_solidworks_file(source):
         raise RuntimeError("SolidWorks bridge script is missing.")
 
     command = ["cscript.exe", "//nologo", str(bridge), str(source), str(output)]
+    log_event("SOLIDWORKS_COMMAND_START", source=str(source), output=str(output), bridge=str(bridge), bridge_exists=bridge.exists())
     completed = subprocess.run(
         command,
         capture_output=True,
@@ -57,12 +78,14 @@ def convert_solidworks_file(source):
     stdout = (completed.stdout or "").strip()
     stderr = (completed.stderr or "").strip()
     print(f"SOLIDWORKS IMPORT: file={source} exit={completed.returncode}", flush=True)
+    log_event("SOLIDWORKS_PROCESS_RESULT", returncode=completed.returncode, stdout=stdout[-6000:], stderr=stderr[-6000:], output_exists=output.exists(), output_size=output.stat().st_size if output.exists() else 0)
     if stdout:
         print(f"SOLIDWORKS STDOUT: {stdout[-4000:]}", flush=True)
     if stderr:
         print(f"SOLIDWORKS STDERR: {stderr[-4000:]}", flush=True)
 
     if completed.returncode != 0 or not output.exists() or output.stat().st_size == 0:
+        log_event("SOLIDWORKS_PROCESS_FAILED", returncode=completed.returncode, output_exists=output.exists(), output_size=output.stat().st_size if output.exists() else 0)
         detail = stdout or stderr or f"cscript exited with code {completed.returncode}"
         raise RuntimeError(detail)
 
@@ -84,6 +107,7 @@ def convert_solidworks_file(source):
         "kind": "solidworks",
     }
     cleanup_solidworks_results()
+    log_event("SOLIDWORKS_CONVERT_OK", token=token, source=str(source), output=str(output), output_size=output.stat().st_size)
     return {
         "name": source.name,
         "native_format": source.suffix.upper().lstrip("."),
@@ -142,6 +166,18 @@ $dialog.Dispose()
 
     def do_POST(self):
         route = urlparse(self.path).path
+        log_event("HTTP_REQUEST", method="POST", path=route, client=str(self.client_address))
+        if route == "/api/debug/log":
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                body = self.rfile.read(length) if 0 < length <= 64 * 1024 else b"{}"
+                payload = json.loads(body.decode("utf-8"))
+                log_event("CLIENT_EVENT", level=payload.get("level", "INFO"), event=payload.get("event", "UNKNOWN"), details=payload.get("details"))
+                return json_response(self, 204, {})
+            except Exception as exc:
+                log_event("CLIENT_LOG_ERROR", error=repr(exc))
+                return json_response(self, 500, {"error": str(exc)})
+
         if route == "/api/model/pick":
             try:
                 p = self.pick_model()
@@ -195,6 +231,21 @@ $dialog.Dispose()
 
     def do_GET(self):
         route = urlparse(self.path).path
+        log_event("HTTP_REQUEST", method="GET", path=route, client=str(self.client_address))
+        if route == "/api/debug/log":
+            try:
+                raw = LOG_FILE.read_text(encoding="utf-8")
+                data = raw.encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(data)
+                return
+            except OSError as exc:
+                return json_response(self, 500, {"error": str(exc)})
+
         source_prefix = "/api/model/source/"
         if route.startswith(source_prefix):
             filename = route[len(source_prefix):]
