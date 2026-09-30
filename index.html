@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Cable Tray Designer</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-mark">CT</div>
+      <div>
+        <div class="brand-title">Cable Tray Designer</div>
+        <div class="brand-subtitle">Industrial 3D Routing & Quantity Takeoff</div>
+      </div>
+    </div>
+    <div class="top-actions">
+      <button id="newProjectBtn" class="secondary">New</button>
+      <button id="saveProjectBtn" class="secondary">Save Project</button>
+      <label class="button secondary file-button">Load Model<input id="modelFile" type="file" accept=".glb,.gltf,.obj,.stl" multiple /></label>
+      <label class="button primary file-button">Load Project<input id="projectFile" type="file" accept=".json" /></label>
+    </div>
+  </header>
+  <main class="app-shell">
+    <aside class="sidebar left-panel">
+      <section>
+        <div class="section-title">Project</div>
+        <label class="field"><span>Name</span><input id="projectName" value="Factory Cable Routing" /></label>
+        <label class="field"><span>Units</span><select id="unitSystem"><option value="mm">mm</option><option value="m">m</option></select></label>
+      </section>
+      <section>
+        <div class="section-title">Design Tools</div>
+        <button class="tool active" data-tool="select">↖ Select</button>
+        <button class="tool" data-tool="cable">＋ Cable Route</button>
+        <button class="tool" data-tool="tray">＋ Tray Route</button>
+        <button class="tool" data-tool="model">＋ Import Model</button>
+        <button class="tool" data-tool="measure">＋ Measure</button>
+        <div class="hint" id="toolHint">Select an object in the 3D scene or Scene panel.</div>
+      </section>
+      <section>
+        <div class="section-title">Routing Defaults</div>
+        <label class="field"><span>Cable Ø (mm)</span><input id="defaultCableDiameter" type="number" min="1" step="0.5" value="24" /></label>
+        <label class="field"><span>Tray W (mm)</span><input id="defaultTrayWidth" type="number" min="25" step="25" value="300" /></label>
+        <label class="field"><span>Tray H (mm)</span><input id="defaultTrayHeight" type="number" min="25" step="25" value="100" /></label>
+        <label class="field"><span>Tray Elevation (mm)</span><input id="defaultElevation" type="number" step="100" value="3000" /></label>
+        <label class="field"><span>Fill Limit (%)</span><input id="fillLimit" type="number" min="1" max="100" step="1" value="80" /></label>
+      </section>
+      <section>
+        <div class="section-title">Model Import</div>
+        <div class="format-grid"><span>GLB/GLTF</span><span>OBJ</span><span>STL</span></div>
+        <div class="hint">CAD/BIM adapters are isolated from routing so DWG, STEP, IFC, SolidWorks and other formats can be added without changing the engineering model.</div>
+      </section>
+    </aside>
+    <section class="viewport-panel">
+      <div class="viewport-toolbar">
+        <div class="toolbar-group"><button id="fitBtn">Fit</button><button id="topBtn">Top</button><button id="frontBtn">Front</button><button id="isoBtn">Iso</button></div>
+        <div class="toolbar-group"><span class="status-dot"></span><span id="statusText">Ready</span></div>
+      </div>
+      <div id="viewport"></div>
+      <div id="routeOverlay" class="route-overlay hidden">Click points in the scene. Press <b>Enter</b> to finish.</div>
+    </section>
+    <aside class="sidebar right-panel">
+      <section>
+        <div class="section-title">Scene</div>
+        <div id="sceneList" class="scene-list"></div>
+      </section>
+      <section>
+        <div class="section-title">Properties</div>
+        <div id="properties" class="properties empty">Select a route or imported model.</div>
+      </section>
+      <section class="boq-section">
+        <div class="section-title boq-head"><span>Quantity Takeoff</span><button id="exportBoqBtn" class="small">Export CSV</button></div>
+        <div class="boq-summary">
+          <div><span>Cable</span><b id="totalCable">0.00 m</b></div>
+          <div><span>Tray</span><b id="totalTray">0.00 m</b></div>
+          <div><span>Elbows</span><b id="totalElbows">0</b></div>
+        </div>
+        <div id="boqTableWrap" class="table-wrap"></div>
+      </section>
+    </aside>
+  </main>
+  <div id="toast" class="toast"></div>
+  <script type="importmap">
+    {"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.179.1/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.179.1/examples/jsm/"}}
+  </script>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
