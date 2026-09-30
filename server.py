@@ -173,7 +173,7 @@ $dialog.Dispose()
                 body = self.rfile.read(length) if 0 < length <= 64 * 1024 else b"{}"
                 payload = json.loads(body.decode("utf-8"))
                 try:
-                    log_event("CLIENT_EVENT", level=str(payload.get("level", "INFO")), event=str(payload.get("event", "UNKNOWN")), details=payload.get("details"))
+                    log_event(payload.get("event", "UNKNOWN"), level=str(payload.get("level", "INFO")), details=payload.get("details"))
                 except Exception as exc:
                     print(f"CLIENT LOG WRITE ERROR: {exc!r}", flush=True)
                 # Keep the browser logger completely non-blocking/non-fatal.
