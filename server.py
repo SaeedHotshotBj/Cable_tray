@@ -203,6 +203,7 @@ $dialog.Dispose()
                     "url": f"/api/model/source/{token}{ext}"
                 })
             except Exception as exc:
+                log_event("MODEL_PICKER_ERROR", error=repr(exc))
                 print(f"MODEL PICKER ERROR: {exc}", flush=True)
                 return json_response(self, 500, {"error": f"Model picker failed: {exc}"})
 
@@ -222,8 +223,10 @@ $dialog.Dispose()
                 result["path"] = str(source)
                 return json_response(self, 200, result)
             except subprocess.TimeoutExpired:
+                log_event("SOLIDWORKS_IMPORT_TIMEOUT")
                 return json_response(self, 500, {"error": "SolidWorks conversion timed out after 15 minutes."})
             except Exception as exc:
+                log_event("SOLIDWORKS_IMPORT_ERROR", error=repr(exc))
                 print(f"SOLIDWORKS IMPORT ERROR: {exc}", flush=True)
                 return json_response(self, 500, {"error": f"SolidWorks import failed: {exc}"})
 

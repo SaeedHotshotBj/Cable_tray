@@ -15,6 +15,7 @@ End If
 sourceFile = args(0)
 outputFile = args(1)
 startedByUs = False
+WScript.Echo "BRIDGE_START|source=" & sourceFile & "|output=" & outputFile
 
 On Error Resume Next
 Err.Clear
@@ -42,7 +43,9 @@ If LCase(Right(sourceFile, 6)) = "sldasm" Then docType = 2
 loadErrors = 0
 loadWarnings = 0
 Err.Clear
+WScript.Echo "BRIDGE_OPENDOC6|type=" & docType
 Set swModel = swApp.OpenDoc6(sourceFile, docType, 1, "", loadErrors, loadWarnings)
+WScript.Echo "BRIDGE_OPENDOC6_RESULT|loadErrors=" & loadErrors & "|loadWarnings=" & loadWarnings
 
 If swModel Is Nothing Or Err.Number <> 0 Then
     errorNumber = Err.Number
@@ -58,6 +61,7 @@ WScript.Sleep 500
 
 ' SOLIDWORKS requires the document being converted to be the active document.
 Set swActiveModel = swApp.ActiveDoc
+WScript.Echo "BRIDGE_ACTIVE_DOC|title=" & swActiveModel.GetTitle
 
 If swActiveModel Is Nothing Or Err.Number <> 0 Then
     errorNumber = Err.Number
@@ -76,13 +80,16 @@ If docType = 2 Then
     Err.Clear
     On Error GoTo 0
     swActiveModel.ForceRebuild3 False
+    WScript.Echo "BRIDGE_REBUILD|done"
     WScript.Sleep 1000
 End If
 
 saveErrors = 0
 saveWarnings = 0
 Err.Clear
+WScript.Echo "BRIDGE_SAVEAS3|starting"
 result = swActiveModel.Extension.SaveAs3(outputFile, 0, 1, Nothing, Nothing, saveErrors, saveWarnings)
+WScript.Echo "BRIDGE_SAVEAS3_RESULT|result=" & result & "|saveErrors=" & saveErrors & "|saveWarnings=" & saveWarnings
 
 If result <> True Or Err.Number <> 0 Then
     errorNumber = Err.Number
@@ -96,5 +103,6 @@ End If
 swApp.CloseDoc swModel.GetTitle
 If startedByUs Then swApp.ExitApp
 
+WScript.Echo "BRIDGE_DONE"
 WScript.Echo "OK|" & loadErrors & "|" & loadWarnings
 WScript.Quit 0
