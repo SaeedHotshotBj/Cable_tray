@@ -1,0 +1,41 @@
+{
+  "schema": "cable-tray-project",
+  "schema_version": 1,
+  "project": {
+    "name": "Demo Industrial Plant",
+    "units": "mm",
+    "version": 1
+  },
+  "objects": [
+    {
+      "id": "tray_demo_001",
+      "kind": "tray",
+      "name": "TRAY-MCC-01",
+      "points": [
+        {"x": -3000, "y": 3000, "z": -2000},
+        {"x": 3000, "y": 3000, "z": -2000},
+        {"x": 3000, "y": 3000, "z": 2000}
+      ],
+      "diameter_mm": 24,
+      "width_mm": 300,
+      "height_mm": 100,
+      "specification": "TRAY-300x100",
+      "material": "Galvanized Steel"
+    },
+    {
+      "id": "cable_demo_001",
+      "kind": "cable",
+      "name": "CBL-MTR-001",
+      "points": [
+        {"x": -2800, "y": 3050, "z": -1900},
+        {"x": 2800, "y": 3050, "z": -1900},
+        {"x": 2800, "y": 3050, "z": 1800}
+      ],
+      "diameter_mm": 24,
+      "width_mm": 300,
+      "height_mm": 100,
+      "specification": "4C-10mm2-PVC",
+      "material": "Copper/PVC"
+    }
+  ]
+}
