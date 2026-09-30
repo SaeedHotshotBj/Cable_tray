@@ -157,6 +157,18 @@ saveAttempt = 0
 Do While saveAttempt < 3 And Not saveSucceeded
     saveAttempt = saveAttempt + 1
     Err.Clear
+
+    If fileExt = ".sldasm" Then
+        Err.Clear
+        swModel.ResolveAllLightWeightComponents False
+        swModel.ForceRebuild3 False
+    End If
+
+    Err.Clear
+    swModel.ClearSelection2 True
+    WScript.Echo "BRIDGE_SAVEAS_PREPARE|attempt=" & saveAttempt & "|COM=" & Err.Number
+
+    Err.Clear
     saveResult = swModel.SaveAs(outputFile)
     saveErr = Err.Number
     saveDescription = Err.Description
