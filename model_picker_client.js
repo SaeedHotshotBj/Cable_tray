@@ -39,7 +39,13 @@
     });
   });
 
+  var modelPickerBusy = false;
+
   async function openModelPicker() {
+    if (modelPickerBusy) return;
+    modelPickerBusy = true;
+    var button = document.getElementById('loadModelBtn');
+    if (button) button.disabled = true;
     window.CableTrayDebugLog('INFO', 'LOAD_MODEL_CLICK', {
       readyState: document.readyState,
       location: window.location.href
@@ -97,6 +103,9 @@
       });
       console.error(error);
       alert('Load Model failed. Check F:\\Cable_tray\\logs\\cable_tray_debug.log');
+    } finally {
+      modelPickerBusy = false;
+      if (button) button.disabled = false;
     }
   }
 
