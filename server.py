@@ -13,8 +13,6 @@ import tempfile
 import time
 import uuid
 import struct
-import math
-import re
 
 HOST = "127.0.0.1"
 PORT = 8765
@@ -164,7 +162,7 @@ def convert_solidworks_file(source):
     token = uuid.uuid4().hex
     export_dir = cache_root / token
     export_dir.mkdir(parents=True, exist_ok=True)
-    output = export_dir / f"{source.stem}.stl"
+    output = export_dir / "__cable_tray_combined__.stl"
     bridge = ROOT / "solidworks_bridge.vbs"
     if not bridge.exists():
         raise RuntimeError("SolidWorks bridge script is missing.")
@@ -180,7 +178,7 @@ def convert_solidworks_file(source):
 
     stdout = (completed.stdout or "").strip()
     stderr = (completed.stderr or "").strip()
-    stl_files = sorted(export_dir.rglob("*.stl"))
+    stl_files = sorted(p for p in export_dir.rglob("*") if p.is_file() and p.suffix.lower() == ".stl")
     log_event(
         "SOLIDWORKS_PROCESS_RESULT",
         returncode=completed.returncode,
