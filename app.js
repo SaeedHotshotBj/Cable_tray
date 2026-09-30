@@ -235,84 +235,102 @@ function renderBoq() {
 }
 function render() { renderScene(); renderProperties(); renderBoq(); }
 
-async function importModel(file) {
-  const name = file.name.toLowerCase();
-  const url = URL.createObjectURL(file);
+async function importModelFile(fileUrl, displayName, format) {
+  const url = fileUrl;
   try {
-    let root, format;
-    if (name.endsWith('.glb') || name.endsWith('.gltf')) { root = (await new GLTFLoader().loadAsync(url)).scene; format = name.endsWith('.glb') ? 'GLB' : 'GLTF'; }
-    else if (name.endsWith('.obj')) { root = new OBJLoader().parse(await file.text()); format = 'OBJ'; }
-    else if (name.endsWith('.stl')) { const geom = new STLLoader().parse(await file.arrayBuffer()); geom.computeVertexNormals(); root = new THREE.Mesh(geom, new THREE.MeshStandardMaterial({ color: 0x9ca8b2, metalness: 0.45, roughness: 0.65 })); format = 'STL'; }
-    else throw new Error('Unsupported format in this build');
+    let root;
+    if (format === 'GLB' || format === 'GLTF') {
+      root = (await new GLTFLoader().loadAsync(url)).scene;
+    } else if (format === 'OBJ') {
+      const text = await fetch(url).then(function(r){ if (!r.ok) throw new Error('Model could not be read'); return r.text(); });
+      root = new OBJLoader().parse(text);
+    } else if (format === 'STL') {
+      const data = await fetch(url).then(function(r){ if (!r.ok) throw new Error('Model could not be read'); return r.arrayBuffer(); });
+      const geometry = new STLLoader().parse(data);
+      geometry.computeVertexNormals();
+      root = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({ color: 0x9ca8b2, metalness: 0.45, roughness: 0.65 }));
+    } else {
+      throw new Error('Unsupported model format: ' + format);
+    }
     const objectId = id('model');
     root.userData.objectId = objectId;
     root.traverse(function(n){ if (n.isMesh) n.userData.objectId = objectId; });
-    scene.add(root); state.modelRoots.set(objectId, root);
-    state.objects.push({ id: objectId, kind: 'model', name: file.name, source: file.name, format: format });
-    state.selected = objectId;
-    fitAllScene(); render(); toast(file.name + ' imported');
-  } catch (err) { console.error(err); toast('Import failed: ' + err.message); }
-  finally { URL.revokeObjectURL(url); }
-}
-$('modelFile').addEventListener('change', async function(e){ for (const f of e.target.files) await importModel(f); e.target.value = ''; });
-async function loadSolidWorks() {
-  try {
-    status('Select a SolidWorks assembly or part...');
-    const pick = await fetch('/api/solidworks/pick', { method: 'POST' });
-    const picked = await pick.json();
-    if (!pick.ok || !picked.path) throw new Error(picked.error || 'SolidWorks file selection cancelled');
-    status('Converting SolidWorks model...');
-    toast('Opening SolidWorks: ' + picked.name);
-    const response = await fetch('/api/solidworks/import', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ path: picked.path })
-    });
-    const result = await response.json();
-    if (!response.ok || !result.url) throw new Error(result.error || 'SolidWorks import failed');
-    const data = await fetch(result.url).then(function(r) {
-      if (!r.ok) throw new Error('Converted model could not be downloaded');
-      return r.arrayBuffer();
-    });
-    const geometry = new STLLoader().parse(data);
-    geometry.computeVertexNormals();
-    const root = new THREE.Mesh(
-      geometry,
-      new THREE.MeshStandardMaterial({ color: 0x9ca8b2, metalness: 0.45, roughness: 0.65 })
-    );
-    const objectId = id('solidworks');
-    root.userData.objectId = objectId;
     scene.add(root);
     state.modelRoots.set(objectId, root);
-    const displayName = result.name || picked.name;
-    state.objects.push({
-      id: objectId,
-      kind: 'model',
-      name: displayName,
-      source: picked.path,
-      format: result.format || 'SLDASM',
-      native_format: result.native_format || 'SLDASM',
-      importer: 'SolidWorks Automation',
-      warnings: result.warnings || 0,
-      load_errors: result.load_errors || 0
-    });
+    state.objects.push({ id: objectId, kind: 'model', name: displayName, source: displayName, format: format });
     state.selected = objectId;
-    fitObject(root);
+    fitAllScene();
     render();
-    status('SolidWorks model loaded');
+    status('Model loaded');
     toast(displayName + ' loaded');
   } catch (err) {
     console.error(err);
     status('Ready');
-    toast('SolidWorks import failed: ' + err.message);
+    toast('Import failed: ' + err.message);
   }
 }
-$('solidWorksBtn').addEventListener('click', loadSolidWorks);
-$('projectFile').addEventListener('change', async function(e){
-  const f = e.target.files && e.target.files[0]; if (!f) return;
-  try { loadProject(JSON.parse(await f.text())); toast('Project loaded'); } catch (err) { toast('Project load failed: ' + err.message); }
-  e.target.value = '';
-});
+
+async function loadSolidWorksFromPath(path, name) {
+  const response = await fetch('/api/solidworks/import', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path: path })
+  });
+  const result = await response.json();
+  if (!response.ok || !result.url) throw new Error(result.error || 'SolidWorks import failed');
+  const data = await fetch(result.url).then(function(r){
+    if (!r.ok) throw new Error('Converted model could not be downloaded');
+    return r.arrayBuffer();
+  });
+  const geometry = new STLLoader().parse(data);
+  geometry.computeVertexNormals();
+  const root = new THREE.Mesh(
+    geometry,
+    new THREE.MeshStandardMaterial({ color: 0x9ca8b2, metalness: 0.45, roughness: 0.65 })
+  );
+  const objectId = id('solidworks');
+  root.userData.objectId = objectId;
+  scene.add(root);
+  state.modelRoots.set(objectId, root);
+  state.objects.push({
+    id: objectId,
+    kind: 'model',
+    name: result.name || name,
+    source: path,
+    format: result.format || 'SolidWorks',
+    native_format: result.native_format || 'SLDASM',
+    importer: 'SolidWorks Automation',
+    warnings: result.warnings || 0,
+    load_errors: result.load_errors || 0
+  });
+  state.selected = objectId;
+  fitObject(root);
+  render();
+  status('Model loaded');
+  toast((result.name || name) + ' loaded');
+}
+
+async function loadModel() {
+  try {
+    status('Select a model file...');
+    const pick = await fetch('/api/model/pick', { method: 'POST' });
+    const selected = await pick.json();
+    if (!pick.ok || !selected.path) throw new Error(selected.error || 'Model selection cancelled');
+    const ext = selected.extension;
+    if (ext === '.sldasm' || ext === '.sldprt') {
+      status('Opening SolidWorks model...');
+      await loadSolidWorksFromPath(selected.path, selected.name);
+    } else {
+      status('Loading model...');
+      await importModelFile(selected.url, selected.name, selected.format);
+    }
+  } catch (err) {
+    console.error(err);
+    status('Ready');
+    toast('Model load failed: ' + err.message);
+  }
+}
+$('loadModelBtn').addEventListener('click', loadModel);
 function projectData() {
   return { schema: 'cable-tray-project', schema_version: 1, project: state.project, objects: state.objects.filter(function(o){ return o.kind !== 'model'; }).map(function(o){ return { id:o.id, kind:o.kind, name:o.name, points:o.points.map(function(p){ return {x:p.x*10,y:p.y*10,z:p.z*10}; }), diameter_mm:o.diameter_mm, width_mm:o.width_mm, height_mm:o.height_mm, specification:o.specification, material:o.material }; }) };
 }

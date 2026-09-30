@@ -45,34 +45,66 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         super().end_headers()
 
+    def pick_model(self):
+        import tkinter as tk
+        from tkinter import filedialog
+
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        selected = filedialog.askopenfilename(
+            title="Load 3D / CAD Model",
+            filetypes=[
+                ("Supported 3D models", "*.glb;*.gltf;*.obj;*.stl;*.sldasm;*.sldprt"),
+                ("GLB / GLTF", "*.glb;*.gltf"),
+                ("OBJ", "*.obj"),
+                ("STL", "*.stl"),
+                ("SolidWorks Assembly", "*.sldasm"),
+                ("SolidWorks Part", "*.sldprt"),
+                ("All files", "*.*"),
+            ],
+        )
+        root.destroy()
+        if not selected:
+            raise ValueError("No model file selected.")
+        p = Path(selected).resolve()
+        ext = p.suffix.lower()
+        allowed = {".glb", ".gltf", ".obj", ".stl", ".sldasm", ".sldprt"}
+        if ext not in allowed:
+            raise ValueError("This model format is not enabled yet.")
+        return p
+
     def do_POST(self):
         route = urlparse(self.path).path
-        if route == "/api/solidworks/pick":
+        if route == "/api/model/pick":
             try:
-                import tkinter as tk
-                from tkinter import filedialog
-
-                root = tk.Tk()
-                root.withdraw()
-                root.attributes("-topmost", True)
-                selected = filedialog.askopenfilename(
-                    title="Select SolidWorks Assembly or Part",
-                    filetypes=[
-                        ("SolidWorks Assembly", "*.sldasm"),
-                        ("SolidWorks Part", "*.sldprt"),
-                        ("SolidWorks files", "*.sldasm;*.sldprt"),
-                        ("All files", "*.*"),
-                    ],
-                )
-                root.destroy()
-                if not selected:
-                    return json_response(self, 400, {"error": "No SolidWorks file selected."})
-                p = Path(selected).resolve()
-                if p.suffix.lower() not in {".sldasm", ".sldprt"}:
-                    return json_response(self, 400, {"error": "Please select an .SLDASM or .SLDPRT file."})
-                return json_response(self, 200, {"path": str(p), "name": p.name})
+                p = self.pick_model()
+                ext = p.suffix.lower()
+                token = uuid.uuid4().hex
+                if ext in {".sldasm", ".sldprt"}:
+                    return json_response(self, 200, {
+                        "path": str(p),
+                        "name": p.name,
+                        "extension": ext,
+                        "format": "SolidWorks"
+                    })
+                token_path = Path(tempfile.gettempdir()) / "Cable_tray" / "models"
+                token_path.mkdir(parents=True, exist_ok=True)
+                cached = token_path / f"{token}{ext}"
+                shutil.copy2(p, cached)
+                SOLIDWORKS_RESULTS[token] = {
+                    "path": str(cached),
+                    "created_at": time.time(),
+                    "kind": "source",
+                }
+                return json_response(self, 200, {
+                    "name": p.name,
+                    "extension": ext,
+                    "format": {".glb":"GLB", ".gltf":"GLTF", ".obj":"OBJ", ".stl":"STL"}[ext],
+                    "url": f"/api/model/source/{token}{ext}"
+                })
             except Exception as exc:
-                return json_response(self, 500, {"error": f"Windows file picker failed: {exc}"})
+                return json_response(self, 500, {"error": f"Model picker failed: {exc}"})
 
         if route == "/api/solidworks/import":
             try:
@@ -145,6 +177,36 @@ class Handler(SimpleHTTPRequestHandler):
         return json_response(self, 404, {"error": "Not found."})
 
     def do_GET(self):
+        route = urlparse(self.path).path
+        source_prefix = "/api/model/source/"
+        if route.startswith(source_prefix):
+            filename = route[len(source_prefix):]
+            token = Path(filename).stem
+            info = SOLIDWORKS_RESULTS.get(token)
+            if not info:
+                return json_response(self, 404, {"error": "Model source expired or was not found."})
+            path = Path(info["path"])
+            if not path.exists():
+                SOLIDWORKS_RESULTS.pop(token, None)
+                return json_response(self, 404, {"error": "Model source is no longer available."})
+            content_types = {
+                ".glb": "model/gltf-binary",
+                ".gltf": "model/gltf+json",
+                ".obj": "text/plain; charset=utf-8",
+                ".stl": "model/stl",
+            }
+            try:
+                data = path.read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type", content_types.get(path.suffix.lower(), "application/octet-stream"))
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(data)
+                return
+            except OSError as exc:
+                return json_response(self, 500, {"error": str(exc)})
+
         route = urlparse(self.path).path
         prefix = "/api/solidworks/result/"
         if route.startswith(prefix) and route.endswith(".stl"):
