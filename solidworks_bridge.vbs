@@ -86,14 +86,36 @@ If swModel Is Nothing Then
     WScript.Echo "BRIDGE_OPENDOC7_RESULT|model=" & Not (swModel Is Nothing) & "|error=" & specError & "|warning=" & specWarning & "|COM=" & Err.Number
 
     If swModel Is Nothing Or specError <> 0 Then
-        ' Fallback to OpenDoc6 with non-silent options so native SOLIDWORKS
-        ' diagnostics are not suppressed.
-        loadErrors = 0
-        loadWarnings = 0
+        ' Fallback 1: OpenDoc6 directly.
+    loadErrors = 0
+    loadWarnings = 0
+    Err.Clear
+    WScript.Echo "BRIDGE_OPENDOC6_FALLBACK|starting"
+    Set swModel = swApp.OpenDoc6(sourceFile, docType, 0, "", loadErrors, loadWarnings)
+    WScript.Echo "BRIDGE_OPENDOC6_FALLBACK_RESULT|model=" & Not (swModel Is Nothing) & "|loadErrors=" & loadErrors & "|loadWarnings=" & loadWarnings & "|COM=" & Err.Number
+
+    ' Fallback 2: use the native Windows/SOLIDWORKS file association.
+    ' This is equivalent to opening the SLDASM from Explorer and lets
+    ' SOLIDWORKS resolve assembly references through its normal UI path.
+    If swModel Is Nothing Then
         Err.Clear
-        WScript.Echo "BRIDGE_OPENDOC6_FALLBACK|starting"
-        Set swModel = swApp.OpenDoc6(sourceFile, docType, 0, "", loadErrors, loadWarnings)
-        WScript.Echo "BRIDGE_OPENDOC6_FALLBACK_RESULT|model=" & Not (swModel Is Nothing) & "|loadErrors=" & loadErrors & "|loadWarnings=" & loadWarnings & "|COM=" & Err.Number
+        WScript.Echo "BRIDGE_SHELL_OPEN|source=" & sourceFile
+        CreateObject("Shell.Application").Open sourceFile
+        WScript.Sleep 5000
+
+        attempts = 0
+        Do While attempts < 60 And swModel Is Nothing
+            Err.Clear
+            Set swModel = swApp.GetOpenDocumentByName(sourceFile)
+            If swModel Is Nothing Then
+                Err.Clear
+                Set swModel = swApp.GetOpenDocumentByName(fileNameOnly)
+            End If
+            If swModel Is Nothing Then WScript.Sleep 1000
+            attempts = attempts + 1
+        Loop
+        WScript.Echo "BRIDGE_SHELL_OPEN_RESULT|model=" & Not (swModel Is Nothing) & "|attempts=" & attempts & "|COM=" & Err.Number
+    End If
     End If
 End If
 
