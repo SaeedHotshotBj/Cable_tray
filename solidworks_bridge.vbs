@@ -3,7 +3,7 @@ Option Explicit
 Dim args, sourceFile, outputFile, sourceFolder, fileNameOnly
 Dim swApp, swModel, swActiveModel, swDocSpec, alreadyOpen
 Dim loadErrors, loadWarnings, saveErrors, saveWarnings, result
-Dim docType, startedByUs, attempts, activateErrors, activationAttempts
+Dim docType, startedByUs, attempts, activateErrors, activationAttempts, targetTitle
 Dim specError, specWarning, comError, comDescription
 
 Set args = WScript.Arguments
@@ -129,43 +129,52 @@ End If
 
 WScript.Sleep 1500
 
-' ActivateDoc3 returns the ModelDoc2/ModelDoc object that it activated.
-' Do not discard that return value and then depend on ActiveDoc immediately:
-' SOLIDWORKS can transiently return Nothing for ActiveDoc over COM while the
-' activation is still settling.
+Err.Clear
+targetTitle = swModel.GetTitle
+WScript.Echo "BRIDGE_TARGET_DOCUMENT|title=" & targetTitle
+
+' ActivateDoc3 itself returns the ModelDoc2/ModelDoc object that it activated.
+' Use that return value. SOLIDWORKS may transiently return Nothing from the
+' separate ActiveDoc property while COM activation is still settling.
 activateErrors = 0
 activationAttempts = 0
 Set swActiveModel = Nothing
 
 Do While activationAttempts < 10 And swActiveModel Is Nothing
     activationAttempts = activationAttempts + 1
+
     Err.Clear
-    WScript.Echo "BRIDGE_ACTIVATE|attempt=" & activationAttempts & "|name=" & swModel.GetTitle
-
-    Set swActiveModel = swApp.ActivateDoc3(swModel.GetTitle, False, 0, activateErrors)
-
+    activateErrors = 0
+    WScript.Echo "BRIDGE_ACTIVATE|attempt=" & activationAttempts & "|name=" & targetTitle
+    Set swActiveModel = swApp.ActivateDoc3(targetTitle, False, 0, activateErrors)
     WScript.Echo "BRIDGE_ACTIVATE_RESULT|model=" & Not (swActiveModel Is Nothing) & "|errors=" & activateErrors & "|COM=" & Err.Number
 
     ' swGenericActivateError = 1 means the document was not activated.
-    ' swDocNeedsRebuildWarning = 2 is a warning and still leaves the document active.
+    ' swDocNeedsRebuildWarning = 2 is a warning and the document remains usable.
     If Not swActiveModel Is Nothing And activateErrors <> 0 And activateErrors <> 2 Then
         Set swActiveModel = Nothing
     End If
 
+    ' Retry by fully-qualified source path if activation by title did not return
+    ' the document object. Do not overwrite swModel here.
     If swActiveModel Is Nothing Then
         Err.Clear
-        Set swModel = swApp.GetOpenDocumentByName(sourceFile)
-        If swModel Is Nothing Then
-            Err.Clear
-            Set swModel = swApp.GetOpenDocumentByName(fileNameOnly)
+        activateErrors = 0
+        WScript.Echo "BRIDGE_ACTIVATE_PATH_FALLBACK|attempt=" & activationAttempts
+        Set swActiveModel = swApp.ActivateDoc3(sourceFile, False, 0, activateErrors)
+        WScript.Echo "BRIDGE_ACTIVATE_PATH_FALLBACK_RESULT|model=" & Not (swActiveModel Is Nothing) & "|errors=" & activateErrors & "|COM=" & Err.Number
+
+        If Not swActiveModel Is Nothing And activateErrors <> 0 And activateErrors <> 2 Then
+            Set swActiveModel = Nothing
         End If
-        If swActiveModel Is Nothing Then WScript.Sleep 1000
     End If
+
+    If swActiveModel Is Nothing Then WScript.Sleep 1000
 Loop
 
 If swActiveModel Is Nothing Then
-    ' Final compatibility check. Some SOLIDWORKS versions expose ActiveDoc
-    ' after the activation has settled even when the initial call returned Nothing.
+    ' Final compatibility check. Some SOLIDWORKS versions expose ActiveDoc only
+    ' after activation has settled, even when ActivateDoc3 did not return it.
     Err.Clear
     Set swActiveModel = swApp.ActiveDoc
     WScript.Echo "BRIDGE_ACTIVE_DOC_FINAL_CHECK|model=" & Not (swActiveModel Is Nothing) & "|COM=" & Err.Number
@@ -175,11 +184,12 @@ If swActiveModel Is Nothing Then
     comError = Err.Number
     comDescription = Err.Description
     WScript.Echo "ERR|Active document object unavailable after activation. COM=" & comError & "|" & comDescription
-    swApp.CloseDoc swModel.GetTitle
+    swApp.CloseDoc targetTitle
     If startedByUs Then swApp.ExitApp
     WScript.Quit 13
 End If
 
+Err.Clear
 WScript.Echo "BRIDGE_ACTIVE_DOC|title=" & swActiveModel.GetTitle
 
 Err.Clear
