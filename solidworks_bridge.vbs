@@ -71,14 +71,18 @@ End If
 Err.Clear
 swActiveModel.ClearSelection2 True
 If docType = 2 Then
+    On Error Resume Next
+    swActiveModel.ResolveAllLightWeightComponents False
+    Err.Clear
+    On Error GoTo 0
     swActiveModel.ForceRebuild3 False
-    WScript.Sleep 500
+    WScript.Sleep 1000
 End If
 
 saveErrors = 0
 saveWarnings = 0
 Err.Clear
-result = swActiveModel.Extension.SaveAs2(outputFile, 0, 1, Nothing, "", False, saveErrors, saveWarnings)
+result = swActiveModel.Extension.SaveAs3(outputFile, 0, 1, Nothing, Nothing, saveErrors, saveWarnings)
 
 If result <> True Or Err.Number <> 0 Then
     errorNumber = Err.Number
