@@ -63,7 +63,7 @@ if ($dialog.FileName) { [Console]::Out.WriteLine($dialog.FileName) }
 $dialog.Dispose()
 '''
         completed = subprocess.run(
-            ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-STA", "-Command", ps],
+            ["powershell.exe", "-NoLogo", "-NoProfile", "-STA", "-ExecutionPolicy", "Bypass", "-Command", ps],
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
