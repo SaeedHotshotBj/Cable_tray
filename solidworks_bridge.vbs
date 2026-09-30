@@ -134,10 +134,20 @@ WScript.Sleep 1000
 
 Err.Clear
 Set swActiveModel = swApp.ActiveDoc
-If swActiveModel Is Nothing Or Err.Number <> 0 Then
+If swActiveModel Is Nothing Then
+    ' SOLIDWORKS can transiently reject ActiveDoc through COM immediately
+    ' after ActivateDoc3, even though the requested document is active.
+    ' The document object returned by GetOpenDocumentByName/OpenDoc7 is still
+    ' valid and is the object that must be exported.
+    Err.Clear
+    Set swActiveModel = swModel
+    WScript.Echo "BRIDGE_ACTIVE_DOC_FALLBACK|using_requested_document|COM=" & Err.Number
+End If
+
+If swActiveModel Is Nothing Then
     comError = Err.Number
     comDescription = Err.Description
-    WScript.Echo "ERR|ActiveDoc unavailable. COM=" & comError & "|" & comDescription
+    WScript.Echo "ERR|Active document object unavailable. COM=" & comError & "|" & comDescription
     swApp.CloseDoc swModel.GetTitle
     If startedByUs Then swApp.ExitApp
     WScript.Quit 13
