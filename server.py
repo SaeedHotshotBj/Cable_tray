@@ -128,98 +128,118 @@ class Handler(SimpleHTTPRequestHandler):
         super().end_headers()
 
     def pick_model(self):
-        # Do not create the file dialog inside PowerShell. The previous
-        # implementation could return immediately with an empty FileName when
-        # the dialog was not attached to the interactive Windows desktop.
-        #
-        # Run a tiny Python/Tk child process instead. Tk uses the native
-        # Windows Open dialog and the child inherits the same interactive
-        # Windows session as the server process, so the dialog is visible and
-        # the selected full filesystem path can be returned over stdout.
+        # Use the Windows native Common Dialog directly. This avoids both
+        # PowerShell and Tk child-process/window-focus issues and returns the
+        # real filesystem path needed by the SolidWorks automation bridge.
         if os.name != "nt":
             raise RuntimeError("The native model picker is only supported on Windows.")
 
-        picker_code = r'''
-import os
-import sys
-import tkinter as tk
-from tkinter import filedialog
+        import ctypes
+        from ctypes import wintypes
 
-root = tk.Tk()
-root.withdraw()
-try:
-    root.attributes("-topmost", True)
-except Exception:
-    pass
-root.update()
-try:
-    root.lift()
-    root.focus_force()
-except Exception:
-    pass
+        class OPENFILENAMEW(ctypes.Structure):
+            _fields_ = [
+                ("lStructSize", wintypes.DWORD),
+                ("hwndOwner", wintypes.HWND),
+                ("hInstance", wintypes.HINSTANCE),
+                ("lpstrFilter", wintypes.LPCWSTR),
+                ("lpstrCustomFilter", wintypes.LPWSTR),
+                ("nMaxCustFilter", wintypes.DWORD),
+                ("nFilterIndex", wintypes.DWORD),
+                ("lpstrFile", wintypes.LPWSTR),
+                ("nMaxFile", wintypes.DWORD),
+                ("lpstrFileTitle", wintypes.LPWSTR),
+                ("nMaxFileTitle", wintypes.DWORD),
+                ("lpstrInitialDir", wintypes.LPCWSTR),
+                ("lpstrTitle", wintypes.LPCWSTR),
+                ("Flags", wintypes.DWORD),
+                ("nFileOffset", wintypes.WORD),
+                ("nFileExtension", wintypes.WORD),
+                ("lpstrDefExt", wintypes.LPCWSTR),
+                ("lCustData", wintypes.LPARAM),
+                ("lpfnHook", ctypes.c_void_p),
+                ("lpTemplateName", wintypes.LPCWSTR),
+            ]
 
-desktop = os.path.join(os.path.expanduser("~"), "Desktop")
-if not os.path.isdir(desktop):
-    desktop = os.path.expanduser("~")
+        desktop = Path.home() / "Desktop"
+        if not desktop.is_dir():
+            desktop = Path.home()
 
-filetypes = [
-    ("Supported 3D/CAD models", "*.glb *.gltf *.obj *.stl *.sldasm *.sldprt"),
-    ("GLB / GLTF", "*.glb *.gltf"),
-    ("OBJ", "*.obj"),
-    ("STL", "*.stl"),
-    ("SolidWorks Assembly", "*.sldasm"),
-    ("SolidWorks Part", "*.sldprt"),
-    ("All files", "*.*"),
-]
+        # Windows Common Dialog filter syntax uses semicolon-separated masks.
+        filter_spec = (
+            "Supported 3D/CAD models\x00"
+            "*.glb;*.gltf;*.obj;*.stl;*.sldasm;*.sldprt\x00"
+            "GLB / GLTF\x00*.glb;*.gltf\x00"
+            "OBJ\x00*.obj\x00"
+            "STL\x00*.stl\x00"
+            "SolidWorks Assembly\x00*.sldasm\x00"
+            "SolidWorks Part\x00*.sldprt\x00"
+            "All files\x00*.*\x00"
+            "\x00"
+        )
 
-try:
-    selected = filedialog.askopenfilename(
-        parent=root,
-        title="Load 3D / CAD Model",
-        initialdir=desktop,
-        filetypes=filetypes,
-        multiple=False,
-    )
-    if selected:
-        print(os.path.abspath(selected), flush=True)
-finally:
-    root.destroy()
-'''
-        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        filename_buffer = ctypes.create_unicode_buffer(32768)
+        title_buffer = ctypes.create_unicode_buffer(260)
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        comdlg32 = ctypes.WinDLL("comdlg32", use_last_error=True)
+        user32.GetForegroundWindow.restype = wintypes.HWND
+        comdlg32.GetOpenFileNameW.argtypes = [ctypes.POINTER(OPENFILENAMEW)]
+        comdlg32.GetOpenFileNameW.restype = wintypes.BOOL
+        comdlg32.CommDlgExtendedError.restype = wintypes.DWORD
+
+        flags = (
+            0x00001000  # OFN_FILEMUSTEXIST
+            | 0x00000800  # OFN_PATHMUSTEXIST
+            | 0x00080000  # OFN_EXPLORER
+            | 0x00000008  # OFN_NOCHANGEDIR
+            | 0x00000004  # OFN_HIDEREADONLY
+        )
+
+        dialog = OPENFILENAMEW()
+        dialog.lStructSize = ctypes.sizeof(OPENFILENAMEW)
+        dialog.hwndOwner = user32.GetForegroundWindow()
+        dialog.lpstrFilter = filter_spec
+        dialog.nFilterIndex = 1
+        dialog.lpstrFile = ctypes.cast(filename_buffer, wintypes.LPWSTR)
+        dialog.nMaxFile = len(filename_buffer)
+        dialog.lpstrFileTitle = ctypes.cast(title_buffer, wintypes.LPWSTR)
+        dialog.nMaxFileTitle = len(title_buffer)
+        dialog.lpstrInitialDir = str(desktop)
+        dialog.lpstrTitle = "Load 3D / CAD Model"
+        dialog.Flags = flags
+
         log_event(
             "MODEL_PICKER_START",
-            picker="tkinter",
-            python=sys.executable,
-            desktop=str(Path.home() / "Desktop"),
-        )
-        completed = subprocess.run(
-            [sys.executable, "-c", picker_code],
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            timeout=300,
-            creationflags=creationflags,
+            picker="windows_common_dialog",
+            initial_directory=str(desktop),
+            owner_hwnd=int(dialog.hwndOwner or 0),
         )
 
-        stdout = (completed.stdout or "").strip()
-        stderr = (completed.stderr or "").strip()
-        log_event(
-            "MODEL_PICKER_RESULT",
-            picker="tkinter",
-            returncode=completed.returncode,
-            stdout=stdout[-2000:],
-            stderr=stderr[-2000:],
-        )
-
-        if completed.returncode != 0:
-            detail = stderr or stdout
-            raise RuntimeError(detail or f"Native model picker exited with code {completed.returncode}")
-
-        lines = [line.strip() for line in stdout.splitlines() if line.strip()]
-        if not lines:
+        if not comdlg32.GetOpenFileNameW(ctypes.byref(dialog)):
+            error_code = int(comdlg32.CommDlgExtendedError())
+            log_event(
+                "MODEL_PICKER_CANCELLED",
+                picker="windows_common_dialog",
+                common_dialog_error=error_code,
+            )
+            if error_code:
+                raise RuntimeError(
+                    f"Windows file dialog failed. CommonDialogError={error_code}"
+                )
             raise ValueError("No model file selected.")
 
-        p = Path(lines[-1]).expanduser().resolve()
+        selected = filename_buffer.value.strip()
+        log_event(
+            "MODEL_PICKER_SELECTED",
+            picker="windows_common_dialog",
+            selected=selected,
+        )
+
+        if not selected:
+            raise ValueError("Windows returned an empty model path.")
+
+        p = Path(selected).expanduser().resolve()
         allowed = {".glb", ".gltf", ".obj", ".stl", ".sldasm", ".sldprt"}
         ext = p.suffix.lower()
         if ext not in allowed:
