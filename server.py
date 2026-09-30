@@ -12,6 +12,9 @@ import platform
 import tempfile
 import time
 import uuid
+import struct
+import math
+import re
 
 HOST = "127.0.0.1"
 PORT = 8765
@@ -57,17 +60,117 @@ def json_response(handler, status_code, payload):
     handler.wfile.write(data)
 
 
+def _stl_binary_records(path):
+    data = path.read_bytes()
+    if len(data) < 84:
+        return None
+    count = struct.unpack_from("<I", data, 80)[0]
+    expected = 84 + count * 50
+    if expected != len(data):
+        return None
+    return [data[offset:offset + 50] for offset in range(84, len(data), 50)]
+
+
+def _stl_ascii_records(path):
+    text = path.read_text(encoding="utf-8", errors="ignore")
+    vertices = []
+    normal = (0.0, 0.0, 0.0)
+    records = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        lower = line.lower()
+        if lower.startswith("facet normal"):
+            parts = line.split()
+            if len(parts) >= 5:
+                try:
+                    normal = (float(parts[2]), float(parts[3]), float(parts[4]))
+                except ValueError:
+                    normal = (0.0, 0.0, 0.0)
+        elif lower.startswith("vertex"):
+            parts = line.split()
+            if len(parts) >= 4:
+                try:
+                    vertices.append((float(parts[1]), float(parts[2]), float(parts[3])))
+                except ValueError:
+                    pass
+                if len(vertices) == 3:
+                    records.append(struct.pack(
+                        "<3f3f3f3fH",
+                        normal[0], normal[1], normal[2],
+                        vertices[0][0], vertices[0][1], vertices[0][2],
+                        vertices[1][0], vertices[1][1], vertices[1][2],
+                        vertices[2][0], vertices[2][1], vertices[2][2],
+                        0,
+                    ))
+                    vertices = []
+    return records
+
+
+def _read_stl_records(path):
+    records = _stl_binary_records(path)
+    if records is not None:
+        return records, "binary"
+    return _stl_ascii_records(path), "ascii"
+
+
+def combine_stl_files(parts, output):
+    valid = []
+    total_triangles = 0
+    formats = {}
+    for part in parts:
+        try:
+            records, fmt = _read_stl_records(part)
+        except (OSError, UnicodeError, ValueError, struct.error):
+            continue
+        if not records:
+            continue
+        valid.append((part, records))
+        formats[fmt] = formats.get(fmt, 0) + 1
+        total_triangles += len(records)
+
+    if not valid:
+        raise RuntimeError("SolidWorks produced STL files, but none contained readable triangles.")
+
+    if total_triangles > 0xFFFFFFFF:
+        raise RuntimeError("Combined STL contains too many triangles.")
+
+    header = bytearray(80)
+    label = b"Cable_tray SolidWorks combined STL"
+    header[:len(label)] = label
+    with output.open("wb") as stream:
+        stream.write(header)
+        stream.write(struct.pack("<I", total_triangles))
+        for _, records in valid:
+            for record in records:
+                stream.write(record)
+
+    size = output.stat().st_size
+    expected = 84 + total_triangles * 50
+    if size != expected:
+        raise RuntimeError(
+            f"Combined STL size mismatch: expected {expected}, got {size}."
+        )
+    return {
+        "source_files": len(valid),
+        "triangles": total_triangles,
+        "formats": formats,
+        "size": size,
+    }
+
+
 def convert_solidworks_file(source):
-    cache_dir = Path(tempfile.gettempdir()) / "Cable_tray" / "solidworks"
-    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_root = Path(tempfile.gettempdir()) / "Cable_tray" / "solidworks"
+    cache_root.mkdir(parents=True, exist_ok=True)
     token = uuid.uuid4().hex
-    output = cache_dir / f"{token}.stl"
+    export_dir = cache_root / token
+    export_dir.mkdir(parents=True, exist_ok=True)
+    output = export_dir / f"{source.stem}.stl"
     bridge = ROOT / "solidworks_bridge.vbs"
     if not bridge.exists():
         raise RuntimeError("SolidWorks bridge script is missing.")
 
     command = ["cscript.exe", "//nologo", str(bridge), str(source), str(output)]
-    log_event("SOLIDWORKS_COMMAND_START", source=str(source), output=str(output), bridge=str(bridge), bridge_exists=bridge.exists())
+    log_event("SOLIDWORKS_COMMAND_START", source=str(source), output=str(output), export_dir=str(export_dir), bridge=str(bridge), bridge_exists=bridge.exists())
     completed = subprocess.run(
         command,
         capture_output=True,
@@ -77,17 +180,47 @@ def convert_solidworks_file(source):
 
     stdout = (completed.stdout or "").strip()
     stderr = (completed.stderr or "").strip()
+    stl_files = sorted(export_dir.rglob("*.stl"))
+    log_event(
+        "SOLIDWORKS_PROCESS_RESULT",
+        returncode=completed.returncode,
+        stdout=stdout[-6000:],
+        stderr=stderr[-6000:],
+        output_exists=output.exists(),
+        output_size=output.stat().st_size if output.exists() else 0,
+        stl_files=[str(p) for p in stl_files],
+    )
     print(f"SOLIDWORKS IMPORT: file={source} exit={completed.returncode}", flush=True)
-    log_event("SOLIDWORKS_PROCESS_RESULT", returncode=completed.returncode, stdout=stdout[-6000:], stderr=stderr[-6000:], output_exists=output.exists(), output_size=output.stat().st_size if output.exists() else 0)
     if stdout:
         print(f"SOLIDWORKS STDOUT: {stdout[-4000:]}", flush=True)
     if stderr:
         print(f"SOLIDWORKS STDERR: {stderr[-4000:]}", flush=True)
 
-    if completed.returncode != 0 or not output.exists() or output.stat().st_size == 0:
+    if completed.returncode != 0:
         log_event("SOLIDWORKS_PROCESS_FAILED", returncode=completed.returncode, output_exists=output.exists(), output_size=output.stat().st_size if output.exists() else 0)
         detail = stdout or stderr or f"cscript exited with code {completed.returncode}"
         raise RuntimeError(detail)
+
+    # Prefer the exact combined output produced by SolidWorks. If it did not
+    # honor the one-file preference but generated component STLs, combine those
+    # components in their assembly coordinates into one browser-ready STL.
+    if not output.exists() or output.stat().st_size == 0:
+        component_files = [p for p in stl_files if p.resolve() != output.resolve()]
+        if not component_files:
+            raise RuntimeError("SolidWorks completed without producing a usable STL file.")
+        merge = combine_stl_files(component_files, output)
+        log_event(
+            "SOLIDWORKS_COMPONENT_STL_COMBINED",
+            source=str(source),
+            output=str(output),
+            source_files=merge["source_files"],
+            triangles=merge["triangles"],
+            formats=merge["formats"],
+            output_size=merge["size"],
+        )
+
+    if output.stat().st_size == 0:
+        raise RuntimeError("The final SolidWorks STL is empty.")
 
     load_errors = 0
     warnings = 0
