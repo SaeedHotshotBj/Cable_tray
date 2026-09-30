@@ -68,7 +68,6 @@ $dialog.Dispose()
             capture_output=True,
             text=True,
             timeout=300,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         if completed.returncode != 0:
             detail = (completed.stderr or completed.stdout or "Windows file dialog failed.").strip()
