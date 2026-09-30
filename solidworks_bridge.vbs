@@ -3,7 +3,7 @@ Option Explicit
 Dim args, sourceFile, outputFile, sourceFolder, fileNameOnly
 Dim swApp, swModel, swActiveModel, swDocSpec, alreadyOpen
 Dim loadErrors, loadWarnings, saveErrors, saveWarnings, result
-Dim docType, startedByUs, attempts
+Dim docType, startedByUs, attempts, activateErrors, activationAttempts
 Dim specError, specWarning, comError, comDescription
 
 Set args = WScript.Arguments
@@ -128,26 +128,53 @@ If swModel Is Nothing Then
 End If
 
 WScript.Sleep 1500
-Err.Clear
-swApp.ActivateDoc3 swModel.GetTitle, True, 0
-WScript.Sleep 1000
 
-Err.Clear
-Set swActiveModel = swApp.ActiveDoc
-If swActiveModel Is Nothing Then
-    ' SOLIDWORKS can transiently reject ActiveDoc through COM immediately
-    ' after ActivateDoc3, even though the requested document is active.
-    ' The document object returned by GetOpenDocumentByName/OpenDoc7 is still
-    ' valid and is the object that must be exported.
+' ActivateDoc3 returns the ModelDoc2/ModelDoc object that it activated.
+' Do not discard that return value and then depend on ActiveDoc immediately:
+' SOLIDWORKS can transiently return Nothing for ActiveDoc over COM while the
+' activation is still settling.
+activateErrors = 0
+activationAttempts = 0
+Set swActiveModel = Nothing
+
+Do While activationAttempts < 10 And swActiveModel Is Nothing
+    activationAttempts = activationAttempts + 1
     Err.Clear
-    Set swActiveModel = swModel
-    WScript.Echo "BRIDGE_ACTIVE_DOC_FALLBACK|using_requested_document|COM=" & Err.Number
+    WScript.Echo "BRIDGE_ACTIVATE|attempt=" & activationAttempts & "|name=" & swModel.GetTitle
+
+    Set swActiveModel = swApp.ActivateDoc3(swModel.GetTitle, False, 0, activateErrors)
+
+    WScript.Echo "BRIDGE_ACTIVATE_RESULT|model=" & Not (swActiveModel Is Nothing) & "|errors=" & activateErrors & "|COM=" & Err.Number
+
+    ' swGenericActivateError = 1 means the document was not activated.
+    ' swDocNeedsRebuildWarning = 2 is a warning and still leaves the document active.
+    If Not swActiveModel Is Nothing And activateErrors <> 0 And activateErrors <> 2 Then
+        Set swActiveModel = Nothing
+    End If
+
+    If swActiveModel Is Nothing Then
+        Err.Clear
+        Set swModel = swApp.GetOpenDocumentByName(sourceFile)
+        If swModel Is Nothing Then
+            Err.Clear
+            Set swModel = swApp.GetOpenDocumentByName(fileNameOnly)
+        End If
+        If swActiveModel Is Nothing Then WScript.Sleep 1000
+    End If
+Loop
+
+If swActiveModel Is Nothing Then
+    ' Final compatibility check. Some SOLIDWORKS versions expose ActiveDoc
+    ' after the activation has settled even when the initial call returned Nothing.
+    Err.Clear
+    Set swActiveModel = swApp.ActiveDoc
+    WScript.Echo "BRIDGE_ACTIVE_DOC_FINAL_CHECK|model=" & Not (swActiveModel Is Nothing) & "|COM=" & Err.Number
 End If
 
 If swActiveModel Is Nothing Then
     comError = Err.Number
     comDescription = Err.Description
-    WScript.Echo "ERR|Active document object unavailable. COM=" & comError & "|" & comDescription
+    WScript.Echo "ERR|Active document object unavailable after activation. COM=" & comError & "|" & comDescription
     swApp.CloseDoc swModel.GetTitle
     If startedByUs Then swApp.ExitApp
     WScript.Quit 13
