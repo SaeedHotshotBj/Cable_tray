@@ -112,7 +112,8 @@ $dialog.Dispose()
                     "url": f"/api/model/source/{token}{ext}"
                 })
             except Exception as exc:
-                print(f"MODEL PICKER ERROR: {exc}", flush=True)\n                return json_response(self, 500, {"error": f"Model picker failed: {exc}"})
+                print(f"MODEL PICKER ERROR: {exc}", flush=True)
+                return json_response(self, 500, {"error": f"Model picker failed: {exc}"})
 
         if route == "/api/solidworks/import":
             try:
