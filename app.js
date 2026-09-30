@@ -9,6 +9,10 @@ const state = {
   objects: [], selected: null, tool: 'select', drawing: null, modelRoots: new Map(), measureStart: null
 };
 const $ = id => document.getElementById(id);
+
+// Register model loading before WebGL initialization so the native Windows
+// picker remains usable even if the graphics context cannot initialize.
+$('loadModelBtn').addEventListener('click', loadModel);
 const viewport = $('viewport');
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x080d12);
@@ -330,7 +334,7 @@ async function loadModel() {
     toast('Model load failed: ' + err.message);
   }
 }
-$('loadModelBtn').addEventListener('click', loadModel);
+
 function projectData() {
   return { schema: 'cable-tray-project', schema_version: 1, project: state.project, objects: state.objects.filter(function(o){ return o.kind !== 'model'; }).map(function(o){ return { id:o.id, kind:o.kind, name:o.name, points:o.points.map(function(p){ return {x:p.x*10,y:p.y*10,z:p.z*10}; }), diameter_mm:o.diameter_mm, width_mm:o.width_mm, height_mm:o.height_mm, specification:o.specification, material:o.material }; }) };
 }
