@@ -128,40 +128,104 @@ class Handler(SimpleHTTPRequestHandler):
         super().end_headers()
 
     def pick_model(self):
-        # Launch the native Windows OpenFileDialog from PowerShell in STA mode.
-        # The helper writes the selected path to stdout; cancellation returns no path.
-        ps = r'''
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-[System.Windows.Forms.Application]::EnableVisualStyles()
-$dialog = New-Object System.Windows.Forms.OpenFileDialog
-$dialog.Title = "Load 3D / CAD Model"
-$dialog.Filter = "Supported 3D/CAD models|*.glb;*.gltf;*.obj;*.stl;*.sldasm;*.sldprt|GLB / GLTF|*.glb;*.gltf|OBJ|*.obj|STL|*.stl|SolidWorks Assembly|*.sldasm|SolidWorks Part|*.sldprt|All files|*.*"
-$dialog.Multiselect = $false
-$dialog.CheckFileExists = $true
-$dialog.InitialDirectory = [Environment]::GetFolderPath("Desktop")
-[void]$dialog.ShowDialog()
-if ($dialog.FileName) { [Console]::Out.WriteLine($dialog.FileName) }
-$dialog.Dispose()
+        # Do not create the file dialog inside PowerShell. The previous
+        # implementation could return immediately with an empty FileName when
+        # the dialog was not attached to the interactive Windows desktop.
+        #
+        # Run a tiny Python/Tk child process instead. Tk uses the native
+        # Windows Open dialog and the child inherits the same interactive
+        # Windows session as the server process, so the dialog is visible and
+        # the selected full filesystem path can be returned over stdout.
+        if os.name != "nt":
+            raise RuntimeError("The native model picker is only supported on Windows.")
+
+        picker_code = r'''
+import os
+import sys
+import tkinter as tk
+from tkinter import filedialog
+
+root = tk.Tk()
+root.withdraw()
+try:
+    root.attributes("-topmost", True)
+except Exception:
+    pass
+root.update()
+try:
+    root.lift()
+    root.focus_force()
+except Exception:
+    pass
+
+desktop = os.path.join(os.path.expanduser("~"), "Desktop")
+if not os.path.isdir(desktop):
+    desktop = os.path.expanduser("~")
+
+filetypes = [
+    ("Supported 3D/CAD models", "*.glb *.gltf *.obj *.stl *.sldasm *.sldprt"),
+    ("GLB / GLTF", "*.glb *.gltf"),
+    ("OBJ", "*.obj"),
+    ("STL", "*.stl"),
+    ("SolidWorks Assembly", "*.sldasm"),
+    ("SolidWorks Part", "*.sldprt"),
+    ("All files", "*.*"),
+]
+
+try:
+    selected = filedialog.askopenfilename(
+        parent=root,
+        title="Load 3D / CAD Model",
+        initialdir=desktop,
+        filetypes=filetypes,
+        multiple=False,
+    )
+    if selected:
+        print(os.path.abspath(selected), flush=True)
+finally:
+    root.destroy()
 '''
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        log_event(
+            "MODEL_PICKER_START",
+            picker="tkinter",
+            python=sys.executable,
+            desktop=str(Path.home() / "Desktop"),
+        )
         completed = subprocess.run(
-            ["powershell.exe", "-NoLogo", "-NoProfile", "-STA", "-ExecutionPolicy", "Bypass", "-Command", ps],
+            [sys.executable, "-c", picker_code],
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=300,
+            creationflags=creationflags,
         )
+
+        stdout = (completed.stdout or "").strip()
+        stderr = (completed.stderr or "").strip()
+        log_event(
+            "MODEL_PICKER_RESULT",
+            picker="tkinter",
+            returncode=completed.returncode,
+            stdout=stdout[-2000:],
+            stderr=stderr[-2000:],
+        )
+
         if completed.returncode != 0:
-            detail = (completed.stderr or completed.stdout or "").strip()
-            raise RuntimeError(detail or f"Windows file dialog exited with code {completed.returncode}")
-        lines = [line.strip() for line in (completed.stdout or "").splitlines() if line.strip()]
+            detail = stderr or stdout
+            raise RuntimeError(detail or f"Native model picker exited with code {completed.returncode}")
+
+        lines = [line.strip() for line in stdout.splitlines() if line.strip()]
         if not lines:
             raise ValueError("No model file selected.")
-        p = Path(lines[-1]).resolve()
-        ext = p.suffix.lower()
+
+        p = Path(lines[-1]).expanduser().resolve()
         allowed = {".glb", ".gltf", ".obj", ".stl", ".sldasm", ".sldprt"}
+        ext = p.suffix.lower()
         if ext not in allowed:
             raise ValueError("This model format is not enabled yet.")
+        if not p.is_file():
+            raise ValueError("The selected model file no longer exists.")
         return p
 
     def do_POST(self):
