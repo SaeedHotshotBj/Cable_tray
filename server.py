@@ -46,35 +46,28 @@ class Handler(SimpleHTTPRequestHandler):
         super().end_headers()
 
     def pick_model(self):
-        # Run the native Windows file dialog in a separate STA PowerShell
-        # process. Tkinter is unreliable from ThreadingHTTPServer worker threads.
-        ps = r'''
-Add-Type -AssemblyName System.Windows.Forms
-[System.Windows.Forms.Application]::EnableVisualStyles()
-$dialog = New-Object System.Windows.Forms.OpenFileDialog
-$dialog.Title = "Load 3D / CAD Model"
-$dialog.Filter = "Supported 3D/CAD models|*.glb;*.gltf;*.obj;*.stl;*.sldasm;*.sldprt|GLB / GLTF|*.glb;*.gltf|OBJ|*.obj|STL|*.stl|SolidWorks Assembly|*.sldasm|SolidWorks Part|*.sldprt|All files|*.*"
-$dialog.Multiselect = $false
-$dialog.CheckFileExists = $true
-$dialog.RestoreDirectory = $true
-$result = $dialog.ShowDialog()
-if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
-    [Console]::WriteLine($dialog.FileName)
-}
-$dialog.Dispose()
-'''
+        # Use the Windows Common Item Dialog from a separate process.
+        # This avoids GUI dialogs running inside ThreadingHTTPServer worker threads.
+        picker = ROOT / "windows_model_picker.py"
+        if not picker.exists():
+            raise RuntimeError("Windows model picker helper is missing.")
+
+        python_exe = Path(os.sys.executable)
         completed = subprocess.run(
-            ["powershell.exe", "-NoProfile", "-STA", "-ExecutionPolicy", "Bypass", "-Command", ps],
+            [str(python_exe), str(picker)],
             capture_output=True,
             text=True,
             timeout=300,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         if completed.returncode != 0:
             detail = (completed.stderr or completed.stdout or "Windows file dialog failed.").strip()
             raise RuntimeError(detail)
+
         selected = (completed.stdout or "").strip().splitlines()
         if not selected:
             raise ValueError("No model file selected.")
+
         p = Path(selected[-1]).resolve()
         ext = p.suffix.lower()
         allowed = {".glb", ".gltf", ".obj", ".stl", ".sldasm", ".sldprt"}
