@@ -46,29 +46,36 @@ class Handler(SimpleHTTPRequestHandler):
         super().end_headers()
 
     def pick_model(self):
-        # Use the Windows Common Item Dialog from a separate process.
-        # This avoids GUI dialogs running inside ThreadingHTTPServer worker threads.
-        picker = ROOT / "windows_model_picker.py"
-        if not picker.exists():
-            raise RuntimeError("Windows model picker helper is missing.")
-
-        python_exe = Path(os.sys.executable)
+        # Launch the native Windows OpenFileDialog from PowerShell in STA mode.
+        # The helper writes the selected path to stdout; cancellation returns no path.
+        ps = r'''
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+[System.Windows.Forms.Application]::EnableVisualStyles()
+$dialog = New-Object System.Windows.Forms.OpenFileDialog
+$dialog.Title = "Load 3D / CAD Model"
+$dialog.Filter = "Supported 3D/CAD models|*.glb;*.gltf;*.obj;*.stl;*.sldasm;*.sldprt|GLB / GLTF|*.glb;*.gltf|OBJ|*.obj|STL|*.stl|SolidWorks Assembly|*.sldasm|SolidWorks Part|*.sldprt|All files|*.*"
+$dialog.Multiselect = $false
+$dialog.CheckFileExists = $true
+$dialog.InitialDirectory = [Environment]::GetFolderPath("Desktop")
+[void]$dialog.ShowDialog()
+if ($dialog.FileName) { [Console]::Out.WriteLine($dialog.FileName) }
+$dialog.Dispose()
+'''
         completed = subprocess.run(
-            [str(python_exe), str(picker)],
+            ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-STA", "-Command", ps],
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=300,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         if completed.returncode != 0:
-            detail = (completed.stderr or completed.stdout or "Windows file dialog failed.").strip()
-            raise RuntimeError(detail)
-
-        selected = (completed.stdout or "").strip().splitlines()
-        if not selected:
+            detail = (completed.stderr or completed.stdout or "").strip()
+            raise RuntimeError(detail or f"Windows file dialog exited with code {completed.returncode}")
+        lines = [line.strip() for line in (completed.stdout or "").splitlines() if line.strip()]
+        if not lines:
             raise ValueError("No model file selected.")
-
-        p = Path(selected[-1]).resolve()
+        p = Path(lines[-1]).resolve()
         ext = p.suffix.lower()
         allowed = {".glb", ".gltf", ".obj", ".stl", ".sldasm", ".sldprt"}
         if ext not in allowed:
@@ -105,7 +112,7 @@ class Handler(SimpleHTTPRequestHandler):
                     "url": f"/api/model/source/{token}{ext}"
                 })
             except Exception as exc:
-                return json_response(self, 500, {"error": f"Model picker failed: {exc}"})
+                print(f"MODEL PICKER ERROR: {exc}", flush=True)\n                return json_response(self, 500, {"error": f"Model picker failed: {exc}"})
 
         if route == "/api/solidworks/import":
             try:
