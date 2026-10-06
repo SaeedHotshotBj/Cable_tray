@@ -51,6 +51,7 @@ viewport.appendChild(renderer.domElement);
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
 controls.dampingFactor = 0.07;
+controls.zoomToCursor = true;
 controls.target.set(0, 1500, 0);
 scene.add(new THREE.HemisphereLight(0xbfd8ef, 0x1a2632, 2.2));
 const sun = new THREE.DirectionalLight(0xffffff, 1.8);
@@ -362,15 +363,59 @@ function autoRoutePoint(event) {
   return point;
 }
 
-function offsetAutoRoutePoints(points, clearanceMm) {
+function detectAutoRouteOffsetAxis(points) {
+  if (!points || points.length < 2) return 'z';
+
+  const ranges = { x: 0, y: 0, z: 0 };
+  ['x', 'y', 'z'].forEach(function(axis){
+    let min = Infinity, max = -Infinity;
+    points.forEach(function(point){
+      min = Math.min(min, point[axis]);
+      max = Math.max(max, point[axis]);
+    });
+    ranges[axis] = max - min;
+  });
+
+  const span = Math.max(ranges.x, ranges.y, ranges.z);
+  if (span < 1e-9) return 'z';
+
+  const tolerance = Math.max(mmToScene(0.5), span * 0.02);
+  const nearlyConstant = ['x', 'y', 'z'].filter(function(axis){
+    return ranges[axis] <= tolerance;
+  });
+
+  if (nearlyConstant.length) {
+    nearlyConstant.sort(function(a,b){ return ranges[a] - ranges[b]; });
+    return nearlyConstant[0];
+  }
+
+  const overall = points[points.length - 1].clone().sub(points[0]);
+  if (overall.lengthSq() < 1e-12) {
+    overall.set(
+      ranges.x ? 1 : 0,
+      ranges.y ? 1 : 0,
+      ranges.z ? 1 : 0
+    );
+  }
+  overall.normalize();
+
+  return ['x', 'y', 'z'].sort(function(a,b){
+    return Math.abs(overall[a]) - Math.abs(overall[b]);
+  })[0];
+}
+
+function offsetAutoRoutePoints(points, clearanceMm, axisMode) {
+  const axis = axisMode === 'x' || axisMode === 'y' || axisMode === 'z'
+    ? axisMode
+    : detectAutoRouteOffsetAxis(points);
   const offset = mmToScene(clearanceMm);
+  const vector = new THREE.Vector3();
+  vector[axis] = offset;
+
   return points.map(function(point){
-    const normal = point.__routeNormal
-      ? point.__routeNormal.clone().normalize()
-      : new THREE.Vector3(0, 1, 0);
-    const routePoint = point.clone().add(normal.multiplyScalar(offset));
+    const routePoint = point.clone().add(vector);
     routePoint.__routeSnapToModel = true;
-    routePoint.__routeNormal = normal;
+    routePoint.__routeOffsetAxis = axis;
     return routePoint;
   });
 }
@@ -450,8 +495,10 @@ function finishAutoRoute() {
   });
 
   if (type === 'tray') {
+    const axisMode = $('autoRouteOffsetAxis').value;
+    const axisLabel = axisMode === 'auto' ? 'Auto' : axisMode.toUpperCase();
     const rawClearance = window.prompt(
-      'Tray distance from the selected points (mm). Positive = along the selected surface normal, negative = opposite direction.',
+      'Tray offset from the drawn line (mm). Positive = +' + axisLabel + ', negative = -' + axisLabel + '.',
       String(state.autoRouteClearanceMm)
     );
     if (rawClearance === null) return;
@@ -463,7 +510,7 @@ function finishAutoRoute() {
     }
 
     state.autoRouteClearanceMm = clearanceMm;
-    routePoints = offsetAutoRoutePoints(points, clearanceMm);
+    routePoints = offsetAutoRoutePoints(points, clearanceMm, axisMode);
   }
 
   const beforeHistory = captureDesignState();
@@ -518,6 +565,50 @@ function routeCenter(points) {
   return center.multiplyScalar(1 / points.length);
 }
 
+function routeBendGeometry(points, index, radius) {
+  if (!points || index <= 0 || index >= points.length - 1) return null;
+
+  const prev = points[index - 1];
+  const cur = points[index];
+  const next = points[index + 1];
+  const inVector = cur.clone().sub(prev);
+  const outVector = next.clone().sub(cur);
+  const inLength = inVector.length();
+  const outLength = outVector.length();
+  if (inLength < 1e-9 || outLength < 1e-9) return null;
+
+  const inDir = inVector.normalize();
+  const outDir = outVector.normalize();
+  const turnDot = THREE.MathUtils.clamp(inDir.dot(outDir), -1, 1);
+  const turnAngle = Math.acos(turnDot);
+  if (turnAngle < 1e-6) {
+    return {
+      entry: cur.clone(),
+      exit: cur.clone(),
+      radius: 0,
+      angle: 0
+    };
+  }
+
+  const tangentFactor = Math.tan(turnAngle * 0.5);
+  if (!Number.isFinite(tangentFactor) || tangentFactor < 1e-9) return null;
+
+  const maxRadius = Math.min(
+    Number(radius) || 0,
+    inLength / (2 * tangentFactor),
+    outLength / (2 * tangentFactor)
+  );
+  const localRadius = Math.max(0, maxRadius);
+  const tangentLength = localRadius * tangentFactor;
+
+  return {
+    entry: cur.clone().sub(inDir.clone().multiplyScalar(tangentLength)),
+    exit: cur.clone().add(outDir.clone().multiplyScalar(tangentLength)),
+    radius: localRadius,
+    angle: turnAngle
+  };
+}
+
 function roundedRouteCurve(points, radius) {
   const path = new THREE.CurvePath();
   if (points.length < 2) return path;
@@ -534,16 +625,14 @@ function roundedRouteCurve(points, radius) {
   exits[points.length - 1] = points[points.length - 1].clone();
 
   for (let i = 1; i < points.length - 1; i++) {
-    const prev = points[i - 1];
-    const cur = points[i];
-    const next = points[i + 1];
-    const inLength = cur.distanceTo(prev);
-    const outLength = next.distanceTo(cur);
-    const localRadius = Math.max(0, Math.min(radius, inLength * 0.35, outLength * 0.35));
-    const inDir = cur.clone().sub(prev).normalize();
-    const outDir = next.clone().sub(cur).normalize();
-    entries[i] = cur.clone().sub(inDir.multiplyScalar(localRadius));
-    exits[i] = cur.clone().add(outDir.multiplyScalar(localRadius));
+    const bend = routeBendGeometry(points, i, radius);
+    if (!bend) {
+      entries[i] = points[i].clone();
+      exits[i] = points[i].clone();
+    } else {
+      entries[i] = bend.entry;
+      exits[i] = bend.exit;
+    }
   }
 
   let cursor = points[0].clone();
@@ -729,16 +818,14 @@ function routeVisual(obj) {
     routeExits[localPoints.length - 1] = localPoints[localPoints.length - 1].clone();
 
     for (let i = 1; i < localPoints.length - 1; i++) {
-      const prev = localPoints[i - 1];
-      const cur = localPoints[i];
-      const next = localPoints[i + 1];
-      const inLength = cur.distanceTo(prev);
-      const outLength = next.distanceTo(cur);
-      const localRadius = Math.max(0, Math.min(curveRadius, inLength * 0.35, outLength * 0.35));
-      const inDir = cur.clone().sub(prev).normalize();
-      const outDir = next.clone().sub(cur).normalize();
-      routeEntries[i] = cur.clone().sub(inDir.multiplyScalar(localRadius));
-      routeExits[i] = cur.clone().add(outDir.multiplyScalar(localRadius));
+      const bend = routeBendGeometry(localPoints, i, curveRadius);
+      if (!bend) {
+        routeEntries[i] = localPoints[i].clone();
+        routeExits[i] = localPoints[i].clone();
+      } else {
+        routeEntries[i] = bend.entry;
+        routeExits[i] = bend.exit;
+      }
     }
 
     // Straight runs stop cleanly at the tangent points of each bend.
