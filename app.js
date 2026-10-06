@@ -1431,7 +1431,7 @@ function pickSurfaceFromEvent(event) {
   toast('Surface selected');
 }
 
-function surfaceAlignmentRotationfunction surfaceAlignmentRotation(o, surfaceNormal, mode, angleDeg) {
+function surfaceAlignmentRotation(o, surfaceNormal, mode, angleDeg) {
   const rot = o.rotation_deg || { x: 0, y: 0, z: 0 };
   const currentEuler = new THREE.Euler(
     THREE.MathUtils.degToRad(Number(rot.x) || 0),
@@ -1587,7 +1587,7 @@ function alignObjectToSurface(reference,source) {
   toast('Second surface aligned to first surface');
 }
 
-function renderScenefunction renderScene() {
+function renderScene() {
   const box = $('sceneList');
   if (!state.objects.length) { box.innerHTML = '<div class="hint" style="padding:10px">No objects yet.</div>'; return; }
   box.innerHTML = state.objects.map(function(o){
