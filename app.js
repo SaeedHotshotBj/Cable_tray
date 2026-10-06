@@ -239,6 +239,10 @@ function routeVisual(obj) {
     const height = mmToScene(obj.height_mm);
     const sheet = Math.max(0.18, mmToScene(Math.min(obj.width_mm, obj.height_mm) * 0.035));
     const rail = Math.max(0.22, sheet * 1.35);
+    const postPitch = Math.max(mmToScene(180), Math.min(mmToScene(350), width * 0.65));
+    const slotPitch = Math.max(mmToScene(120), Math.min(mmToScene(220), width * 0.42));
+    const slotGap = Math.max(mmToScene(55), Math.min(mmToScene(100), slotPitch * 0.42));
+
     function addOrientedPart(geometry, position, direction) {
       const mesh = new THREE.Mesh(geometry, mat);
       mesh.position.copy(position);
@@ -258,18 +262,19 @@ function routeVisual(obj) {
       if (sideDir.lengthSq() < 1e-6) sideDir.set(1, 0, 0);
       sideDir.normalize();
 
-      // Continuous sheet-metal bottom: clean solid appearance without perforation.
-      addOrientedPart(
-        new RoundedBoxGeometry(
-          Math.max(width, 0.2),
-          sheet,
-          Math.max(len, sheet * 2),
-          4,
-          Math.min(sheet * 0.45, Math.max(len, sheet * 2) * 0.08)
-        ),
-        centerSeg.clone().setY(-height * 0.5 + sheet * 0.5),
-        dir
-      );
+      // Bottom plate: repeated transverse sections create visible perforation gaps.
+      const count = Math.max(2, Math.floor(len / slotPitch));
+      const pitch = len / count;
+      const stripLength = Math.max(sheet * 1.5, pitch - slotGap);
+      for (let s = 0; s < count; s++) {
+        const t = (s + 0.5) / count;
+        const p = a.clone().lerp(b, t);
+        addOrientedPart(
+          new RoundedBoxGeometry(Math.max(width, 0.2), sheet, stripLength, 3, Math.min(sheet * 0.35, stripLength * 0.18)),
+          new THREE.Vector3(p.x, -height * 0.5 + sheet * 0.5, p.z),
+          dir
+        );
+      }
 
       // Side walls: lower/upper continuous rails + vertical perforation ribs.
       for (const side of [-1, 1]) {
