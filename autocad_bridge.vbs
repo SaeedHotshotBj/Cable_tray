@@ -29,12 +29,27 @@ WScript.Echo "BRIDGE_START|source=" & sourceFile & "|output=" & outputFile
 
 On Error Resume Next
 
-Err.Clear
-Set acadApp = GetObject(, "AutoCAD.Application")
-If Err.Number <> 0 Or acadApp Is Nothing Then
+Dim progIds, progIdIndex
+progIds = Array("AutoCAD.Application", "AutoCAD.Application.26.0", "AutoCAD.Application.25.1", "AutoCAD.Application.25.0", "AutoCAD.Application.24.3", "AutoCAD.Application.24.2", "AutoCAD.Application.24.1", "AutoCAD.Application.24.0", "AutoCAD.Application.23.1", "AutoCAD.Application.23.0")
+Set acadApp = Nothing
+
+For progIdIndex = 0 To UBound(progIds)
     Err.Clear
-    Set acadApp = CreateObject("AutoCAD.Application")
-    startedByUs = True
+    Set acadApp = GetObject("", progIds(progIdIndex))
+    If Err.Number = 0 And Not acadApp Is Nothing Then Exit For
+    Set acadApp = Nothing
+Next
+
+If acadApp Is Nothing Then
+    For progIdIndex = 0 To UBound(progIds)
+        Err.Clear
+        Set acadApp = CreateObject(progIds(progIdIndex))
+        If Err.Number = 0 And Not acadApp Is Nothing Then
+            startedByUs = True
+            Exit For
+        End If
+        Set acadApp = Nothing
+    Next
 End If
 
 If Err.Number <> 0 Or acadApp Is Nothing Then
