@@ -7,6 +7,7 @@ import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
 import { OBJExporter } from 'three/addons/exporters/OBJExporter.js';
 import { STLExporter } from 'three/addons/exporters/STLExporter.js';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
+import { ObjectLoader } from 'three/addons/loaders/ObjectLoader.js';
 
 const state = {
   project: { name: 'Factory Cable Routing', units: 'mm', schema_version: 1 },
@@ -16,6 +17,7 @@ const state = {
   surfacePickMode: false, surfacePick: null,
   measureStart: null, measurements: [], measurementsVisible: true,
   selectedMeasurementId: null,
+  surfaceAlignStart: null,
   clipboard: null,
   undoStack: [], redoStack: [],
   restoringHistory: false
@@ -844,6 +846,10 @@ function formatDistance(meters) {
   return mm >= 1000 ? (mm / 1000).toFixed(3) + ' m' : mm.toFixed(1) + ' mm';
 }
 
+function getProjectRoot(objectId) {
+  return state.modelRoots.get(objectId) || state.routeRoots.get(objectId) || null;
+}
+
 function measurementTargetFromEvent(event) {
   pointerRay(event);
 
@@ -880,9 +886,55 @@ function measurementTargetFromEvent(event) {
     normal: hit.face.normal.clone().transformDirection(hit.object.matrixWorld).normalize(),
     modelId: modelObject && modelObject.kind === 'model' ? objectId : null,
     objectId: objectId,
+    root: root,
+    localPoint: root.worldToLocal(point.clone()),
+    localNormal: normal.clone(),
     object: hit.object,
     faceIndex: hit.faceIndex
   };
+}
+
+function makeMeasurementAnchor(target) {
+  if (!target || !target.objectId || !target.localPoint) return null;
+  return {
+    objectId: target.objectId,
+    localPoint: { x: target.localPoint.x, y: target.localPoint.y, z: target.localPoint.z },
+    localNormal: target.localNormal ? { x: target.localNormal.x, y: target.localNormal.y, z: target.localNormal.z } : null
+  };
+}
+
+function resolveMeasurementAnchor(anchor, fallback) {
+  if (!anchor || !anchor.objectId) return fallback ? fallback.clone() : new THREE.Vector3();
+  const root = getProjectRoot(anchor.objectId);
+  if (!root) return fallback ? fallback.clone() : new THREE.Vector3();
+  return root.localToWorld(new THREE.Vector3(anchor.localPoint.x, anchor.localPoint.y, anchor.localPoint.z));
+}
+
+function resolveMeasurementNormal(anchor, fallback) {
+  if (!anchor || !anchor.objectId || !anchor.localNormal) return fallback ? fallback.clone().normalize() : null;
+  const root = getProjectRoot(anchor.objectId);
+  if (!root) return fallback ? fallback.clone().normalize() : null;
+  return new THREE.Vector3(anchor.localNormal.x, anchor.localNormal.y, anchor.localNormal.z)
+    .transformDirection(root.matrixWorld)
+    .normalize();
+}
+
+function syncMeasurements() {
+  state.measurements.forEach(function(m){
+    m.start = resolveMeasurementAnchor(m.start_anchor, m.start);
+    m.end = resolveMeasurementAnchor(m.end_anchor, m.end);
+    const startNormal = resolveMeasurementNormal(m.start_anchor, m.start_normal);
+    const endNormal = resolveMeasurementNormal(m.end_anchor, m.end_normal);
+    let dimensionEnd = m.end.clone();
+    let distance = m.start.distanceTo(m.end);
+    if (m.kind === 'surface' && startNormal && endNormal && Math.abs(startNormal.dot(endNormal)) >= 0.95) {
+      const signed = m.end.clone().sub(m.start).dot(startNormal);
+      dimensionEnd = m.start.clone().add(startNormal.clone().multiplyScalar(signed));
+      distance = Math.abs(signed);
+    }
+    m.dimensionEnd = dimensionEnd;
+    m.distance_m = sceneToM(distance);
+  });
 }
 
 function clearSurfaceSelectionVisuals() {
@@ -968,7 +1020,7 @@ function rebuildMeasurements() {
 
   state.measurements.forEach(function(m){
     const selected = m.id === state.selectedMeasurementId;
-    const geometry = new THREE.BufferGeometry().setFromPoints([m.start, m.end]);
+    const geometry = new THREE.BufferGeometry().setFromPoints([m.start, m.dimensionEnd || m.end]);
     const material = new THREE.LineBasicMaterial({
       color: selected ? 0xffffff : (m.kind === 'surface' ? 0xffc857 : 0x66d9ff),
       transparent: true,
@@ -1005,7 +1057,7 @@ function updateMeasurementOverlay() {
   const rect=renderer.domElement.getBoundingClientRect();
   state.measurements.forEach(function(m){
     if(!m.label)return;
-    const mid=m.start.clone().add(m.end).multiplyScalar(0.5);
+    const mid=m.start.clone().add(m.dimensionEnd || m.end).multiplyScalar(0.5);
     const projected=mid.project(camera);
     const visible=projected.z>=-1 && projected.z<=1 && projected.x>=-1.15 && projected.x<=1.15 && projected.y>=-1.15 && projected.y<=1.15;
     m.label.style.display=visible?'block':'none';
@@ -1039,7 +1091,9 @@ function addMeasurement(first,second) {
     end:end,
     distance_m:sceneToM(distance),
     start_normal:first.normal?first.normal.clone():null,
-    end_normal:second.normal?second.normal.clone():null
+    end_normal:second.normal?second.normal.clone():null,
+    start_anchor:makeMeasurementAnchor(first),
+    end_anchor:makeMeasurementAnchor(second)
   };
   state.measurements.push(m);
   state.selectedMeasurementId = m.id;
@@ -1733,6 +1787,7 @@ setTool('select'); rebuildMeasurements(); renderMeasurementsToggle(); renderMeas
 function animate(){
   requestAnimationFrame(animate);
   controls.update();
+  syncMeasurements();
   updateMeasurementOverlay();
   renderer.render(scene,camera);
 }
