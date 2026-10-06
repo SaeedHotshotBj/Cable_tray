@@ -386,7 +386,7 @@ function resetAutoRoutePoints() {
   toast('Auto Route points cleared');
 }
 
-function createRoute(type, points) {function createRoute(type, points) {
+function createRoute(type, points) {
   const cable = type === 'cable';
   const dia = Number($('defaultCableDiameter').value) || 24;
   const width = Number($('defaultTrayWidth').value) || 300;
