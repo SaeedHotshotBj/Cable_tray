@@ -853,7 +853,6 @@ renderer.domElement.addEventListener('click', function(e){
     if (!state.autoRouteStart) {
       state.autoRouteStart = point;
       state.autoRoutePendingEnd = null;
-      showAutoRoutePreview(point, point);
       clearAutoRoutePreview();
       const marker = new THREE.Mesh(
         new THREE.SphereGeometry(Math.max(2, mmToScene(40)), 16, 16),
