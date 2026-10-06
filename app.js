@@ -14,8 +14,14 @@ const $ = id => document.getElementById(id);
 // picker remains usable even if the graphics context cannot initialize.
 window.CableTrayAcceptModel = async function(selected) {
   if (!selected || !selected.url) throw new Error('The model picker did not return a loadable model.');
+  const url = new URL(selected.url, window.location.href).href;
+  window.CableTrayDebugLog && window.CableTrayDebugLog('INFO', 'MODEL_ENGINE_START', {
+    name: selected.name,
+    format: selected.format,
+    url: url
+  });
   status('Loading model...');
-  await importModelFile(selected.url, selected.name, selected.format || 'STL');
+  await importModelFile(url, selected.name, selected.format || 'STL');
 };
 
 const viewport = $('viewport');
@@ -280,67 +286,6 @@ async function importModelFile(fileUrl, displayName, format) {
     status('Ready');
     toast('Import failed: ' + err.message);
     throw err;
-  }
-}
-
-async function loadSolidWorksFromPath(path, name) {
-  const response = await fetch('/api/cad/import', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ path: path })
-  });
-  const result = await response.json();
-  if (!response.ok || !result.url) throw new Error(result.error || 'SolidWorks import failed');
-  const data = await fetch(result.url).then(function(r){
-    if (!r.ok) throw new Error('Converted model could not be downloaded');
-    return r.arrayBuffer();
-  });
-  const geometry = new STLLoader().parse(data);
-  geometry.computeVertexNormals();
-  const root = new THREE.Mesh(
-    geometry,
-    new THREE.MeshStandardMaterial({ color: 0x9ca8b2, metalness: 0.45, roughness: 0.65 })
-  );
-  const objectId = id('solidworks');
-  root.userData.objectId = objectId;
-  scene.add(root);
-  state.modelRoots.set(objectId, root);
-  state.objects.push({
-    id: objectId,
-    kind: 'model',
-    name: result.name || name,
-    source: path,
-    format: result.format || 'SolidWorks',
-    native_format: result.native_format || 'SLDASM',
-    importer: 'SolidWorks Automation',
-    warnings: result.warnings || 0,
-    load_errors: result.load_errors || 0
-  });
-  state.selected = objectId;
-  fitObject(root);
-  render();
-  status('Model loaded');
-  toast((result.name || name) + ' loaded');
-}
-
-async function loadModel() {
-  try {
-    status('Select a model file...');
-    const pick = await fetch('/api/model/pick', { method: 'POST' });
-    const selected = await pick.json();
-    if (!pick.ok || !selected.path) throw new Error(selected.error || 'Model selection cancelled');
-    const ext = selected.extension;
-    if (ext === '.sldasm' || ext === '.sldprt') {
-      status('Opening SolidWorks model...');
-      await loadSolidWorksFromPath(selected.path, selected.name);
-    } else {
-      status('Loading model...');
-      await importModelFile(selected.url, selected.name, selected.format);
-    }
-  } catch (err) {
-    console.error(err);
-    status('Ready');
-    toast('Model load failed: ' + err.message);
   }
 }
 
