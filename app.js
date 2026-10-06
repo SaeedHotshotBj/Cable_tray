@@ -262,19 +262,18 @@ function routeVisual(obj) {
       if (sideDir.lengthSq() < 1e-6) sideDir.set(1, 0, 0);
       sideDir.normalize();
 
-      // Bottom plate: repeated transverse sections create visible perforation gaps.
-      const count = Math.max(2, Math.floor(len / slotPitch));
-      const pitch = len / count;
-      const stripLength = Math.max(sheet * 1.5, pitch - slotGap);
-      for (let s = 0; s < count; s++) {
-        const t = (s + 0.5) / count;
-        const p = a.clone().lerp(b, t);
-        addOrientedPart(
-          new RoundedBoxGeometry(Math.max(width, 0.2), sheet, stripLength, 3, Math.min(sheet * 0.35, stripLength * 0.18)),
-          new THREE.Vector3(p.x, -height * 0.5 + sheet * 0.5, p.z),
-          dir
-        );
-      }
+      // Continuous solid bottom plate: no perforation or mesh pattern.
+      addOrientedPart(
+        new RoundedBoxGeometry(
+          Math.max(width, 0.2),
+          sheet,
+          Math.max(len, sheet * 2),
+          3,
+          Math.min(sheet * 0.35, Math.max(len, sheet * 2) * 0.08)
+        ),
+        centerSeg.clone().setY(-height * 0.5 + sheet * 0.5),
+        dir
+      );
 
       // Side walls: lower/upper continuous rails + vertical perforation ribs.
       for (const side of [-1, 1]) {
