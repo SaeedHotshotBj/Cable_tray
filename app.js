@@ -1349,7 +1349,7 @@ function addMeasurement(first,second) {
   toast((m.kind==='surface'?'Surface distance: ':'Distance: ')+formatDistance(m.distance_m));
 }
 
-function toggleMeasurementsfunction toggleMeasurements() {
+function toggleMeasurements() {
   state.measurementsVisible=!state.measurementsVisible;
   measurementRoot.visible=state.measurementsVisible;
   updateMeasurementOverlay();
