@@ -195,9 +195,14 @@ renderer.domElement.addEventListener('click', function(e){
     return;
   }
   if (state.tool === 'measure') {
-    const p = groundPoint(e); if (!p) return;
-    if (!state.measureStart) { state.measureStart = p; toast('Measurement start set'); }
-    else { toast('Distance: ' + (sceneToM(state.measureStart.distanceTo(p))).toFixed(3) + ' m'); state.measureStart = null; }
+    const p = routePoint(e); if (!p) return;
+    if (!state.measureStart) {
+      state.measureStart = p.clone();
+      toast('Measurement start set');
+    } else {
+      toast('Distance: ' + (sceneToM(state.measureStart.distanceTo(p))).toFixed(3) + ' m');
+      state.measureStart = null;
+    }
     return;
   }
   if (state.tool !== 'select') return;
