@@ -312,8 +312,7 @@ $('newProjectBtn').addEventListener('click', function(){
 $('exportBoqBtn').addEventListener('click', function(){
   const rows = [['Item','Specification','Name','Quantity','Unit','Elbows']];
   state.objects.filter(function(o){ return o.kind === 'cable' || o.kind === 'tray'; }).forEach(function(o){ rows.push([o.kind === 'cable' ? 'Cable' : 'Cable Tray', o.specification, o.name, lengthOf(o.points).toFixed(3), 'm', String(elbows(o.points))]); });
-  const csv = rows.map(function(r){ return r.map(function(v){ return '"' + String(v).replace(/"/g,'""') + '"'; }).join(','); }).join('
-');
+  const csv = rows.map(function(r){ return r.map(function(v){ return '"' + String(v).replace(/"/g,'""') + '"'; }).join(','); }).join('\\n');
   const blob = new Blob([csv], { type:'text/csv;charset=utf-8' }); const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = slug(state.project.name) + '_BOQ.csv'; a.click(); URL.revokeObjectURL(a.href);
 });
 function slug(v){ return String(v || 'cable-tray-project').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/(^-|-$)/g,'') || 'cable-tray-project'; }
