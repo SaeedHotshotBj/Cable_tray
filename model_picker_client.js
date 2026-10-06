@@ -85,14 +85,23 @@
         throw new Error('3D model engine is not ready.');
       }
 
+      var loadUrl = new URL(result.url, window.location.href).href;
       window.CableTrayDebugLog('INFO', 'HANDOFF_TO_MODEL_ENGINE', {
         extension: result.extension,
         format: result.format,
         name: result.name,
-        hasUrl: !!result.url
+        hasUrl: !!result.url,
+        loadUrl: loadUrl
       });
 
-      await window.CableTrayAcceptModel(result);
+      await window.CableTrayAcceptModel({
+        name: result.name,
+        extension: result.extension,
+        format: result.format,
+        native_format: result.native_format,
+        url: loadUrl,
+        path: result.path
+      });
 
       window.CableTrayDebugLog('INFO', 'MODEL_LOAD_COMPLETE');
     } catch (error) {
