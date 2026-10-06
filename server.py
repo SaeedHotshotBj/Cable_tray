@@ -437,7 +437,7 @@ class Handler(SimpleHTTPRequestHandler):
                 print(f"MODEL PICKER ERROR: {exc}", flush=True)
                 return json_response(self, 500, {"error": f"Model picker failed: {exc}"})
 
-        if route == "/api/solidworks/import":
+        if route == "/api/cad/import":
             try:
                 length = int(self.headers.get("Content-Length", "0"))
                 if length <= 0 or length > 32 * 1024:
@@ -446,19 +446,34 @@ class Handler(SimpleHTTPRequestHandler):
                 payload = json.loads(body.decode("utf-8"))
                 source = Path(str(payload.get("path", ""))).expanduser().resolve()
                 if not source.exists():
-                    return json_response(self, 400, {"error": "Selected SolidWorks file does not exist."})
-                if source.suffix.lower() not in {".sldasm", ".sldprt"}:
-                    return json_response(self, 400, {"error": "Only .SLDASM and .SLDPRT are supported by this importer."})
-                result = convert_solidworks_file(source)
+                    return json_response(self, 400, {"error": "Selected CAD file does not exist."})
+                ext = source.suffix.lower()
+                if ext in {".sldasm", ".sldprt"}:
+                    result = convert_solidworks_file(source)
+                elif ext in {".dwg", ".dxf"}:
+                    result = convert_autocad_file(source)
+                else:
+                    return json_response(
+                        self,
+                        400,
+                        {"error": "Only SLDASM, SLDPRT, DWG and DXF are supported by this importer."},
+                    )
                 result["path"] = str(source)
                 return json_response(self, 200, result)
             except subprocess.TimeoutExpired:
-                log_event("SOLIDWORKS_IMPORT_TIMEOUT")
-                return json_response(self, 500, {"error": "SolidWorks conversion timed out after 15 minutes."})
+                log_event("CAD_IMPORT_TIMEOUT")
+                return json_response(self, 500, {"error": "CAD conversion timed out after 15 minutes."})
             except Exception as exc:
-                log_event("SOLIDWORKS_IMPORT_ERROR", error=repr(exc))
-                print(f"SOLIDWORKS IMPORT ERROR: {exc}", flush=True)
-                return json_response(self, 500, {"error": f"SolidWorks import failed: {exc}"})
+                log_event("CAD_IMPORT_ERROR", error=repr(exc))
+                print(f"CAD IMPORT ERROR: {exc}", flush=True)
+                return json_response(self, 500, {"error": f"CAD import failed: {exc}"})
+
+        if route == "/api/solidworks/import":
+            return json_response(
+                self,
+                410,
+                {"error": "SolidWorks endpoint moved to /api/cad/import."},
+            )
 
         return json_response(self, 404, {"error": "Not found."})
 
