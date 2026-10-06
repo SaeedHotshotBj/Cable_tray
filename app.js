@@ -14,7 +14,7 @@ const state = {
   modelRoots: new Map(), routeRoots: new Map(), measureStart: null,
   sourceModels: [], dragging: null, skipClick: false,
   surfacePickMode: false, surfacePick: null,
-  measureStart: null, autoRouteStart: null, autoRoutePendingEnd: null, measurements: [], measurementsVisible: true,
+  measureStart: null, autoRouteStart: null, autoRoutePendingEnd: null, autoRoutePreviewRoot: null, measurements: [], measurementsVisible: true,
   selectedMeasurementId: null,
   surfaceAlignStart: null,
   clipboard: null,
@@ -69,6 +69,10 @@ scene.add(measurementRoot);
 const surfaceSelectionRoot = new THREE.Group();
 surfaceSelectionRoot.name = 'SurfaceSelection';
 scene.add(surfaceSelectionRoot);
+const autoRoutePreviewRoot = new THREE.Group();
+autoRoutePreviewRoot.name = 'AutoRoutePreview';
+scene.add(autoRoutePreviewRoot);
+state.autoRoutePreviewRoot = autoRoutePreviewRoot;
 const raycaster = new THREE.Raycaster();
 const mouse = new THREE.Vector2();
 
@@ -223,13 +227,17 @@ function setTool(tool) {
   state.surfacePick = null;
   state.surfaceAlignStart = null;
   state.autoRouteStart = null;
+  state.autoRoutePendingEnd = null;
+  autoRoutePreviewRoot.clear();
   state.tool = tool;
   state.drawing = (tool === 'cable' || tool === 'tray') ? { type: tool, points: [] } : null;
   state.measureStart = null;
   surfaceSelectionRoot.clear();
   document.querySelectorAll('.tool').forEach(function(b){ b.classList.toggle('active', b.dataset.tool === tool); });
   const autoRouteTypeRow = $('autoRouteTypeRow');
+  const autoRouteActions = $('autoRouteActions');
   if (autoRouteTypeRow) autoRouteTypeRow.classList.toggle('hidden', tool !== 'auto-route');
+  if (autoRouteActions) autoRouteActions.classList.add('hidden');
   const hint = {
     select: 'Click a route to select it. Drag a selected tray or cable to move it in 3D; edit Position/Slope in Properties.',
     cable: 'Click route points. Press Enter to finish.',
@@ -300,85 +308,85 @@ function autoRoutePoint(event) {
   return point;
 }
 
-function showAutoRoutePoint(point, color) {
-  if (!point) return;
-  const marker = new THREE.Mesh(
-    new THREE.SphereGeometry(Math.max(2, mmToScene(40)), 16, 16),
-    new THREE.MeshBasicMaterial({ color: color || 0xffd45a, depthTest: false })
+function clearAutoRoutePreview() {
+  autoRoutePreviewRoot.clear();
+}
+
+function showAutoRoutePreview(start, end) {
+  clearAutoRoutePreview();
+
+  const markerRadius = Math.max(2, mmToScene(40));
+  const startMarker = new THREE.Mesh(
+    new THREE.SphereGeometry(markerRadius, 16, 16),
+    new THREE.MeshBasicMaterial({ color: 0xffd45a, depthTest: false })
   );
-  marker.position.copy(point);
-  marker.renderOrder = 40;
-  surfaceSelectionRoot.add(marker);
+  startMarker.position.copy(start);
+  startMarker.renderOrder = 40;
+
+  const endMarker = new THREE.Mesh(
+    new THREE.SphereGeometry(markerRadius, 16, 16),
+    new THREE.MeshBasicMaterial({ color: 0x66d9ff, depthTest: false })
+  );
+  endMarker.position.copy(end);
+  endMarker.renderOrder = 40;
+
+  const lineGeometry = new THREE.BufferGeometry().setFromPoints([start.clone(), end.clone()]);
+  const lineMaterial = new THREE.LineDashedMaterial({
+    color: 0x66d9ff,
+    dashSize: Math.max(1.5, mmToScene(120)),
+    gapSize: Math.max(0.8, mmToScene(70)),
+    transparent: true,
+    opacity: 0.95,
+    depthTest: false
+  });
+  const line = new THREE.Line(lineGeometry, lineMaterial);
+  line.computeLineDistances();
+  line.renderOrder = 39;
+
+  autoRoutePreviewRoot.add(line);
+  autoRoutePreviewRoot.add(startMarker);
+  autoRoutePreviewRoot.add(endMarker);
+
+  const distance = sceneToM(start.distanceTo(end));
+  const lengthElement = $('autoRoutePreviewLength');
+  if (lengthElement) lengthElement.textContent = distance.toFixed(3) + ' m';
+  const actions = $('autoRouteActions');
+  if (actions) actions.classList.remove('hidden');
 }
 
-function buildOrthogonalAutoRoute(start, end) {
-  const a = start.clone();
-  const b = end.clone();
-  const points = [a.clone()];
-  const eps = 1e-7;
-
-  // The route follows the project's world/device axes only.
-  // Prefer horizontal X/Z movement first and finish with the vertical Y move.
-  const horizontalAxes = ['x', 'z'].sort(function(axisA, axisB){
-    return Math.abs(b[axisB] - a[axisB]) - Math.abs(b[axisA] - a[axisA]);
-  });
-
-  horizontalAxes.forEach(function(axis){
-    if (Math.abs(b[axis] - a[axis]) <= eps) return;
-    const p = points[points.length - 1].clone();
-    p[axis] = b[axis];
-    points.push(p);
-  });
-
-  if (Math.abs(b.y - a.y) > eps) {
-    const p = points[points.length - 1].clone();
-    p.y = b.y;
-    points.push(p);
-  }
-
-  if (points[points.length - 1].distanceToSquared(b) > eps) {
-    points.push(b.clone());
-  }
-
-  // Remove any accidental duplicate points.
-  return points.filter(function(point, index){
-    return index === 0 || point.distanceToSquared(points[index - 1]) > eps * eps;
-  });
-}
-
-function createAutoRoute() {
-  if (!state.autoRouteStart) return;
+function createAutoRouteFromPreview() {
+  const start = state.autoRouteStart;
   const end = state.autoRoutePendingEnd;
-  if (!end) return;
+  if (!start || !end) return;
 
-  const straightDistance = state.autoRouteStart.distanceTo(end);
-  if (straightDistance < 1e-8) {
+  const distance = start.distanceTo(end);
+  if (distance < 1e-8) {
     toast('Start and end points must be different');
-    return;
-  }
-
-  const points = buildOrthogonalAutoRoute(state.autoRouteStart, end);
-  if (points.length < 2) {
-    toast('Could not create an Auto Route');
     return;
   }
 
   const type = $('autoRouteType').value === 'tray' ? 'tray' : 'cable';
   const beforeHistory = captureDesignState();
-  const obj = createRoute(type, points);
-  const routeLength = lengthOf(points);
+  const obj = createRoute(type, [start.clone(), end.clone()]);
 
   recordHistory(beforeHistory);
   state.selected = obj.id;
-  state.autoRouteStart = null;
-  state.autoRoutePendingEnd = null;
-  rebuildRoutes();
-  render();
   setTool('select');
-  toast(obj.name + ' created — axis-aligned route: ' + routeLength.toFixed(3) + ' m');
+  render();
+  toast(obj.name + ' created — shortest straight route: ' + sceneToM(distance).toFixed(3) + ' m');
 }
 
-function createRoute(type, points) {
+function resetAutoRoutePoints() {
+  state.autoRouteStart = null;
+  state.autoRoutePendingEnd = null;
+  clearAutoRoutePreview();
+  const actions = $('autoRouteActions');
+  if (actions) actions.classList.add('hidden');
+  status('Auto Route: select start point');
+  toast('Auto Route points cleared');
+}
+
+function createRoute(type, points) {function createRoute(type, points) {
   const cable = type === 'cable';
   const dia = Number($('defaultCableDiameter').value) || 24;
   const width = Number($('defaultTrayWidth').value) || 300;
@@ -844,13 +852,23 @@ renderer.domElement.addEventListener('click', function(e){
 
     if (!state.autoRouteStart) {
       state.autoRouteStart = point;
-      showAutoRoutePoint(point, 0xffd45a);
+      state.autoRoutePendingEnd = null;
+      showAutoRoutePreview(point, point);
+      clearAutoRoutePreview();
+      const marker = new THREE.Mesh(
+        new THREE.SphereGeometry(Math.max(2, mmToScene(40)), 16, 16),
+        new THREE.MeshBasicMaterial({ color: 0xffd45a, depthTest: false })
+      );
+      marker.position.copy(point);
+      marker.renderOrder = 40;
+      autoRoutePreviewRoot.add(marker);
       status('Auto Route: select end point');
       toast('Start point selected — click the end point');
     } else {
       state.autoRoutePendingEnd = point;
-      showAutoRoutePoint(point, 0x66d9ff);
-      createAutoRoute();
+      showAutoRoutePreview(state.autoRouteStart, point);
+      status('Shortest route preview shown');
+      toast('Shortest route preview shown — review it before creating');
     }
     return;
   }
@@ -935,11 +953,7 @@ function handleKeyboardShortcut(e) {
       return;
     }
     if (state.autoRouteStart) {
-      state.autoRouteStart = null;
-      state.autoRoutePendingEnd = null;
-      clearSurfaceSelectionVisuals();
-      status('Ready');
-      toast('Auto Route cancelled');
+      resetAutoRoutePoints();
       e.preventDefault();
       return;
     }
@@ -2602,3 +2616,5 @@ function animate(){
   updateMeasurementOverlay();
   renderer.render(scene,camera);
 }
+$('createAutoRouteBtn').addEventListener('click', createAutoRouteFromPreview);
+$('resetAutoRouteBtn').addEventListener('click', resetAutoRoutePoints);
