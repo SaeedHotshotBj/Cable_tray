@@ -207,11 +207,11 @@ function routeVisual(obj) {
     THREE.MathUtils.degToRad(Number(rot.z) || 0)
   );
 
-  const baseColor = obj.kind === 'cable' ? 0xffb347 : 0x55b6ff;
+  const baseColor = obj.kind === 'cable' ? 0xffb347 : 0xb6bec7;
   const mat = new THREE.MeshStandardMaterial({
     color: baseColor,
-    roughness: 0.72,
-    metalness: 0.25
+    roughness: 0.28,
+    metalness: 0.78
   });
   g.userData.baseColor = baseColor;
   g.userData.meshMaterial = mat;
@@ -235,13 +235,13 @@ function routeVisual(obj) {
     tube.userData.objectId = obj.id;
     g.add(tube);
   } else {
+    // Solid-bottom industrial tray: continuous floor and continuous sidewalls.
+    // No perforations, slots, ladder rungs, or mesh openings anywhere.
     const width = mmToScene(obj.width_mm);
     const height = mmToScene(obj.height_mm);
     const sheet = Math.max(0.18, mmToScene(Math.min(obj.width_mm, obj.height_mm) * 0.035));
-    const rail = Math.max(0.22, sheet * 1.35);
-    const postPitch = Math.max(mmToScene(180), Math.min(mmToScene(350), width * 0.65));
-    const slotPitch = Math.max(mmToScene(120), Math.min(mmToScene(220), width * 0.42));
-    const slotGap = Math.max(mmToScene(55), Math.min(mmToScene(100), slotPitch * 0.42));
+    const rail = Math.max(0.22, sheet * 1.4);
+    const lipWidth = Math.max(rail * 1.2, mmToScene(Math.min(obj.width_mm, 80) * 0.045));
 
     function addOrientedPart(geometry, position, direction) {
       const mesh = new THREE.Mesh(geometry, mat);
@@ -256,63 +256,76 @@ function routeVisual(obj) {
       const a = localPoints[i - 1], b = localPoints[i];
       const len = a.distanceTo(b);
       if (len < 0.001) continue;
+
       const dir = b.clone().sub(a).normalize();
       const centerSeg = a.clone().add(b).multiplyScalar(0.5);
       let sideDir = new THREE.Vector3(-dir.z, 0, dir.x);
       if (sideDir.lengthSq() < 1e-6) sideDir.set(1, 0, 0);
       sideDir.normalize();
 
-      // Continuous solid bottom plate: no perforation or mesh pattern.
+      const depth = Math.max(len, sheet * 2);
+      const edgeRadius = Math.min(sheet * 0.5, Math.max(0.05, depth * 0.03));
+
+      // Continuous solid floor.
       addOrientedPart(
         new RoundedBoxGeometry(
           Math.max(width, 0.2),
           sheet,
-          Math.max(len, sheet * 2),
-          3,
-          Math.min(sheet * 0.35, Math.max(len, sheet * 2) * 0.08)
+          depth,
+          5,
+          edgeRadius
         ),
         centerSeg.clone().setY(-height * 0.5 + sheet * 0.5),
         dir
       );
 
-      // Side walls: lower/upper continuous rails + vertical perforation ribs.
+      // Continuous solid sidewalls.
       for (const side of [-1, 1]) {
-        const sideOffset = sideDir.clone().multiplyScalar(side * (width * 0.5 - rail * 0.5));
+        const wallOffset = sideDir.clone().multiplyScalar(side * (width * 0.5 - sheet * 0.5));
+
         addOrientedPart(
-          new RoundedBoxGeometry(rail, rail, Math.max(len, rail), 3, rail * 0.28),
-          centerSeg.clone().add(sideOffset).setY(-height * 0.5 + rail * 0.5),
-          dir
-        );
-        addOrientedPart(
-          new RoundedBoxGeometry(rail, rail, Math.max(len, rail), 3, rail * 0.28),
-          centerSeg.clone().add(sideOffset).setY(height * 0.5 - rail * 0.5),
+          new RoundedBoxGeometry(
+            sheet,
+            Math.max(height, sheet),
+            depth,
+            5,
+            edgeRadius
+          ),
+          centerSeg.clone().add(wallOffset).setY(0),
           dir
         );
 
-        const posts = Math.max(2, Math.floor(len / postPitch) + 1);
-        for (let p = 0; p <= posts; p++) {
-          const t = Math.min(1, p / posts);
-          const q = a.clone().lerp(b, t);
-          addOrientedPart(
-            new RoundedBoxGeometry(rail, Math.max(height - rail * 2, rail), rail, 3, rail * 0.28),
-            q.clone().add(sideOffset),
-            dir
-          );
-        }
-      }
-
-      // Top rolled lips for a more realistic industrial finish.
-      for (const side of [-1, 1]) {
-        const lipOffset = sideDir.clone().multiplyScalar(side * (width * 0.5 + rail * 0.2));
+        // Rolled top lip for a cleaner industrial profile.
+        const lipOffset = sideDir.clone().multiplyScalar(side * (width * 0.5 + lipWidth * 0.5));
         addOrientedPart(
-          new RoundedBoxGeometry(rail * 1.25, rail * 0.75, Math.max(len, rail), 4, rail * 0.32),
-          centerSeg.clone().add(lipOffset).setY(height * 0.5 + rail * 0.12),
+          new RoundedBoxGeometry(
+            lipWidth,
+            Math.max(sheet, lipWidth * 0.65),
+            depth,
+            5,
+            Math.min(lipWidth * 0.3, depth * 0.035)
+          ),
+          centerSeg.clone().add(lipOffset).setY(height * 0.5 - lipWidth * 0.35),
+          dir
+        );
+
+        // Subtle lower return flange: solid, continuous, and hole-free.
+        const lowerFlangeOffset = sideDir.clone().multiplyScalar(side * (width * 0.5 - sheet * 0.5));
+        addOrientedPart(
+          new RoundedBoxGeometry(
+            Math.max(sheet * 1.8, lipWidth * 0.9),
+            sheet,
+            depth,
+            5,
+            Math.min(sheet * 0.5, depth * 0.03)
+          ),
+          centerSeg.clone().add(lowerFlangeOffset).setY(-height * 0.5 + sheet * 1.45),
           dir
         );
       }
     }
 
-    // A rounded elbow cap at every direction change.
+    // Smooth solid transition blocks at bends; no perforation or open grid.
     for (let i = 1; i < localPoints.length - 1; i++) {
       const corner = localPoints[i];
       const inDir = corner.clone().sub(localPoints[i - 1]).normalize();
@@ -321,8 +334,15 @@ function routeVisual(obj) {
       if (bisector.lengthSq() < 1e-6) bisector = outDir.clone();
       bisector.normalize();
 
+      const elbowDepth = Math.max(width * 0.55, height);
       const elbow = new THREE.Mesh(
-        new RoundedBoxGeometry(Math.max(width, 0.2), Math.max(height, 0.2), Math.max(width * 0.65, height), 6, Math.min(width, height) * 0.14),
+        new RoundedBoxGeometry(
+          Math.max(width, 0.2),
+          Math.max(height, sheet),
+          elbowDepth,
+          7,
+          Math.min(Math.max(width, height) * 0.16, elbowDepth * 0.16)
+        ),
         mat
       );
       elbow.position.copy(corner);
