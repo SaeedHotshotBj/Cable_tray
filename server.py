@@ -299,12 +299,13 @@ class Handler(SimpleHTTPRequestHandler):
         # Windows Common Dialog filter syntax uses semicolon-separated masks.
         filter_spec = (
             "Supported 3D/CAD models\x00"
-            "*.glb;*.gltf;*.obj;*.stl;*.sldasm;*.sldprt\x00"
+            "*.glb;*.gltf;*.obj;*.stl;*.sldasm;*.sldprt;*.dwg;*.dxf\x00"
             "GLB / GLTF\x00*.glb;*.gltf\x00"
             "OBJ\x00*.obj\x00"
             "STL\x00*.stl\x00"
             "SolidWorks Assembly\x00*.sldasm\x00"
             "SolidWorks Part\x00*.sldprt\x00"
+            "AutoCAD Drawing\x00*.dwg;*.dxf\x00"
             "All files\x00*.*\x00"
             "\x00"
         )
@@ -371,7 +372,7 @@ class Handler(SimpleHTTPRequestHandler):
             raise ValueError("Windows returned an empty model path.")
 
         p = Path(selected).expanduser().resolve()
-        allowed = {".glb", ".gltf", ".obj", ".stl", ".sldasm", ".sldprt"}
+        allowed = {".glb", ".gltf", ".obj", ".stl", ".sldasm", ".sldprt", ".dwg", ".dxf"}
         ext = p.suffix.lower()
         if ext not in allowed:
             raise ValueError("This model format is not enabled yet.")
