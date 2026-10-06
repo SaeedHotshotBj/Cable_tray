@@ -3,13 +3,16 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { STLLoader } from 'three/addons/loaders/STLLoader.js';
+import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
+import { OBJExporter } from 'three/addons/exporters/OBJExporter.js';
+import { STLExporter } from 'three/addons/exporters/STLExporter.js';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
 
 const state = {
   project: { name: 'Factory Cable Routing', units: 'mm', schema_version: 1 },
   objects: [], selected: null, tool: 'select', drawing: null,
   modelRoots: new Map(), routeRoots: new Map(), measureStart: null,
-  dragging: null, skipClick: false
+  sourceModels: [], dragging: null, skipClick: false
 };
 const $ = id => document.getElementById(id);
 
@@ -26,7 +29,7 @@ window.CableTrayAcceptModel = async function(selected) {
     url: url
   });
   status('Loading model...');
-  await importModelFile(url, selected.name, selected.format || 'STL', nativeFormat);
+  await importModelFile(url, selected.name, selected.format || 'STL', nativeFormat, selected.path || '');
 };
 
 const viewport = $('viewport');
@@ -695,8 +698,10 @@ function renderBoq() {
 }
 function render() { renderScene(); renderProperties(); renderBoq(); updateRouteSelectionVisuals(); }
 
-async function importModelFile(fileUrl, displayName, format, nativeFormat) {
+async function importModelFile(fileUrl, displayName, format, nativeFormat, sourcePath) {
   const url = fileUrl;
+  const selectedSourcePath = sourcePath || '';
+  const selectedNativeFormat = nativeFormat || format || 'STL';
   try {
     let root;
     if (format === 'GLB' || format === 'GLTF') {
@@ -735,7 +740,24 @@ async function importModelFile(fileUrl, displayName, format, nativeFormat) {
     root.traverse(function(n){ if (n.isMesh) n.userData.objectId = objectId; });
     scene.add(root);
     state.modelRoots.set(objectId, root);
-    state.objects.push({ id: objectId, kind: 'model', name: displayName, source: displayName, format: format });
+    const sourceRecord = {
+      id: objectId,
+      name: displayName,
+      source: displayName,
+      path: selectedSourcePath || '',
+      native_format: selectedNativeFormat || format,
+      format: format
+    };
+    state.sourceModels.push(sourceRecord);
+    state.objects.push({
+      id: objectId,
+      kind: 'model',
+      name: displayName,
+      source: displayName,
+      format: format,
+      native_format: sourceRecord.native_format,
+      source_path: sourceRecord.path
+    });
     state.selected = objectId;
     fitAllScene();
     render();
@@ -754,6 +776,14 @@ function projectData() {
     schema: 'cable-tray-project',
     schema_version: 1,
     project: state.project,
+    model_sources: state.sourceModels.map(function(m){ return {
+      id:m.id,
+      name:m.name,
+      source:m.source,
+      path:m.path,
+      native_format:m.native_format,
+      format:m.format
+    }; }),
     objects: state.objects
       .filter(function(o){ return o.kind !== 'model'; })
       .map(function(o){
@@ -772,6 +802,101 @@ function projectData() {
       })
   };
 }
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(function(){ URL.revokeObjectURL(url); }, 1000);
+}
+
+function exportSceneRoot() {
+  const exportRoot = new THREE.Group();
+  exportRoot.name = state.project.name || 'Cable_Tray_Model';
+
+  state.modelRoots.forEach(function(root){
+    exportRoot.add(root.clone(true));
+  });
+  state.routeRoots.forEach(function(root){
+    const clone = root.clone(true);
+    clone.traverse(function(node){
+      if (node.material) {
+        if (Array.isArray(node.material)) node.material = node.material.map(function(m){ return m.clone(); });
+        else node.material = node.material.clone();
+      }
+    });
+    applyRouteSelectionVisual(clone, false);
+    exportRoot.add(clone);
+  });
+
+  return exportRoot;
+}
+
+function exportModel(format) {
+  const chosen = String(format || '').toUpperCase();
+  const exportRoot = exportSceneRoot();
+  const baseName = slug(state.project.name || 'cable-tray-model');
+
+  status('Exporting ' + chosen + '...');
+  if (chosen === 'GLB') {
+    // glTF/GLB uses meters as its unit convention.
+    exportRoot.scale.setScalar(0.01);
+    exportRoot.updateMatrixWorld(true);
+    const exporter = new GLTFExporter();
+    exporter.parse(
+      exportRoot,
+      function(result){
+        if (!(result instanceof ArrayBuffer)) throw new Error('GLB export did not return binary data.');
+        downloadBlob(new Blob([result], { type: 'model/gltf-binary' }), baseName + '.glb');
+        status('Model exported');
+        toast('GLB exported');
+      },
+      function(error){ throw error; },
+      { binary: true, trs: false, onlyVisible: true }
+    );
+    return;
+  }
+
+  if (chosen === 'OBJ') {
+    // OBJ has no mandatory unit metadata; export in millimetres.
+    exportRoot.scale.setScalar(10);
+    exportRoot.updateMatrixWorld(true);
+    const text = new OBJExporter().parse(exportRoot);
+    downloadBlob(new Blob([text], { type: 'text/plain;charset=utf-8' }), baseName + '.obj');
+    status('Model exported');
+    toast('OBJ exported');
+    return;
+  }
+
+  if (chosen === 'STL') {
+    // STL has no unit metadata; export in millimetres for CAD workflows.
+    exportRoot.scale.setScalar(10);
+    exportRoot.updateMatrixWorld(true);
+    const result = new STLExporter().parse(exportRoot, { binary: true });
+    const data = result && result.buffer instanceof ArrayBuffer ? result.buffer : result;
+    downloadBlob(new Blob([data], { type: 'model/stl' }), baseName + '.stl');
+    status('Model exported');
+    toast('STL exported');
+    return;
+  }
+
+  throw new Error('Unsupported export format: ' + format);
+}
+
+$('exportModelBtn').addEventListener('click', function(){
+  const format = $('exportModelFormat').value;
+  try {
+    exportModel(format);
+  } catch (err) {
+    console.error(err);
+    status('Ready');
+    toast('Export failed: ' + err.message);
+  }
+});
+
 $('saveProjectBtn').addEventListener('click', function(){
   const blob = new Blob([JSON.stringify(projectData(), null, 2)], { type: 'application/json' });
   const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = slug(state.project.name) + '.json'; a.click(); URL.revokeObjectURL(a.href);
@@ -779,6 +904,7 @@ $('saveProjectBtn').addEventListener('click', function(){
 function loadProject(data) {
   if (!data || data.schema !== 'cable-tray-project') throw new Error('Not a Cable_tray project');
   state.modelRoots.forEach(function(root){ scene.remove(root); }); state.modelRoots.clear();
+  state.sourceModels = (data.model_sources || []).map(function(m){ return { ...m }; });
   state.objects = (data.objects || []).map(function(o){
     const rotation = o.rotation_deg || { x: 0, y: 0, z: 0 };
     return {
@@ -798,7 +924,9 @@ function loadProject(data) {
 }
 $('newProjectBtn').addEventListener('click', function(){
   if (!confirm('Clear the current design?')) return;
-  state.modelRoots.forEach(function(root){ scene.remove(root); }); state.modelRoots.clear(); state.objects = []; state.selected = null; render(); toast('New project created');
+  state.modelRoots.forEach(function(root){ scene.remove(root); }); state.modelRoots.clear();
+  state.sourceModels = [];
+  state.objects = []; state.selected = null; render(); toast('New project created');
 });
 $('exportBoqBtn').addEventListener('click', function(){
   const rows = [['Item','Specification','Name','Quantity','Unit','Elbows']];
