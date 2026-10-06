@@ -379,6 +379,7 @@ function finishAutoRoute() {
   const routePoints = points.map(function(point){ return point.clone(); });
   const obj = createRoute(type, routePoints);
 
+  rebuildRoutes();
   recordHistory(beforeHistory);
   state.selected = obj.id;
   state.autoRoutePoints = [];
