@@ -15,6 +15,7 @@ const state = {
   sourceModels: [], dragging: null, skipClick: false,
   surfacePickMode: false, surfacePick: null,
   measureStart: null, measurements: [], measurementsVisible: true,
+  selectedMeasurementId: null,
   clipboard: null,
   undoStack: [], redoStack: [],
   restoringHistory: false
@@ -64,6 +65,9 @@ scene.add(ground);
 const measurementRoot = new THREE.Group();
 measurementRoot.name = 'MeasurementAnnotations';
 scene.add(measurementRoot);
+const surfaceSelectionRoot = new THREE.Group();
+surfaceSelectionRoot.name = 'SurfaceSelection';
+scene.add(surfaceSelectionRoot);
 const raycaster = new THREE.Raycaster();
 const mouse = new THREE.Vector2();
 
@@ -195,6 +199,7 @@ function setTool(tool) {
   state.tool = tool;
   state.drawing = (tool === 'cable' || tool === 'tray') ? { type: tool, points: [] } : null;
   state.measureStart = null;
+  surfaceSelectionRoot.clear();
   document.querySelectorAll('.tool').forEach(function(b){ b.classList.toggle('active', b.dataset.tool === tool); });
   const hint = {
     select: 'Click a route to select it. Drag a selected tray or cable to move it in 3D; edit Position/Slope in Properties.',
@@ -662,10 +667,18 @@ renderer.domElement.addEventListener('click', function(e){
     if (!target) return;
     if (!state.measureStart) {
       state.measureStart = target;
-      toast(target.kind === 'surface' ? 'First surface selected' : 'First measurement point set');
+      if (target.kind === 'surface') {
+        clearSurfaceSelectionVisuals();
+        addSurfaceSelectionVisual(target, 0xffd45a);
+        toast('First surface selected — click the second surface');
+      } else {
+        toast('First measurement point set');
+      }
     } else {
+      if (target.kind === 'surface') addSurfaceSelectionVisual(target, 0x7ae6ff);
       addMeasurement(state.measureStart, target);
       state.measureStart = null;
+      clearSurfaceSelectionVisuals();
     }
     return;
   }
@@ -718,11 +731,24 @@ function handleKeyboardShortcut(e) {
   }
 
   if (key === 'enter' && state.drawing) { e.preventDefault(); finishRoute(); return; }
+  if ((key === 'delete' || key === 'backspace') && state.selectedMeasurementId && !isTextEditing) {
+    e.preventDefault();
+    deleteMeasurement(state.selectedMeasurementId);
+    return;
+  }
   if (key === 'f' && !modifier && !isTextEditing && !state.drawing) { e.preventDefault(); fitAllScene(); return; }
   if (key === '1' && !modifier && !isTextEditing && !state.drawing) { e.preventDefault(); $('topBtn').click(); return; }
   if (key === '2' && !modifier && !isTextEditing && !state.drawing) { e.preventDefault(); $('frontBtn').click(); return; }
   if (key === '3' && !modifier && !isTextEditing && !state.drawing) { e.preventDefault(); $('isoBtn').click(); return; }
-  if ((key === 'delete' || key === 'backspace') && state.selected && !isTextEditing) { e.preventDefault(); deleteSelected(); }
+  if ((key === 'delete' || key === 'backspace') && state.selectedMeasurementId && !isTextEditing) {
+    e.preventDefault();
+    deleteMeasurement(state.selectedMeasurementId);
+    return;
+  }
+  if ((key === 'delete' || key === 'backspace') && state.selected && !isTextEditing) {
+    e.preventDefault();
+    deleteSelected();
+  }
 }
 window.addEventListener('keydown', handleKeyboardShortcut, true);
 
@@ -830,7 +856,9 @@ function measurementTargetFromEvent(event) {
         kind:'surface',
         point:hit.point.clone(),
         normal:hit.face.normal.clone().transformDirection(hit.object.matrixWorld).normalize(),
-        modelId:hit.object.userData && hit.object.userData.objectId ? hit.object.userData.objectId : null
+        modelId:hit.object.userData && hit.object.userData.objectId ? hit.object.userData.objectId : null,
+        object:hit.object,
+        faceIndex:hit.faceIndex
       };
     }
   }
@@ -838,30 +866,118 @@ function measurementTargetFromEvent(event) {
   return groundHit ? {kind:'point',point:groundHit.point.clone(),normal:null,modelId:null} : null;
 }
 
-function rebuildMeasurements() {
-  measurementRoot.clear();
-  const overlay=$('measurementOverlay');
-  if(overlay) overlay.innerHTML='';
-  state.measurements.forEach(function(m){
-    const geometry=new THREE.BufferGeometry().setFromPoints([m.start,m.end]);
-    const material=new THREE.LineBasicMaterial({color:m.kind==='surface'?0xffc857:0x66d9ff,transparent:true,opacity:0.95});
-    const line=new THREE.Line(geometry,material);
-    line.userData.measurementId=m.id;
-    m.line=line;
-    measurementRoot.add(line);
-    if(overlay){
-      const label=document.createElement('div');
-      label.className='measurement-label';
-      label.textContent=formatDistance(m.distance_m);
-      label.title=m.kind==='surface'?'Surface distance':'Point distance';
-      overlay.appendChild(label);
-      m.label=label;
-    }
-  });
-  measurementRoot.visible=state.measurementsVisible;
-  updateMeasurementOverlay();
+function clearSurfaceSelectionVisuals() {
+  surfaceSelectionRoot.clear();
 }
 
+function addSurfaceSelectionVisual(target, color) {
+  if (!target || target.kind !== 'surface' || !target.object || target.faceIndex == null) return;
+  const geometry = target.object.geometry;
+  const position = geometry && geometry.attributes ? geometry.attributes.position : null;
+  if (!position) return;
+
+  const indices = geometry.index;
+  const tri = indices
+    ? [indices.getX(target.faceIndex * 3), indices.getX(target.faceIndex * 3 + 1), indices.getX(target.faceIndex * 3 + 2)]
+    : [target.faceIndex * 3, target.faceIndex * 3 + 1, target.faceIndex * 3 + 2];
+
+  if (tri.some(function(i){ return !Number.isInteger(i) || i < 0 || i >= position.count; })) return;
+
+  const points = tri.map(function(i){
+    return new THREE.Vector3()
+      .fromBufferAttribute(position, i)
+      .applyMatrix4(target.object.matrixWorld)
+      .add(target.normal.clone().multiplyScalar(0.03));
+  });
+
+  const overlayGeometry = new THREE.BufferGeometry().setFromPoints(points);
+  overlayGeometry.setIndex([0, 1, 2]);
+  const overlayMaterial = new THREE.MeshBasicMaterial({
+    color: color || 0xffd45a,
+    transparent: true,
+    opacity: 0.48,
+    side: THREE.DoubleSide,
+    depthTest: false
+  });
+  const overlay = new THREE.Mesh(overlayGeometry, overlayMaterial);
+  overlay.renderOrder = 30;
+  surfaceSelectionRoot.add(overlay);
+}
+
+function selectMeasurement(id) {
+  state.selectedMeasurementId = id;
+  rebuildMeasurements();
+}
+
+function deleteMeasurement(id) {
+  const index = state.measurements.findIndex(function(m){ return m.id === id; });
+  if (index < 0) return;
+  const deleted = state.measurements[index];
+  state.measurements.splice(index, 1);
+  if (state.selectedMeasurementId === id) state.selectedMeasurementId = null;
+  rebuildMeasurements();
+  toast('Dimension deleted: ' + formatDistance(deleted.distance_m));
+}
+
+function renderMeasurementList() {
+  const box = $('measurementList');
+  if (!box) return;
+  if (!state.measurements.length) {
+    box.innerHTML = '<div class="hint" style="padding:8px">No dimensions yet.</div>';
+    return;
+  }
+
+  box.innerHTML = state.measurements.map(function(m, index){
+    const selected = m.id === state.selectedMeasurementId;
+    return '<div class="measurement-item ' + (selected ? 'active' : '') + '" data-id="' + esc(m.id) + '">' +
+      '<button class="measurement-select" type="button"><span>' + (index + 1) + '</span><b>' + esc(formatDistance(m.distance_m)) + '</b></button>' +
+      '<button class="small danger measurement-delete" type="button">Delete</button>' +
+    '</div>';
+  }).join('');
+
+  box.querySelectorAll('.measurement-item').forEach(function(row){
+    const id = row.dataset.id;
+    row.querySelector('.measurement-select').addEventListener('click', function(){ selectMeasurement(id); });
+    row.querySelector('.measurement-delete').addEventListener('click', function(){ deleteMeasurement(id); });
+  });
+}
+
+function rebuildMeasurements() {
+  measurementRoot.clear();
+  const overlay = $('measurementOverlay');
+  if (overlay) overlay.innerHTML = '';
+
+  state.measurements.forEach(function(m){
+    const selected = m.id === state.selectedMeasurementId;
+    const geometry = new THREE.BufferGeometry().setFromPoints([m.start, m.end]);
+    const material = new THREE.LineBasicMaterial({
+      color: selected ? 0xffffff : (m.kind === 'surface' ? 0xffc857 : 0x66d9ff),
+      transparent: true,
+      opacity: selected ? 1 : 0.95
+    });
+    const line = new THREE.Line(geometry, material);
+    line.userData.measurementId = m.id;
+    m.line = line;
+    measurementRoot.add(line);
+
+    if (overlay) {
+      const label = document.createElement('div');
+      label.className = 'measurement-label' + (selected ? ' active' : '');
+      label.textContent = formatDistance(m.distance_m);
+      label.title = m.kind === 'surface' ? 'Surface distance' : 'Point distance';
+      label.addEventListener('click', function(event){
+        event.stopPropagation();
+        selectMeasurement(m.id);
+      });
+      overlay.appendChild(label);
+      m.label = label;
+    }
+  });
+
+  measurementRoot.visible = state.measurementsVisible;
+  updateMeasurementOverlay();
+  renderMeasurementList();
+}
 function updateMeasurementOverlay() {
   const overlay=$('measurementOverlay');
   if(!overlay)return;
@@ -907,6 +1023,8 @@ function addMeasurement(first,second) {
     end_normal:second.normal?second.normal.clone():null
   };
   state.measurements.push(m);
+  state.selectedMeasurementId = m.id;
+  clearSurfaceSelectionVisuals();
   rebuildMeasurements();
   renderMeasurementsToggle();
   toast((m.kind==='surface'?'Surface distance: ':'Distance: ')+formatDistance(m.distance_m));
@@ -917,6 +1035,7 @@ function toggleMeasurements() {
   measurementRoot.visible=state.measurementsVisible;
   updateMeasurementOverlay();
   renderMeasurementsToggle();
+  renderMeasurementList();
 }
 
 function renderMeasurementsToggle() {
@@ -1535,14 +1654,14 @@ function loadProject(data) {
   });
   $('projectName').value = state.project.name || 'Factory Cable Routing';
   $('unitSystem').value = state.project.units || 'mm';
-  state.selected = null; state.measureStart = null; resetHistory(); rebuildRoutes(); rebuildMeasurements(); renderMeasurementsToggle(); render();
+  state.selected = null; state.measureStart = null; state.selectedMeasurementId = null; resetHistory(); rebuildRoutes(); rebuildMeasurements(); renderMeasurementsToggle(); render();
 }
 $('newProjectBtn').addEventListener('click', function(){
   if (!confirm('Clear the current design?')) return;
   state.modelRoots.forEach(function(root){ scene.remove(root); }); state.modelRoots.clear();
   state.sourceModels = [];
   state.objects = []; state.selected = null; resetHistory(); state.surfacePick = null; state.surfacePickMode = false;
-  state.measureStart = null; state.measurements = []; rebuildMeasurements(); renderMeasurementsToggle(); render(); toast('New project created');
+  state.measureStart = null; state.selectedMeasurementId = null; state.measurements = []; clearSurfaceSelectionVisuals(); rebuildMeasurements(); renderMeasurementsToggle(); renderMeasurementList(); render(); toast('New project created');
 });
 $('exportBoqBtn').addEventListener('click', function(){
   const rows = [['Item','Specification','Name','Quantity','Unit','Elbows']];
@@ -1568,7 +1687,7 @@ $('topBtn').addEventListener('click', function(){ camera.position.set(0,18000,0.
 $('frontBtn').addEventListener('click', function(){ camera.position.set(0,5000,18000); controls.target.set(0,0,0); controls.update(); });
 $('isoBtn').addEventListener('click', function(){ camera.position.set(12000,9500,12000); controls.target.set(0,1500,0); controls.update(); });
 $('toggleMeasurementsBtn').addEventListener('click', toggleMeasurements);
-setTool('select'); rebuildMeasurements(); renderMeasurementsToggle(); render(); animate();
+setTool('select'); rebuildMeasurements(); renderMeasurementsToggle(); renderMeasurementList(); render(); animate();
 
 function animate(){
   requestAnimationFrame(animate);
