@@ -376,7 +376,11 @@ function finishAutoRoute() {
 
   const beforeHistory = captureDesignState();
   const type = $('autoRouteType').value === 'tray' ? 'tray' : 'cable';
-  const routePoints = points.map(function(point){ return point.clone(); });
+  const routePoints = points.map(function(point){
+    const routePoint = point.clone();
+    routePoint.__routeSnapToModel = true;
+    return routePoint;
+  });
   const obj = createRoute(type, routePoints);
 
   rebuildRoutes();
