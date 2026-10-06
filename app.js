@@ -1521,16 +1521,20 @@ async function importModelFile(fileUrl, displayName, format, nativeFormat, sourc
 function projectData() {
   return {
     schema: 'cable-tray-project',
-    schema_version: 1,
+    schema_version: 2,
     project: state.project,
-    model_sources: state.sourceModels.map(function(m){ return {
-      id:m.id,
-      name:m.name,
-      source:m.source,
-      path:m.path,
-      native_format:m.native_format,
-      format:m.format
-    }; }),
+    model_sources: state.sourceModels.map(function(m){
+      const root = state.modelRoots.get(m.id);
+      return {
+        id:m.id,
+        name:m.name,
+        source:m.source,
+        path:m.path,
+        native_format:m.native_format,
+        format:m.format,
+        snapshot: root ? root.toJSON() : (m.snapshot || null)
+      };
+    }),
     objects: state.objects
       .filter(function(o){ return o.kind !== 'model'; })
       .map(function(o){
@@ -1564,7 +1568,9 @@ function projectData() {
         end:{x:m.end.x*10,y:m.end.y*10,z:m.end.z*10},
         distance_m:Number(m.distance_m)||0,
         start_normal:m.start_normal?{x:m.start_normal.x,y:m.start_normal.y,z:m.start_normal.z}:null,
-        end_normal:m.end_normal?{x:m.end_normal.x,y:m.end_normal.y,z:m.end_normal.z}:null
+        end_normal:m.end_normal?{x:m.end_normal.x,y:m.end_normal.y,z:m.end_normal.z}:null,
+        start_anchor:m.start_anchor || null,
+        end_anchor:m.end_anchor || null
       };
     }),
     measurements_visible:state.measurementsVisible
@@ -1725,7 +1731,12 @@ $('exportModelBtn').addEventListener('click', function(){
 $('saveProjectBtn').addEventListener('click', saveProjectFile);
 function loadProject(data) {
   if (!data || data.schema !== 'cable-tray-project') throw new Error('Not a Cable_tray project');
-  state.modelRoots.forEach(function(root){ scene.remove(root); }); state.modelRoots.clear();
+
+  state.modelRoots.forEach(function(root){ scene.remove(root); });
+  state.modelRoots.clear();
+  state.routeRoots.forEach(function(root){ if (root.parent) root.parent.remove(root); });
+  state.routeRoots.clear();
+
   state.sourceModels = (data.model_sources || []).map(function(m){ return { ...m }; });
   state.objects = (data.objects || []).map(function(o){
     const rotation = o.rotation_deg || { x: 0, y: 0, z: 0 };
@@ -1736,9 +1747,41 @@ function loadProject(data) {
         y: Number(rotation.y) || 0,
         z: Number(rotation.z) || 0
       },
-      points:(o.points || []).map(function(p){ return new THREE.Vector3(mmToScene(p.x), mmToScene(p.y), mmToScene(p.z)); })
+      points:(o.points || []).map(function(p){ return new THREE.Vector3(mmToScene(p.x),mmToScene(p.y),mmToScene(p.z)); })
     };
   });
+
+  const objectLoader = new ObjectLoader();
+  let missingModels = 0;
+  state.sourceModels.forEach(function(m){
+    if (!m.snapshot) {
+      missingModels++;
+      state.objects.push({
+        id:m.id, kind:'model', name:m.name, source:m.source,
+        format:m.format, native_format:m.native_format, source_path:m.path || ''
+      });
+      return;
+    }
+    try {
+      const root = objectLoader.parse(m.snapshot);
+      root.userData = root.userData || {};
+      root.userData.objectId = m.id;
+      root.traverse(function(n){
+        n.userData = n.userData || {};
+        n.userData.objectId = m.id;
+      });
+      scene.add(root);
+      state.modelRoots.set(m.id, root);
+      state.objects.push({
+        id:m.id, kind:'model', name:m.name, source:m.source,
+        format:m.format, native_format:m.native_format, source_path:m.path || ''
+      });
+    } catch (error) {
+      missingModels++;
+      console.error('Model snapshot load failed', m.name, error);
+    }
+  });
+
   state.project = { ...state.project, ...(data.project || {}) };
   state.measurementsVisible = data.measurements_visible !== false;
   state.measurements = (data.measurements || []).map(function(m){
@@ -1747,21 +1790,50 @@ function loadProject(data) {
       kind:m.kind === 'surface' ? 'surface' : 'point',
       start:new THREE.Vector3(mmToScene(m.start.x),mmToScene(m.start.y),mmToScene(m.start.z)),
       end:new THREE.Vector3(mmToScene(m.end.x),mmToScene(m.end.y),mmToScene(m.end.z)),
+      dimensionEnd:new THREE.Vector3(mmToScene(m.end.x),mmToScene(m.end.y),mmToScene(m.end.z)),
       distance_m:Number(m.distance_m)||0,
       start_normal:m.start_normal ? new THREE.Vector3(m.start_normal.x,m.start_normal.y,m.start_normal.z) : null,
-      end_normal:m.end_normal ? new THREE.Vector3(m.end_normal.x,m.end_normal.y,m.end_normal.z) : null
+      end_normal:m.end_normal ? new THREE.Vector3(m.end_normal.x,m.end_normal.y,m.end_normal.z) : null,
+      start_anchor:m.start_anchor || null,
+      end_anchor:m.end_anchor || null
     };
   });
+
   $('projectName').value = state.project.name || 'Factory Cable Routing';
   $('unitSystem').value = state.project.units || 'mm';
-  state.selected = null; state.measureStart = null; state.selectedMeasurementId = null; resetHistory(); rebuildRoutes(); rebuildMeasurements(); renderMeasurementsToggle(); render();
+  state.selected = null;
+  state.measureStart = null;
+  state.selectedMeasurementId = null;
+  state.surfaceAlignStart = null;
+  resetHistory();
+  rebuildRoutes();
+  syncMeasurements();
+  rebuildMeasurements();
+  renderMeasurementsToggle();
+  renderMeasurementList();
+  render();
+
+  toast(missingModels ? 'Project loaded; ' + missingModels + ' model(s) could not be restored.' : 'Project loaded');
 }
+$('projectFile').addEventListener('change', async function(event){
+  const file = event.target.files && event.target.files[0];
+  event.target.value = '';
+  if (!file) return;
+  try {
+    const data = JSON.parse(await file.text());
+    loadProject(data);
+  } catch (error) {
+    console.error(error);
+    toast('Load Project failed: ' + (error && error.message ? error.message : String(error)));
+  }
+});
+
 $('newProjectBtn').addEventListener('click', function(){
   if (!confirm('Clear the current design?')) return;
   state.modelRoots.forEach(function(root){ scene.remove(root); }); state.modelRoots.clear();
   state.sourceModels = [];
   state.objects = []; state.selected = null; resetHistory(); state.surfacePick = null; state.surfacePickMode = false;
-  state.measureStart = null; state.selectedMeasurementId = null; state.measurements = []; clearSurfaceSelectionVisuals(); rebuildMeasurements(); renderMeasurementsToggle(); renderMeasurementList(); render(); toast('New project created');
+  state.measureStart = null; state.surfaceAlignStart = null; state.selectedMeasurementId = null; state.measurements = []; clearSurfaceSelectionVisuals(); rebuildMeasurements(); renderMeasurementsToggle(); renderMeasurementList(); render(); toast('New project created');
 });
 $('exportBoqBtn').addEventListener('click', function(){
   const rows = [['Item','Specification','Name','Quantity','Unit','Elbows']];
