@@ -963,8 +963,10 @@ function handleKeyboardShortcut(e) {
     if (key === 'd') { e.preventDefault(); e.stopPropagation(); if(e.stopImmediatePropagation)e.stopImmediatePropagation(); copySelected(); pasteClipboard(); return; }
   }
 
-  if (key === 'enter' && state.tool === 'auto-route' && !isTextEditing) {
+  if (key === 'enter' && state.tool === 'auto-route') {
     e.preventDefault();
+    e.stopPropagation();
+    if (e.stopImmediatePropagation) e.stopImmediatePropagation();
     finishAutoRoute();
     return;
   }
