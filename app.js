@@ -14,7 +14,7 @@ const state = {
   modelRoots: new Map(), routeRoots: new Map(), measureStart: null,
   sourceModels: [], dragging: null, skipClick: false,
   surfacePickMode: false, surfacePick: null,
-  measureStart: null, autoRouteStart: null, measurements: [], measurementsVisible: true,
+  measureStart: null, autoRouteStart: null, autoRoutePendingEnd: null, measurements: [], measurementsVisible: true,
   selectedMeasurementId: null,
   surfaceAlignStart: null,
   clipboard: null,
@@ -284,7 +284,11 @@ function autoRoutePoint(event) {
     });
     hits.sort(function(a,b){ return a.distance - b.distance; });
     const hit = hits[0];
-    if (hit && hit.point) return hit.point.clone();
+    if (hit && hit.point) {
+      const point = hit.point.clone();
+      point.__routeSnapToModel = true;
+      return point;
+    }
   }
 
   const groundHit = raycaster.intersectObject(ground, false)[0];
@@ -292,6 +296,7 @@ function autoRoutePoint(event) {
 
   const point = groundHit.point.clone();
   point.y = mmToScene(Number($('defaultElevation').value) || 3000);
+  point.__routeSnapToModel = true;
   return point;
 }
 
