@@ -1247,6 +1247,114 @@ function deleteMeasurement(id) {
   toast('Dimension deleted: ' + formatDistance(deleted.distance_m));
 }
 
+function moveMeasurementObject(objectId, delta) {
+  if (!objectId || !delta || delta.lengthSq() < 1e-16) return false;
+  const object = state.objects.find(function(o){ return o.id === objectId; });
+  if (!object) return false;
+
+  if (object.kind === 'cable' || object.kind === 'tray') {
+    object.points.forEach(function(p){ p.add(delta); });
+    rebuildRoutes();
+    return true;
+  }
+
+  if (object.kind === 'model') {
+    const root = state.modelRoots.get(objectId);
+    if (!root) return false;
+    root.position.add(delta);
+    root.updateMatrixWorld(true);
+    return true;
+  }
+
+  return false;
+}
+
+function setMeasurementTargetDistance(id, targetMm) {
+  const measurement = state.measurements.find(function(m){ return m.id === id; });
+  if (!measurement || measurement.kind !== 'surface') {
+    toast('Select a surface-to-surface measurement first');
+    return;
+  }
+
+  const value = Number(targetMm);
+  if (!Number.isFinite(value) || value < 0) {
+    toast('Enter a valid distance in mm');
+    return;
+  }
+
+  const startAnchor = measurement.start_anchor;
+  const endAnchor = measurement.end_anchor;
+  if (!startAnchor || !endAnchor || !startAnchor.objectId || !endAnchor.objectId) {
+    toast('This measurement cannot be adjusted from the panel');
+    return;
+  }
+
+  if (startAnchor.objectId === endAnchor.objectId) {
+    toast('The two selected surfaces must belong to different objects');
+    return;
+  }
+
+  const before = captureDesignState();
+  const targetScene = mmToScene(value);
+  const sourceObjectId = endAnchor.objectId;
+  let moved = false;
+
+  // Move only the object carrying the second selected surface.
+  // The existing syncMeasurements() remains the single source of truth for
+  // the actual shortest surface-to-surface distance.
+  for (let i = 0; i < 12; i++) {
+    syncMeasurements();
+
+    const currentScene = Math.max(0, Number(measurement.distance_m) / 0.01);
+    const error = targetScene - currentScene;
+    if (Math.abs(error) <= 1e-7) break;
+
+    let direction = (measurement.dimensionEnd || measurement.end)
+      .clone()
+      .sub(measurement.displayStart || measurement.start);
+
+    if (direction.lengthSq() < 1e-12) {
+      const normal = measurement.start_normal && measurement.start_normal.lengthSq()
+        ? measurement.start_normal.clone().normalize()
+        : null;
+      if (!normal) {
+        toast('Could not determine the measurement direction');
+        return;
+      }
+      direction = normal;
+    } else {
+      direction.normalize();
+    }
+
+    if (!moveMeasurementObject(sourceObjectId, direction.multiplyScalar(error))) {
+      toast('The second surface object cannot be moved');
+      return;
+    }
+    moved = true;
+  }
+
+  syncMeasurements();
+  const actualMm = Math.abs(Number(measurement.distance_m) || 0) * 1000;
+  const remainingMm = Math.abs(actualMm - value);
+
+  if (!moved) {
+    toast('Distance is already ' + actualMm.toFixed(1) + ' mm');
+    return;
+  }
+
+  recordHistory(before);
+  rebuildMeasurements();
+  renderScene();
+  renderBoq();
+  renderProperties();
+
+  if (remainingMm <= 0.1) {
+    toast('Surface distance set to ' + actualMm.toFixed(1) + ' mm');
+  } else {
+    toast('Closest achievable distance: ' + actualMm.toFixed(1) + ' mm');
+  }
+}
+
 function renderMeasurementList() {
   const box = $('measurementList');
   if (!box) return;
@@ -1269,6 +1377,43 @@ function renderMeasurementList() {
     if (measurement) measurement.listValue = row.querySelector('.measurement-select b');
     row.querySelector('.measurement-select').addEventListener('click', function(){ selectMeasurement(id); });
     row.querySelector('.measurement-delete').addEventListener('click', function(){ deleteMeasurement(id); });
+  });
+
+  const editor = $('measurementEditor');
+  if (!editor) return;
+
+  const selected = state.measurements.find(function(m){ return m.id === state.selectedMeasurementId; });
+  if (!selected) {
+    editor.innerHTML = '<div class="hint">Select a surface-to-surface measurement to set an exact distance.</div>';
+    return;
+  }
+
+  if (selected.kind !== 'surface') {
+    editor.innerHTML = '<div class="hint">Exact target distance is available only for surface-to-surface measurements.</div>';
+    return;
+  }
+
+  editor.innerHTML =
+    '<div class="measurement-editor-title">Exact Surface Distance</div>' +
+    '<label class="field"><span>Target Distance (mm)</span>' +
+      '<input id="measurementTargetDistance" class="measurement-target" type="number" min="0" step="0.1" value="' +
+        (Math.abs(Number(selected.distance_m) || 0) * 1000).toFixed(1) +
+      '">' +
+    '</label>' +
+    '<button id="setMeasurementTargetBtn" class="small">Set Distance</button>' +
+    '<div class="hint">The first selected surface stays fixed. The object containing the second selected surface is moved until the measured surface distance reaches the target.</div>';
+
+  const input = $('measurementTargetDistance');
+  const button = $('setMeasurementTargetBtn');
+  const apply = function(){
+    setMeasurementTargetDistance(selected.id, input.value);
+  };
+  button.addEventListener('click', apply);
+  input.addEventListener('keydown', function(event){
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      apply();
+    }
   });
 }
 
