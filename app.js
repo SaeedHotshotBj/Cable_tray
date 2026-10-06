@@ -221,6 +221,7 @@ function saveProjectFile() {
 function setTool(tool) {
   state.surfacePickMode = false;
   state.surfacePick = null;
+  state.surfaceAlignStart = null;
   state.tool = tool;
   state.drawing = (tool === 'cable' || tool === 'tray') ? { type: tool, points: [] } : null;
   state.measureStart = null;
@@ -896,13 +897,56 @@ function getProjectRoot(objectId) {
   return state.modelRoots.get(objectId) || state.routeRoots.get(objectId) || null;
 }
 
+function faceGeometryData(hit, root) {
+  if (!hit || !hit.face || !hit.object || !root) return null;
+  const geometry = hit.object.geometry;
+  const position = geometry && geometry.attributes ? geometry.attributes.position : null;
+  if (!position) return null;
+
+  const indices = geometry.index;
+  const vertexIndices = indices
+    ? [
+        indices.getX(hit.faceIndex * 3),
+        indices.getX(hit.faceIndex * 3 + 1),
+        indices.getX(hit.faceIndex * 3 + 2)
+      ]
+    : [hit.faceIndex * 3, hit.faceIndex * 3 + 1, hit.faceIndex * 3 + 2];
+
+  if (vertexIndices.some(function(i){ return !Number.isInteger(i) || i < 0 || i >= position.count; })) return null;
+
+  const worldVertices = vertexIndices.map(function(i){
+    return new THREE.Vector3()
+      .fromBufferAttribute(position, i)
+      .applyMatrix4(hit.object.matrixWorld);
+  });
+
+  const geometricNormal = worldVertices[1].clone().sub(worldVertices[0])
+    .cross(worldVertices[2].clone().sub(worldVertices[0]));
+  if (geometricNormal.lengthSq() < 1e-12) return null;
+  geometricNormal.normalize();
+
+  const inverseRoot = root.matrixWorld.clone().invert();
+  const localNormal = geometricNormal.clone().transformDirection(inverseRoot).normalize();
+  const localPoint = root.worldToLocal(hit.point.clone());
+  const localTriangle = worldVertices.map(function(p){
+    const v = root.worldToLocal(p.clone());
+    return {x:v.x,y:v.y,z:v.z};
+  });
+
+  return {
+    point: hit.point.clone(),
+    normal: geometricNormal,
+    localPoint: {x:localPoint.x,y:localPoint.y,z:localPoint.z},
+    localNormal: {x:localNormal.x,y:localNormal.y,z:localNormal.z},
+    localTriangle: localTriangle,
+    object: hit.object,
+    faceIndex: hit.faceIndex
+  };
+}
+
 function measurementTargetFromEvent(event) {
   pointerRay(event);
 
-  // Measure only against real project geometry:
-  // imported CAD/model surfaces and surfaces of routes already created in the project.
-  // The editor ground plane is intentionally excluded so clicking empty space
-  // can never create a measurement point.
   const roots = Array.from(state.modelRoots.values()).concat(Array.from(state.routeRoots.values()));
   if (!roots.length) {
     toast('No project surfaces are available for measurement');
@@ -931,65 +975,219 @@ function measurementTargetFromEvent(event) {
     return null;
   }
 
-  const point = hit.point.clone();
-  const normal = hit.face.normal.clone().transformDirection(hit.object.matrixWorld).normalize();
-  const worldQuaternion = root.getWorldQuaternion(new THREE.Quaternion());
-  const localNormal = normal.clone().applyQuaternion(worldQuaternion.invert()).normalize();
+  const face = faceGeometryData(hit, root);
+  if (!face) {
+    toast('The selected face has no usable surface geometry');
+    return null;
+  }
 
   return {
-    kind: 'surface',
-    point: point,
-    normal: normal,
-    modelId: modelObject && modelObject.kind === 'model' ? objectId : null,
-    objectId: objectId,
-    root: root,
-    localPoint: root.worldToLocal(point.clone()),
-    localNormal: localNormal,
-    object: hit.object,
-    faceIndex: hit.faceIndex
+    kind:'surface',
+    point:face.point,
+    normal:face.normal,
+    modelId:modelObject && modelObject.kind === 'model' ? objectId : null,
+    objectId:objectId,
+    root:root,
+    localPoint:face.localPoint,
+    localNormal:face.localNormal,
+    localTriangle:face.localTriangle,
+    object:face.object,
+    faceIndex:face.faceIndex
   };
 }
 
 function makeMeasurementAnchor(target) {
   if (!target || !target.objectId || !target.localPoint) return null;
   return {
-    objectId: target.objectId,
-    localPoint: { x: target.localPoint.x, y: target.localPoint.y, z: target.localPoint.z },
-    localNormal: target.localNormal ? { x: target.localNormal.x, y: target.localNormal.y, z: target.localNormal.z } : null
+    objectId:target.objectId,
+    localPoint:{x:target.localPoint.x,y:target.localPoint.y,z:target.localPoint.z},
+    localNormal:target.localNormal ? {
+      x:target.localNormal.x,y:target.localNormal.y,z:target.localNormal.z
+    } : null,
+    localTriangle:Array.isArray(target.localTriangle)
+      ? target.localTriangle.map(function(v){ return {x:v.x,y:v.y,z:v.z}; })
+      : null
   };
 }
 
 function resolveMeasurementAnchor(anchor, fallback) {
-  if (!anchor || !anchor.objectId) return fallback ? fallback.clone() : new THREE.Vector3();
+  if (!anchor || !anchor.objectId || !anchor.localPoint) return fallback ? fallback.clone() : new THREE.Vector3();
   const root = getProjectRoot(anchor.objectId);
   if (!root) return fallback ? fallback.clone() : new THREE.Vector3();
-  return root.localToWorld(new THREE.Vector3(anchor.localPoint.x, anchor.localPoint.y, anchor.localPoint.z));
+  return root.localToWorld(new THREE.Vector3(anchor.localPoint.x,anchor.localPoint.y,anchor.localPoint.z));
 }
 
 function resolveMeasurementNormal(anchor, fallback) {
   if (!anchor || !anchor.objectId || !anchor.localNormal) return fallback ? fallback.clone().normalize() : null;
   const root = getProjectRoot(anchor.objectId);
   if (!root) return fallback ? fallback.clone().normalize() : null;
-  return new THREE.Vector3(anchor.localNormal.x, anchor.localNormal.y, anchor.localNormal.z)
-    .transformDirection(root.matrixWorld)
-    .normalize();
+  return new THREE.Vector3(anchor.localNormal.x,anchor.localNormal.y,anchor.localNormal.z)
+    .transformDirection(root.matrixWorld).normalize();
+}
+
+function resolveMeasurementTriangle(anchor) {
+  if (!anchor || !anchor.objectId || !Array.isArray(anchor.localTriangle) || anchor.localTriangle.length !== 3) return null;
+  const root = getProjectRoot(anchor.objectId);
+  if (!root) return null;
+  return anchor.localTriangle.map(function(v){
+    return root.localToWorld(new THREE.Vector3(v.x,v.y,v.z));
+  });
+}
+
+function closestPointsOnSegments(p1,q1,p2,q2) {
+  const d1=q1.clone().sub(p1);
+  const d2=q2.clone().sub(p2);
+  const r=p1.clone().sub(p2);
+  const a=d1.dot(d1);
+  const e=d2.dot(d2);
+  const f=d2.dot(r);
+  let s=0;
+  let t=0;
+
+  if(a<=1e-12 && e<=1e-12) {
+    return {a:p1.clone(),b:p2.clone(),distance:p1.distanceTo(p2)};
+  }
+
+  if(a<=1e-12) {
+    s=0;
+    t=Math.max(0,Math.min(1,f/e));
+  } else {
+    const c=d1.dot(r);
+    if(e<=1e-12) {
+      t=0;
+      s=Math.max(0,Math.min(1,-c/a));
+    } else {
+      const b=d1.dot(d2);
+      const denom=a*e-b*b;
+      if(Math.abs(denom)>1e-12) s=Math.max(0,Math.min(1,(b*f-c*e)/denom));
+      const tNom=b*s+f;
+      if(tNom<=0) {
+        t=0;
+        s=Math.max(0,Math.min(1,-c/a));
+      } else if(tNom>=e) {
+        t=1;
+        s=Math.max(0,Math.min(1,(b-c)/a));
+      } else {
+        t=tNom/e;
+      }
+    }
+  }
+
+  const aPoint=p1.clone().add(d1.multiplyScalar(s));
+  const bPoint=p2.clone().add(d2.multiplyScalar(t));
+  return {a:aPoint,b:bPoint,distance:aPoint.distanceTo(bPoint)};
+}
+
+function closestPointToTriangle(point,a,b,c) {
+  return new THREE.Triangle(a,b,c).closestPointToPoint(point.clone(),new THREE.Vector3());
+}
+
+function closestPointsSegmentTriangle(p0,p1,a,b,c) {
+  let best=null;
+  const direction=p1.clone().sub(p0);
+  const length=direction.length();
+
+  if(length>1e-12) {
+    direction.normalize();
+    const hit=new THREE.Vector3();
+    const ray=new THREE.Ray(p0.clone(),direction);
+    if(ray.intersectTriangle(a,b,c,false,hit)) {
+      const travelled=p0.distanceTo(hit);
+      if(travelled<=length+1e-8) return {a:hit.clone(),b:hit.clone(),distance:0};
+    }
+  }
+
+  [p0,p1].forEach(function(endpoint){
+    const closest=closestPointToTriangle(endpoint,a,b,c);
+    const candidate={a:endpoint.clone(),b:closest,distance:endpoint.distanceTo(closest)};
+    if(!best || candidate.distance<best.distance) best=candidate;
+  });
+
+  [[a,b],[b,c],[c,a]].forEach(function(edge){
+    const candidate=closestPointsOnSegments(p0,p1,edge[0],edge[1]);
+    if(!best || candidate.distance<best.distance) {
+      best={a:candidate.a,b:candidate.b,distance:candidate.distance};
+    }
+  });
+
+  return best;
+}
+
+function closestPointsBetweenTriangles(a0,a1,a2,b0,b1,b2) {
+  const edgesA=[[a0,a1],[a1,a2],[a2,a0]];
+  const edgesB=[[b0,b1],[b1,b2],[b2,b0]];
+  let best=null;
+
+  edgesA.forEach(function(edge){
+    const candidate=closestPointsSegmentTriangle(edge[0],edge[1],b0,b1,b2);
+    if(!best || candidate.distance<best.distance) best=candidate;
+  });
+  edgesB.forEach(function(edge){
+    const candidate=closestPointsSegmentTriangle(edge[0],edge[1],a0,a1,a2);
+    if(!best || candidate.distance<best.distance) {
+      best={a:candidate.b,b:candidate.a,distance:candidate.distance};
+    }
+  });
+
+  return best;
 }
 
 function syncMeasurements() {
   state.measurements.forEach(function(m){
-    m.start = resolveMeasurementAnchor(m.start_anchor, m.start);
-    m.end = resolveMeasurementAnchor(m.end_anchor, m.end);
-    const startNormal = resolveMeasurementNormal(m.start_anchor, m.start_normal);
-    const endNormal = resolveMeasurementNormal(m.end_anchor, m.end_normal);
-    let dimensionEnd = m.end.clone();
-    let distance = m.start.distanceTo(m.end);
-    if (m.kind === 'surface' && startNormal && endNormal && Math.abs(startNormal.dot(endNormal)) >= 0.95) {
-      const signed = m.end.clone().sub(m.start).dot(startNormal);
-      dimensionEnd = m.start.clone().add(startNormal.clone().multiplyScalar(signed));
-      distance = Math.abs(signed);
+    const anchoredStart=resolveMeasurementAnchor(m.start_anchor,m.start);
+    const anchoredEnd=resolveMeasurementAnchor(m.end_anchor,m.end);
+    const startNormal=resolveMeasurementNormal(m.start_anchor,m.start_normal);
+    const endNormal=resolveMeasurementNormal(m.end_anchor,m.end_normal);
+
+    let displayStart=anchoredStart.clone();
+    let displayEnd=anchoredEnd.clone();
+    let distance=anchoredStart.distanceTo(anchoredEnd);
+
+    if(m.kind==='surface' && startNormal && endNormal) {
+      const parallel=Math.abs(startNormal.dot(endNormal))>=0.9995;
+      if(parallel) {
+        const signed=anchoredEnd.clone().sub(anchoredStart).dot(startNormal);
+        displayEnd=anchoredStart.clone().add(startNormal.clone().multiplyScalar(signed));
+        distance=Math.abs(signed);
+      } else {
+        const triangleA=resolveMeasurementTriangle(m.start_anchor);
+        const triangleB=resolveMeasurementTriangle(m.end_anchor);
+        const closest=triangleA && triangleB
+          ? closestPointsBetweenTriangles(
+              triangleA[0],triangleA[1],triangleA[2],
+              triangleB[0],triangleB[1],triangleB[2]
+            )
+          : null;
+        if(closest) {
+          displayStart=closest.a.clone();
+          displayEnd=closest.b.clone();
+          distance=closest.distance;
+        } else {
+          const signed=anchoredEnd.clone().sub(anchoredStart).dot(startNormal);
+          displayEnd=anchoredStart.clone().add(startNormal.clone().multiplyScalar(signed));
+          distance=Math.abs(signed);
+        }
+      }
     }
-    m.dimensionEnd = dimensionEnd;
-    m.distance_m = sceneToM(distance);
+
+    m.start=anchoredStart;
+    m.end=anchoredEnd;
+    m.start_normal=startNormal || m.start_normal || null;
+    m.end_normal=endNormal || m.end_normal || null;
+    m.displayStart=displayStart;
+    m.dimensionEnd=displayEnd;
+    m.distance_m=sceneToM(distance);
+
+    if(m.line && m.line.geometry && m.line.geometry.attributes && m.line.geometry.attributes.position) {
+      const positions=m.line.geometry.attributes.position;
+      positions.setXYZ(0,displayStart.x,displayStart.y,displayStart.z);
+      positions.setXYZ(1,displayEnd.x,displayEnd.y,displayEnd.z);
+      positions.needsUpdate=true;
+      m.line.geometry.computeBoundingSphere();
+    }
+    if(m.label) {
+      m.label.textContent=formatDistance(m.distance_m);
+    }
   });
 }
 
@@ -1071,37 +1269,40 @@ function renderMeasurementList() {
 
 function rebuildMeasurements() {
   measurementRoot.clear();
-  const overlay = $('measurementOverlay');
-  if (overlay) overlay.innerHTML = '';
+  const overlay=$('measurementOverlay');
+  if(overlay) overlay.innerHTML='';
 
   state.measurements.forEach(function(m){
-    const selected = m.id === state.selectedMeasurementId;
-    const geometry = new THREE.BufferGeometry().setFromPoints([m.start, m.dimensionEnd || m.end]);
-    const material = new THREE.LineBasicMaterial({
-      color: selected ? 0xffffff : (m.kind === 'surface' ? 0xffc857 : 0x66d9ff),
-      transparent: true,
-      opacity: selected ? 1 : 0.95
+    const selected=m.id===state.selectedMeasurementId;
+    const geometry=new THREE.BufferGeometry().setFromPoints([
+      m.displayStart || m.start,
+      m.dimensionEnd || m.end
+    ]);
+    const material=new THREE.LineBasicMaterial({
+      color:selected?0xffffff:(m.kind==='surface'?0xffc857:0x66d9ff),
+      transparent:true,
+      opacity:selected?1:0.95
     });
-    const line = new THREE.Line(geometry, material);
-    line.userData.measurementId = m.id;
-    m.line = line;
+    const line=new THREE.Line(geometry,material);
+    line.userData.measurementId=m.id;
+    m.line=line;
     measurementRoot.add(line);
 
-    if (overlay) {
-      const label = document.createElement('div');
-      label.className = 'measurement-label' + (selected ? ' active' : '');
-      label.textContent = formatDistance(m.distance_m);
-      label.title = m.kind === 'surface' ? 'Surface distance' : 'Point distance';
-      label.addEventListener('click', function(event){
+    if(overlay){
+      const label=document.createElement('div');
+      label.className='measurement-label'+(selected?' active':'');
+      label.textContent=formatDistance(m.distance_m);
+      label.title=m.kind==='surface'?'Surface distance':'Point distance';
+      label.addEventListener('click',function(event){
         event.stopPropagation();
         selectMeasurement(m.id);
       });
       overlay.appendChild(label);
-      m.label = label;
+      m.label=label;
     }
   });
 
-  measurementRoot.visible = state.measurementsVisible;
+  measurementRoot.visible=state.measurementsVisible;
   updateMeasurementOverlay();
   renderMeasurementList();
 }
@@ -1113,7 +1314,10 @@ function updateMeasurementOverlay() {
   const rect=renderer.domElement.getBoundingClientRect();
   state.measurements.forEach(function(m){
     if(!m.label)return;
-    const mid=m.start.clone().add(m.dimensionEnd || m.end).multiplyScalar(0.5);
+    m.label.textContent=formatDistance(m.distance_m);
+    const start=m.displayStart || m.start;
+    const end=m.dimensionEnd || m.end;
+    const mid=start.clone().add(end).multiplyScalar(0.5);
     const projected=mid.project(camera);
     const visible=projected.z>=-1 && projected.z<=1 && projected.x>=-1.15 && projected.x<=1.15 && projected.y>=-1.15 && projected.y<=1.15;
     m.label.style.display=visible?'block':'none';
@@ -1125,41 +1329,27 @@ function updateMeasurementOverlay() {
 }
 
 function addMeasurement(first,second) {
-  const delta=second.point.clone().sub(first.point);
-  let start=first.point.clone();
-  let end=second.point.clone();
-  let distance=delta.length();
-
-  if(first.kind==='surface' && second.kind==='surface'){
-    const n1=first.normal.clone().normalize();
-    const n2=second.normal.clone().normalize();
-    if(Math.abs(n1.dot(n2))>=0.95){
-      const signed=delta.dot(n1);
-      end=start.clone().add(n1.multiplyScalar(signed));
-      distance=Math.abs(signed);
-    }
-  }
-
   const m={
     id:id('measure'),
     kind:first.kind==='surface' && second.kind==='surface'?'surface':'point',
-    start:start,
-    end:end,
-    distance_m:sceneToM(distance),
+    start:first.point.clone(),
+    end:second.point.clone(),
+    distance_m:sceneToM(first.point.distanceTo(second.point)),
     start_normal:first.normal?first.normal.clone():null,
     end_normal:second.normal?second.normal.clone():null,
     start_anchor:makeMeasurementAnchor(first),
     end_anchor:makeMeasurementAnchor(second)
   };
   state.measurements.push(m);
-  state.selectedMeasurementId = m.id;
+  state.selectedMeasurementId=m.id;
+  syncMeasurements();
   clearSurfaceSelectionVisuals();
   rebuildMeasurements();
   renderMeasurementsToggle();
   toast((m.kind==='surface'?'Surface distance: ':'Distance: ')+formatDistance(m.distance_m));
 }
 
-function toggleMeasurements() {
+function toggleMeasurementsfunction toggleMeasurements() {
   state.measurementsVisible=!state.measurementsVisible;
   measurementRoot.visible=state.measurementsVisible;
   updateMeasurementOverlay();
@@ -1196,45 +1386,52 @@ function cancelSurfacePick() {
 
 function pickSurfaceFromEvent(event) {
   pointerRay(event);
-  const roots = Array.from(state.modelRoots.values());
-  if (!roots.length) {
+  const roots=Array.from(state.modelRoots.values());
+  if(!roots.length){
     cancelSurfacePick();
     toast('Load a CAD/model surface first');
     return;
   }
 
-  const hits = [];
+  const hits=[];
   roots.forEach(function(root){
-    raycaster.intersectObject(root, true).forEach(function(hit){ hits.push(hit); });
+    raycaster.intersectObject(root,true).forEach(function(hit){ hits.push(hit); });
   });
-  hits.sort(function(a,b){ return a.distance - b.distance; });
-  const hit = hits[0];
+  hits.sort(function(a,b){ return a.distance-b.distance; });
+  const hit=hits[0];
 
-  const o = state.objects.find(function(x){ return x.id === state.selected; });
-  if (!o || o.kind !== 'tray') {
+  const o=state.objects.find(function(x){ return x.id===state.selected; });
+  if(!o || o.kind!=='tray'){
     cancelSurfacePick();
     toast('Select a tray before picking a surface');
     return;
   }
-  if (!hit || !hit.face) {
+  if(!hit || !hit.face){
     toast('No model surface selected');
     return;
   }
 
-  const normal = hit.face.normal.clone().transformDirection(hit.object.matrixWorld).normalize();
-  state.surfacePick = {
-    routeId: o.id,
-    point: hit.point.clone(),
-    normal: normal,
-    modelId: hit.object.userData && hit.object.userData.objectId ? hit.object.userData.objectId : null
+  const modelId=hit.object.userData && hit.object.userData.objectId ? hit.object.userData.objectId : null;
+  const modelRoot=modelId ? getProjectRoot(modelId) : null;
+  const face=faceGeometryData(hit,modelRoot);
+  if(!face){
+    toast('The selected model face has no usable surface geometry');
+    return;
+  }
+
+  state.surfacePick={
+    routeId:o.id,
+    point:face.point,
+    normal:face.normal,
+    modelId:modelId
   };
-  state.surfacePickMode = false;
+  state.surfacePickMode=false;
   status('Surface selected');
   renderProperties();
   toast('Surface selected');
 }
 
-function surfaceAlignmentRotation(o, surfaceNormal, mode, angleDeg) {
+function surfaceAlignmentRotationfunction surfaceAlignmentRotation(o, surfaceNormal, mode, angleDeg) {
   const rot = o.rotation_deg || { x: 0, y: 0, z: 0 };
   const currentEuler = new THREE.Euler(
     THREE.MathUtils.degToRad(Number(rot.x) || 0),
@@ -1317,49 +1514,70 @@ function applySurfaceAlignment(o, mode, angleDeg) {
   render();
   toast('Tray aligned to selected surface');
 }
-function alignObjectToSurface(reference, source) {
-  if (!reference || !source || !reference.objectId || !source.objectId) {
+function quaternionAngle(q) {
+  return 2*Math.acos(Math.min(1,Math.abs(q.w)));
+}
+
+function alignObjectToSurface(reference,source) {
+  if(!reference || !source || !reference.objectId || !source.objectId){
     toast('Select two project surfaces');
     return;
   }
-  if (reference.objectId === source.objectId) {
+  if(reference.objectId===source.objectId){
     toast('The two surfaces must belong to different objects');
     return;
   }
 
-  const referenceRoot = getProjectRoot(reference.objectId);
-  const sourceRoot = getProjectRoot(source.objectId);
-  const sourceObject = state.objects.find(function(o){ return o.id === source.objectId; });
-  if (!referenceRoot || !sourceRoot || !sourceObject) {
+  const referenceRoot=getProjectRoot(reference.objectId);
+  const sourceRoot=getProjectRoot(source.objectId);
+  const sourceObject=state.objects.find(function(o){ return o.id===source.objectId; });
+  if(!referenceRoot || !sourceRoot || !sourceObject){
     toast('Surface object is not available');
     return;
   }
 
-  const beforeHistory = captureDesignState();
-  const currentQuaternion = sourceRoot.getWorldQuaternion(new THREE.Quaternion());
-  const rotationDelta = new THREE.Quaternion().setFromUnitVectors(source.normal, reference.normal);
-  const finalQuaternion = rotationDelta.clone().multiply(currentQuaternion);
+  const beforeHistory=captureDesignState();
+  referenceRoot.updateMatrixWorld(true);
+  sourceRoot.updateMatrixWorld(true);
 
+  const currentQuaternion=sourceRoot.getWorldQuaternion(new THREE.Quaternion());
+  const sourceNormal=source.normal.clone().normalize();
+  const referenceNormal=reference.normal.clone().normalize();
+
+  // Align the two planes while using the smaller of the two valid normal
+  // orientations. This avoids an unnecessary 180° flip when the surfaces
+  // already face opposite directions.
+  const alignSame=new THREE.Quaternion().setFromUnitVectors(sourceNormal,referenceNormal);
+  const alignOpposite=new THREE.Quaternion().setFromUnitVectors(
+    sourceNormal,referenceNormal.clone().negate()
+  );
+  const rotationDelta=quaternionAngle(alignOpposite)<quaternionAngle(alignSame)
+    ? alignOpposite
+    : alignSame;
+
+  const finalQuaternion=rotationDelta.clone().multiply(currentQuaternion);
   sourceRoot.quaternion.copy(finalQuaternion);
   sourceRoot.updateMatrixWorld(true);
 
-  const sourceSurfacePoint = sourceRoot.localToWorld(source.localPoint.clone());
-  const translation = reference.point.clone().sub(sourceSurfacePoint);
+  const localPoint=new THREE.Vector3(source.localPoint.x,source.localPoint.y,source.localPoint.z);
+  const sourceSurfacePoint=sourceRoot.localToWorld(localPoint);
+  const translation=reference.point.clone().sub(sourceSurfacePoint);
+
   sourceRoot.position.add(translation);
   sourceRoot.updateMatrixWorld(true);
 
-  if (sourceObject.kind === 'cable' || sourceObject.kind === 'tray') {
-    const euler = new THREE.Euler().setFromQuaternion(sourceRoot.quaternion, 'XYZ');
-    sourceObject.rotation_deg = {
-      x: THREE.MathUtils.radToDeg(euler.x),
-      y: THREE.MathUtils.radToDeg(euler.y),
-      z: THREE.MathUtils.radToDeg(euler.z)
+  if(sourceObject.kind==='cable' || sourceObject.kind==='tray'){
+    const euler=new THREE.Euler().setFromQuaternion(sourceRoot.quaternion,'XYZ');
+    sourceObject.rotation_deg={
+      x:THREE.MathUtils.radToDeg(euler.x),
+      y:THREE.MathUtils.radToDeg(euler.y),
+      z:THREE.MathUtils.radToDeg(euler.z)
     };
     sourceObject.points.forEach(function(p){ p.add(translation); });
   }
 
-  state.selected = source.objectId;
-  state.surfaceAlignStart = null;
+  state.selected=source.objectId;
+  state.surfaceAlignStart=null;
   clearSurfaceSelectionVisuals();
   recordHistory(beforeHistory);
   rebuildRoutes();
@@ -1369,7 +1587,7 @@ function alignObjectToSurface(reference, source) {
   toast('Second surface aligned to first surface');
 }
 
-function renderScene() {
+function renderScenefunction renderScene() {
   const box = $('sceneList');
   if (!state.objects.length) { box.innerHTML = '<div class="hint" style="padding:10px">No objects yet.</div>'; return; }
   box.innerHTML = state.objects.map(function(o){
