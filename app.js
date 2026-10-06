@@ -207,11 +207,12 @@ function routeVisual(obj) {
     THREE.MathUtils.degToRad(Number(rot.z) || 0)
   );
 
-  const baseColor = obj.kind === 'cable' ? 0xffb347 : 0xb6bec7;
+  const isCable = obj.kind === 'cable';
+  const baseColor = isCable ? 0xffb347 : 0xb6bec7;
   const mat = new THREE.MeshStandardMaterial({
     color: baseColor,
-    roughness: 0.28,
-    metalness: 0.78
+    roughness: isCable ? 0.72 : 0.28,
+    metalness: isCable ? 0.25 : 0.78
   });
   g.userData.baseColor = baseColor;
   g.userData.meshMaterial = mat;
