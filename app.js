@@ -284,34 +284,27 @@ function routePoint(event) {
 function autoRoutePoint(event) {
   pointerRay(event);
   const roots = Array.from(state.modelRoots.values()).concat(Array.from(state.routeRoots.values()));
-  if (roots.length) {
-    const hits = [];
-    roots.forEach(function(root){
-      raycaster.intersectObject(root, true).forEach(function(hit){ hits.push(hit); });
-    });
-    hits.sort(function(a,b){ return a.distance - b.distance; });
-    const hit = hits[0];
-    if (hit && hit.point) {
-      const point = hit.point.clone();
-      let normal = new THREE.Vector3(0, 1, 0);
-      if (hit.face && hit.object) {
-        normal = hit.face.normal.clone();
-        normal.applyNormalMatrix(new THREE.Matrix3().getNormalMatrix(hit.object.matrixWorld)).normalize();
-        if (normal.lengthSq() < 1e-8) normal.set(0, 1, 0);
-      }
-      point.__routeSnapToModel = true;
-      point.__routeNormal = normal;
-      return point;
-    }
+  if (!roots.length) return null;
+
+  const hits = [];
+  roots.forEach(function(root){
+    raycaster.intersectObject(root, true).forEach(function(hit){ hits.push(hit); });
+  });
+
+  hits.sort(function(a,b){ return a.distance - b.distance; });
+  const hit = hits[0];
+  if (!hit || !hit.point) return null;
+
+  const point = hit.point.clone();
+  let normal = new THREE.Vector3(0, 1, 0);
+  if (hit.face && hit.object) {
+    normal = hit.face.normal.clone();
+    normal.applyNormalMatrix(new THREE.Matrix3().getNormalMatrix(hit.object.matrixWorld)).normalize();
+    if (normal.lengthSq() < 1e-8) normal.set(0, 1, 0);
   }
 
-  const groundHit = raycaster.intersectObject(ground, false)[0];
-  if (!groundHit) return null;
-
-  const point = groundHit.point.clone();
-  point.y = mmToScene(Number($('defaultElevation').value) || 3000);
   point.__routeSnapToModel = true;
-  point.__routeNormal = new THREE.Vector3(0, 1, 0);
+  point.__routeNormal = normal;
   return point;
 }
 
@@ -587,28 +580,23 @@ function routeVisual(obj) {
       return mesh;
     }
 
-    for (let i = 1; i < localPoints.length; i++) {
-      const a = localPoints[i - 1], b = localPoints[i];
+    function addTraySegment(a, b) {
       const len = a.distanceTo(b);
-      if (len < 0.001) continue;
+      if (len < 0.001) return;
 
       const dir = b.clone().sub(a).normalize();
       const centerSeg = a.clone().add(b).multiplyScalar(0.5);
 
-      // World Y is the normal/up direction for horizontal tray runs.
-      // For a vertical run, use world Z as the tray's local up direction
-      // so the cross-section remains well-defined instead of collapsing.
+      // Keep the tray cross-section upright for ordinary horizontal runs.
+      // When the segment is vertical, switch to world Z so the frame stays valid.
       let trayUp = new THREE.Vector3(0, 1, 0);
       if (Math.abs(trayUp.dot(dir)) > 0.999) trayUp.set(0, 0, 1);
       trayUp.sub(dir.clone().multiplyScalar(trayUp.dot(dir))).normalize();
 
-      const sideDir = dir.clone().cross(trayUp).normalize();
-
+      const sideDir = trayUp.clone().cross(dir).normalize();
       const depth = Math.max(len, sheet * 2);
       const edgeRadius = Math.min(sheet * 0.5, Math.max(0.05, depth * 0.03));
 
-      // Continuous solid floor. All offsets are relative to the segment's
-      // own cross-section so vertical segments are positioned correctly too.
       const floorPosition = centerSeg.clone()
         .add(trayUp.clone().multiplyScalar(-height * 0.5 + sheet * 0.5));
 
@@ -625,7 +613,6 @@ function routeVisual(obj) {
         trayUp
       );
 
-      // Continuous solid sidewalls.
       for (const side of [-1, 1]) {
         const wallOffset = sideDir.clone().multiplyScalar(side * (width * 0.5 - sheet * 0.5));
 
@@ -642,7 +629,6 @@ function routeVisual(obj) {
           trayUp
         );
 
-        // Rolled top lip for a cleaner industrial profile.
         const lipOffset = sideDir.clone().multiplyScalar(side * (width * 0.5 + lipWidth * 0.5));
         const lipPosition = centerSeg.clone()
           .add(lipOffset)
@@ -661,7 +647,6 @@ function routeVisual(obj) {
           trayUp
         );
 
-        // Subtle lower return flange: solid, continuous, and hole-free.
         const lowerFlangeOffset = sideDir.clone().multiplyScalar(side * (width * 0.5 - sheet * 0.5));
         const lowerFlangePosition = centerSeg.clone()
           .add(lowerFlangeOffset)
@@ -682,30 +667,46 @@ function routeVisual(obj) {
       }
     }
 
-    // Smooth solid transition blocks at bends; no perforation or open grid.
-    for (let i = 1; i < localPoints.length - 1; i++) {
-      const corner = localPoints[i];
-      const inDir = corner.clone().sub(localPoints[i - 1]).normalize();
-      const outDir = localPoints[i + 1].clone().sub(corner).normalize();
-      let bisector = inDir.clone().add(outDir);
-      if (bisector.lengthSq() < 1e-6) bisector = outDir.clone();
-      bisector.normalize();
+    const routeEntries = new Array(localPoints.length);
+    const routeExits = new Array(localPoints.length);
+    routeEntries[0] = localPoints[0].clone();
+    routeExits[0] = localPoints[0].clone();
+    routeEntries[localPoints.length - 1] = localPoints[localPoints.length - 1].clone();
+    routeExits[localPoints.length - 1] = localPoints[localPoints.length - 1].clone();
 
-      const elbowDepth = Math.max(width * 0.55, height);
-      const elbow = new THREE.Mesh(
-        new RoundedBoxGeometry(
-          Math.max(width, 0.2),
-          Math.max(height, sheet),
-          elbowDepth,
-          7,
-          Math.min(Math.max(width, height) * 0.16, elbowDepth * 0.16)
-        ),
-        mat
+    for (let i = 1; i < localPoints.length - 1; i++) {
+      const prev = localPoints[i - 1];
+      const cur = localPoints[i];
+      const next = localPoints[i + 1];
+      const inLength = cur.distanceTo(prev);
+      const outLength = next.distanceTo(cur);
+      const localRadius = Math.max(0, Math.min(curveRadius, inLength * 0.35, outLength * 0.35));
+      const inDir = cur.clone().sub(prev).normalize();
+      const outDir = next.clone().sub(cur).normalize();
+      routeEntries[i] = cur.clone().sub(inDir.multiplyScalar(localRadius));
+      routeExits[i] = cur.clone().add(outDir.multiplyScalar(localRadius));
+    }
+
+    // Straight runs stop cleanly at the tangent points of each bend.
+    for (let i = 1; i < localPoints.length; i++) {
+      const start = routeExits[i - 1];
+      const end = routeEntries[i];
+      addTraySegment(start, end);
+    }
+
+    // Replace the old bulky corner block with a segmented quadratic elbow.
+    // The small tangent-aligned pieces follow the same rounded centerline used
+    // by the route preview, making the tray bend smooth instead of boxy.
+    for (let i = 1; i < localPoints.length - 1; i++) {
+      const curve = new THREE.QuadraticBezierCurve3(
+        routeEntries[i],
+        localPoints[i],
+        routeExits[i]
       );
-      elbow.position.copy(corner);
-      elbow.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), bisector);
-      elbow.userData.objectId = obj.id;
-      g.add(elbow);
+      const elbowPoints = curve.getPoints(8);
+      for (let j = 1; j < elbowPoints.length; j++) {
+        addTraySegment(elbowPoints[j - 1], elbowPoints[j]);
+      }
     }
   }
 
