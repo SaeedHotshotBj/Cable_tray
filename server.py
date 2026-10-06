@@ -318,7 +318,7 @@ def convert_solidworks_file(source):
         "native_format": source.suffix.upper().lstrip("."),
         "format": "STL",
         "extension": ".stl",
-        "url": f"/api/solidworks/result/{token}.stl",
+        "url": f"/api/cad/result/{token}.stl",
         "load_errors": load_errors,
         "warnings": warnings,
     }
