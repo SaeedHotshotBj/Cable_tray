@@ -72,7 +72,7 @@ function setTool(tool) {
     select: 'Select an object in the 3D scene or Scene panel.',
     cable: 'Click route points. Press Enter to finish.',
     tray: 'Click route points. Press Enter to finish.',
-    model: 'Use Load Model for GLB/GLTF, OBJ or STL. Use Load SolidWorks for SLDASM/SLDPRT.',
+    model: 'Use Load Model for 3D, SolidWorks, AutoCAD DWG or DXF files.',
     measure: 'Click two points on the ground plane to measure.'
   };
   $('toolHint').textContent = hint[tool] || '';
@@ -256,6 +256,9 @@ async function importModelFile(fileUrl, displayName, format) {
     } else if (format === 'STL') {
       const data = await fetch(url).then(function(r){ if (!r.ok) throw new Error('Model could not be read'); return r.arrayBuffer(); });
       const geometry = new STLLoader().parse(data);
+      if (!geometry.attributes.position || geometry.attributes.position.count === 0) {
+        throw new Error('STL contains no geometry.');
+      }
       geometry.computeVertexNormals();
       root = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({ color: 0x9ca8b2, metalness: 0.45, roughness: 0.65 }));
     } else {
@@ -276,11 +279,12 @@ async function importModelFile(fileUrl, displayName, format) {
     console.error(err);
     status('Ready');
     toast('Import failed: ' + err.message);
+    throw err;
   }
 }
 
 async function loadSolidWorksFromPath(path, name) {
-  const response = await fetch('/api/solidworks/import', {
+  const response = await fetch('/api/cad/import', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ path: path })
