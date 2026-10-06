@@ -114,6 +114,8 @@ function captureDesignState() {
 
 function recordHistory(before) {
   if (!before || state.restoringHistory) return;
+  const after = captureDesignState();
+  if (JSON.stringify(before) === JSON.stringify(after)) return;
   state.undoStack.push(before);
   if (state.undoStack.length > 100) state.undoStack.shift();
   state.redoStack.length = 0;
