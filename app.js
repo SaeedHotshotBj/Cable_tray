@@ -1038,6 +1038,17 @@ function toggleMeasurements() {
   renderMeasurementList();
 }
 
+function clearAllMeasurements() {
+  state.measurements = [];
+  state.selectedMeasurementId = null;
+  state.measureStart = null;
+  clearSurfaceSelectionVisuals();
+  rebuildMeasurements();
+  renderMeasurementsToggle();
+  renderMeasurementList();
+  toast('All dimensions cleared');
+}
+
 function renderMeasurementsToggle() {
   const button=$('toggleMeasurementsBtn');
   if(button){
@@ -1687,6 +1698,11 @@ $('topBtn').addEventListener('click', function(){ camera.position.set(0,18000,0.
 $('frontBtn').addEventListener('click', function(){ camera.position.set(0,5000,18000); controls.target.set(0,0,0); controls.update(); });
 $('isoBtn').addEventListener('click', function(){ camera.position.set(12000,9500,12000); controls.target.set(0,1500,0); controls.update(); });
 $('toggleMeasurementsBtn').addEventListener('click', toggleMeasurements);
+$('clearMeasurementsBtn').addEventListener('click', function(){
+  if (!state.measurements.length) return;
+  if (!confirm('Delete all dimensions?')) return;
+  clearAllMeasurements();
+});
 setTool('select'); rebuildMeasurements(); renderMeasurementsToggle(); renderMeasurementList(); render(); animate();
 
 function animate(){
