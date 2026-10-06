@@ -200,6 +200,7 @@ function routeVisual(obj) {
   const localPoints = obj.points.map(function(p){ return p.clone().sub(center); });
   const rot = obj.rotation_deg || { x: 0, y: 0, z: 0 };
   g.position.copy(center);
+  g.rotation.order = 'XYZ';
   g.rotation.set(
     THREE.MathUtils.degToRad(Number(rot.x) || 0),
     THREE.MathUtils.degToRad(Number(rot.y) || 0),
@@ -236,31 +237,80 @@ function routeVisual(obj) {
   } else {
     const width = mmToScene(obj.width_mm);
     const height = mmToScene(obj.height_mm);
-    const segmentRadius = Math.min(width, height) * 0.12;
+    const sheet = Math.max(0.18, mmToScene(Math.min(obj.width_mm, obj.height_mm) * 0.035));
+    const rail = Math.max(0.22, sheet * 1.35);
+    const postPitch = Math.max(mmToScene(180), Math.min(mmToScene(350), width * 0.65));
+    const slotPitch = Math.max(mmToScene(120), Math.min(mmToScene(220), width * 0.42));
+    const slotGap = Math.max(mmToScene(55), Math.min(mmToScene(100), slotPitch * 0.42));
 
-    for (let i = 1; i < localPoints.length; i++) {
-      const a = localPoints[i - 1];
-      const b = localPoints[i];
-      const len = a.distanceTo(b);
-      const boxDepth = Math.max(len, Math.min(width, height) * 0.08);
-      const box = new THREE.Mesh(
-        new RoundedBoxGeometry(
-          Math.max(width, 0.2),
-          Math.max(height, 0.2),
-          boxDepth,
-          4,
-          segmentRadius
-        ),
-        mat
-      );
-      box.position.copy(a.clone().add(b).multiplyScalar(0.5));
-      box.lookAt(b);
-      box.userData.objectId = obj.id;
-      g.add(box);
+    function addOrientedPart(geometry, position, direction) {
+      const mesh = new THREE.Mesh(geometry, mat);
+      mesh.position.copy(position);
+      mesh.lookAt(position.clone().add(direction));
+      mesh.userData.objectId = obj.id;
+      g.add(mesh);
+      return mesh;
     }
 
-    // Soft geometric elbow connectors make direction changes read as a
-    // continuous tray rather than two hard-intersecting boxes.
+    for (let i = 1; i < localPoints.length; i++) {
+      const a = localPoints[i - 1], b = localPoints[i];
+      const len = a.distanceTo(b);
+      if (len < 0.001) continue;
+      const dir = b.clone().sub(a).normalize();
+      const centerSeg = a.clone().add(b).multiplyScalar(0.5);
+
+      // Bottom plate: repeated transverse sections create visible perforation gaps.
+      const count = Math.max(2, Math.floor(len / slotPitch));
+      const pitch = len / count;
+      const stripLength = Math.max(sheet * 1.5, pitch - slotGap);
+      for (let s = 0; s < count; s++) {
+        const t = (s + 0.5) / count;
+        const p = a.clone().lerp(b, t);
+        addOrientedPart(
+          new RoundedBoxGeometry(Math.max(width, 0.2), sheet, stripLength, 3, Math.min(sheet * 0.35, stripLength * 0.18)),
+          new THREE.Vector3(p.x, -height * 0.5 + sheet * 0.5, p.z),
+          dir
+        );
+      }
+
+      // Side walls: lower/upper continuous rails + vertical perforation ribs.
+      for (const side of [-1, 1]) {
+        const x = side * (width * 0.5 - rail * 0.5);
+        addOrientedPart(
+          new RoundedBoxGeometry(rail, rail, Math.max(len, rail), 3, rail * 0.28),
+          new THREE.Vector3(centerSeg.x + (side * (width * 0.5 - rail * 0.5)), -height * 0.5 + rail * 0.5, centerSeg.z),
+          dir
+        );
+        addOrientedPart(
+          new RoundedBoxGeometry(rail, rail, Math.max(len, rail), 3, rail * 0.28),
+          new THREE.Vector3(centerSeg.x + (side * (width * 0.5 - rail * 0.5)), height * 0.5 - rail * 0.5, centerSeg.z),
+          dir
+        );
+
+        const posts = Math.max(2, Math.floor(len / postPitch) + 1);
+        for (let p = 0; p <= posts; p++) {
+          const t = Math.min(1, p / posts);
+          const q = a.clone().lerp(b, t);
+          addOrientedPart(
+            new RoundedBoxGeometry(rail, Math.max(height - rail * 2, rail), rail, 3, rail * 0.28),
+            new THREE.Vector3(q.x + side * (width * 0.5 - rail * 0.5), 0, q.z),
+            dir
+          );
+        }
+      }
+
+      // Top rolled lips for a more realistic industrial finish.
+      for (const side of [-1, 1]) {
+        const lipX = side * (width * 0.5 + rail * 0.2);
+        addOrientedPart(
+          new RoundedBoxGeometry(rail * 1.25, rail * 0.75, Math.max(len, rail), 4, rail * 0.32),
+          new THREE.Vector3(lipX, height * 0.5 + rail * 0.12, centerSeg.z),
+          dir
+        );
+      }
+    }
+
+    // A rounded elbow cap at every direction change.
     for (let i = 1; i < localPoints.length - 1; i++) {
       const corner = localPoints[i];
       const inDir = corner.clone().sub(localPoints[i - 1]).normalize();
@@ -269,21 +319,14 @@ function routeVisual(obj) {
       if (bisector.lengthSq() < 1e-6) bisector = outDir.clone();
       bisector.normalize();
 
-      const connectorDepth = Math.max(width * 0.75, height);
-      const connector = new THREE.Mesh(
-        new RoundedBoxGeometry(
-          Math.max(width, 0.2),
-          Math.max(height, 0.2),
-          connectorDepth,
-          4,
-          segmentRadius
-        ),
+      const elbow = new THREE.Mesh(
+        new RoundedBoxGeometry(Math.max(width, 0.2), Math.max(height, 0.2), Math.max(width * 0.65, height), 6, Math.min(width, height) * 0.14),
         mat
       );
-      connector.position.copy(corner);
-      connector.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), bisector);
-      connector.userData.objectId = obj.id;
-      g.add(connector);
+      elbow.position.copy(corner);
+      elbow.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), bisector);
+      elbow.userData.objectId = obj.id;
+      g.add(elbow);
     }
   }
 
@@ -503,6 +546,17 @@ function renderScene() {
   }).join('');
   box.querySelectorAll('.scene-item').forEach(function(n){ n.addEventListener('click', function(){ state.selected = n.dataset.id; render(); }); });
 }
+function resizeRouteToLength(o, targetMeters) {
+  const target = Number(targetMeters);
+  if (!Number.isFinite(target) || target <= 0 || o.points.length < 2) return false;
+  const current = lengthOf(o.points);
+  if (!Number.isFinite(current) || current <= 0) return false;
+  const scale = target / current;
+  const anchor = o.points[0].clone();
+  o.points.forEach(function(p){ p.copy(anchor.clone().add(p.clone().sub(anchor).multiplyScalar(scale))); });
+  return true;
+}
+
 function renderProperties() {
   const el = $('properties');
   const o = state.objects.find(function(x){ return x.id === state.selected; });
@@ -537,11 +591,11 @@ function renderProperties() {
       '<div class="prop-row"><div class="prop-label">X</div><input class="prop-value" id="p_pos_x" type="number" step="1" value="' + (center.x * 10).toFixed(1) + '"></div>' +
       '<div class="prop-row"><div class="prop-label">Y</div><input class="prop-value" id="p_pos_y" type="number" step="1" value="' + (center.y * 10).toFixed(1) + '"></div>' +
       '<div class="prop-row"><div class="prop-label">Z</div><input class="prop-value" id="p_pos_z" type="number" step="1" value="' + (center.z * 10).toFixed(1) + '"></div>' +
-      '<div class="property-group-title">Slope / Rotation (deg)</div>' +
+      '<div class="property-group-title">Local Rotation / Slope (deg)</div>' +
       '<div class="prop-row"><div class="prop-label">X</div><input class="prop-value" id="p_rot_x" type="number" step="0.1" value="' + Number(rot.x || 0).toFixed(1) + '"></div>' +
       '<div class="prop-row"><div class="prop-label">Y</div><input class="prop-value" id="p_rot_y" type="number" step="0.1" value="' + Number(rot.y || 0).toFixed(1) + '"></div>' +
       '<div class="prop-row"><div class="prop-label">Z</div><input class="prop-value" id="p_rot_z" type="number" step="0.1" value="' + Number(rot.z || 0).toFixed(1) + '"></div>' +
-      '<div class="prop-row"><div class="prop-label">Length</div><div class="prop-value">' + lengthOf(o.points).toFixed(2) + ' m</div></div>' +
+      '<div class="prop-row"><div class="prop-label">Length (m)</div><input class="prop-value" id="p_length" type="number" min="0.01" step="0.01" value="' + lengthOf(o.points).toFixed(2) + '"></div>' +
       '<div class="prop-row"><div class="prop-label">Elbows</div><div class="prop-value">' + elbows(o.points) + '</div></div>' +
       '<div class="property-hint">Drag the selected route in the 3D view for free 3D movement. Position fields give exact XYZ control.</div>' +
       '<button class="small danger" id="deleteObjectBtn">Delete</button>';
@@ -549,6 +603,13 @@ function renderProperties() {
     $('p_name').addEventListener('input', function(e){ o.name = e.target.value; renderScene(); });
     $('p_spec').addEventListener('input', function(e){ o.specification = e.target.value; renderBoq(); });
     $('p_material').addEventListener('input', function(e){ o.material = e.target.value; renderBoq(); });
+    $('p_length').addEventListener('change', function(e){
+      if (!resizeRouteToLength(o, e.target.value)) return;
+      rebuildRoutes();
+      renderScene();
+      renderBoq();
+      renderProperties();
+    });
 
     $('p_a').addEventListener('input', function(e){
       if (cable) o.diameter_mm = Number(e.target.value) || 1;
