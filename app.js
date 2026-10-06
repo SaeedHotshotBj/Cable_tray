@@ -879,16 +879,26 @@ function measurementTargetFromEvent(event) {
 
   const objectId = hit.object.userData && hit.object.userData.objectId ? hit.object.userData.objectId : null;
   const modelObject = objectId ? state.objects.find(function(o){ return o.id === objectId; }) : null;
+  const root = objectId ? getProjectRoot(objectId) : null;
+  if (!root) {
+    toast('The selected surface is not a project object');
+    return null;
+  }
+
+  const point = hit.point.clone();
+  const normal = hit.face.normal.clone().transformDirection(hit.object.matrixWorld).normalize();
+  const worldQuaternion = root.getWorldQuaternion(new THREE.Quaternion());
+  const localNormal = normal.clone().applyQuaternion(worldQuaternion.invert()).normalize();
 
   return {
     kind: 'surface',
-    point: hit.point.clone(),
-    normal: hit.face.normal.clone().transformDirection(hit.object.matrixWorld).normalize(),
+    point: point,
+    normal: normal,
     modelId: modelObject && modelObject.kind === 'model' ? objectId : null,
     objectId: objectId,
     root: root,
     localPoint: root.worldToLocal(point.clone()),
-    localNormal: normal.clone(),
+    localNormal: localNormal,
     object: hit.object,
     faceIndex: hit.faceIndex
   };
