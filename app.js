@@ -14,7 +14,7 @@ const state = {
   modelRoots: new Map(), routeRoots: new Map(), measureStart: null,
   sourceModels: [], dragging: null, skipClick: false,
   surfacePickMode: false, surfacePick: null,
-  measureStart: null, autoRoutePoints: [], autoRoutePreviewRoot: null, measurements: [], measurementsVisible: true,
+  measureStart: null, autoRoutePoints: [], autoRoutePreviewRoot: null, autoRouteClearanceMm: 100, measurements: [], measurementsVisible: true,
   selectedMeasurementId: null,
   surfaceAlignStart: null,
   clipboard: null,
@@ -293,7 +293,14 @@ function autoRoutePoint(event) {
     const hit = hits[0];
     if (hit && hit.point) {
       const point = hit.point.clone();
+      let normal = new THREE.Vector3(0, 1, 0);
+      if (hit.face && hit.object) {
+        normal = hit.face.normal.clone();
+        normal.applyNormalMatrix(new THREE.Matrix3().getNormalMatrix(hit.object.matrixWorld)).normalize();
+        if (normal.lengthSq() < 1e-8) normal.set(0, 1, 0);
+      }
       point.__routeSnapToModel = true;
+      point.__routeNormal = normal;
       return point;
     }
   }
@@ -304,7 +311,21 @@ function autoRoutePoint(event) {
   const point = groundHit.point.clone();
   point.y = mmToScene(Number($('defaultElevation').value) || 3000);
   point.__routeSnapToModel = true;
+  point.__routeNormal = new THREE.Vector3(0, 1, 0);
   return point;
+}
+
+function offsetAutoRoutePoints(points, clearanceMm) {
+  const offset = mmToScene(clearanceMm);
+  return points.map(function(point){
+    const normal = point.__routeNormal
+      ? point.__routeNormal.clone().normalize()
+      : new THREE.Vector3(0, 1, 0);
+    const routePoint = point.clone().add(normal.multiplyScalar(offset));
+    routePoint.__routeSnapToModel = true;
+    routePoint.__routeNormal = normal;
+    return routePoint;
+  });
 }
 
 function clearAutoRoutePreview() {
@@ -374,13 +395,31 @@ function finishAutoRoute() {
     return;
   }
 
-  const beforeHistory = captureDesignState();
   const type = $('autoRouteType').value === 'tray' ? 'tray' : 'cable';
-  const routePoints = points.map(function(point){
+  let routePoints = points.map(function(point){
     const routePoint = point.clone();
     routePoint.__routeSnapToModel = true;
     return routePoint;
   });
+
+  if (type === 'tray') {
+    const rawClearance = window.prompt(
+      'Tray distance from the selected points (mm). Positive = along the selected surface normal, negative = opposite direction.',
+      String(state.autoRouteClearanceMm)
+    );
+    if (rawClearance === null) return;
+
+    const clearanceMm = Number(rawClearance);
+    if (!Number.isFinite(clearanceMm)) {
+      toast('Enter a valid numeric distance in millimeters');
+      return;
+    }
+
+    state.autoRouteClearanceMm = clearanceMm;
+    routePoints = offsetAutoRoutePoints(points, clearanceMm);
+  }
+
+  const beforeHistory = captureDesignState();
   const obj = createRoute(type, routePoints);
 
   rebuildRoutes();
