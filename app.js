@@ -118,6 +118,20 @@ function captureDesignState() {
     routes: state.objects
       .filter(function(o){ return o.kind === 'cable' || o.kind === 'tray'; })
       .map(cloneRouteData),
+    models: state.objects
+      .filter(function(o){ return o.kind === 'model'; })
+      .map(function(o){
+        const root = state.modelRoots.get(o.id);
+        if (!root) return { id:o.id, transform:null };
+        return {
+          id:o.id,
+          transform:{
+            position:{x:root.position.x,y:root.position.y,z:root.position.z},
+            quaternion:{x:root.quaternion.x,y:root.quaternion.y,z:root.quaternion.z,w:root.quaternion.w},
+            scale:{x:root.scale.x,y:root.scale.y,z:root.scale.z}
+          }
+        };
+      }),
     selected: state.selected
   };
 }
@@ -147,6 +161,16 @@ function restoreDesignState(snapshot) {
     const selectedExists = state.objects.some(function(o){ return o.id === snapshot.selected; });
     state.selected = selectedExists ? snapshot.selected : null;
     rebuildRoutes();
+    (snapshot.models || []).forEach(function(saved){
+      const root = state.modelRoots.get(saved.id);
+      if (!root || !saved.transform) return;
+      root.position.set(saved.transform.position.x, saved.transform.position.y, saved.transform.position.z);
+      root.quaternion.set(saved.transform.quaternion.x, saved.transform.quaternion.y, saved.transform.quaternion.z, saved.transform.quaternion.w);
+      root.scale.set(saved.transform.scale.x, saved.transform.scale.y, saved.transform.scale.z);
+      root.updateMatrixWorld(true);
+    });
+    syncMeasurements();
+    rebuildMeasurements();
     render();
   } finally {
     state.restoringHistory = false;
@@ -664,6 +688,23 @@ renderer.domElement.addEventListener('click', function(e){
     status(state.drawing.type + ' point ' + state.drawing.points.length);
     return;
   }
+  if (state.tool === 'align') {
+    const target = measurementTargetFromEvent(e);
+    if (!target) return;
+    if (!state.surfaceAlignStart) {
+      state.surfaceAlignStart = target;
+      clearSurfaceSelectionVisuals();
+      addSurfaceSelectionVisual(target, 0xffd45a);
+      toast('Reference surface selected — click the second surface');
+    } else {
+      addSurfaceSelectionVisual(target, 0x7ae6ff);
+      const reference = state.surfaceAlignStart;
+      state.surfaceAlignStart = null;
+      alignObjectToSurface(reference, target);
+    }
+    return;
+  }
+
   if (state.tool === 'measure') {
     const target = measurementTargetFromEvent(e);
     if (!target) return;
@@ -720,6 +761,12 @@ function handleKeyboardShortcut(e) {
 
   if (key === 'escape') {
     if (state.surfacePickMode) { cancelSurfacePick(); e.preventDefault(); return; }
+    if (state.surfaceAlignStart) {
+      state.surfaceAlignStart = null;
+      clearSurfaceSelectionVisuals();
+      e.preventDefault();
+      return;
+    }
     if (state.drawing) { setTool('select'); e.preventDefault(); }
     return;
   }
@@ -1271,6 +1318,58 @@ function applySurfaceAlignment(o, mode, angleDeg) {
   render();
   toast('Tray aligned to selected surface');
 }
+function alignObjectToSurface(reference, source) {
+  if (!reference || !source || !reference.objectId || !source.objectId) {
+    toast('Select two project surfaces');
+    return;
+  }
+  if (reference.objectId === source.objectId) {
+    toast('The two surfaces must belong to different objects');
+    return;
+  }
+
+  const referenceRoot = getProjectRoot(reference.objectId);
+  const sourceRoot = getProjectRoot(source.objectId);
+  const sourceObject = state.objects.find(function(o){ return o.id === source.objectId; });
+  if (!referenceRoot || !sourceRoot || !sourceObject) {
+    toast('Surface object is not available');
+    return;
+  }
+
+  const beforeHistory = captureDesignState();
+  const currentQuaternion = sourceRoot.getWorldQuaternion(new THREE.Quaternion());
+  const rotationDelta = new THREE.Quaternion().setFromUnitVectors(source.normal, reference.normal);
+  const finalQuaternion = rotationDelta.clone().multiply(currentQuaternion);
+
+  sourceRoot.quaternion.copy(finalQuaternion);
+  sourceRoot.updateMatrixWorld(true);
+
+  const sourceSurfacePoint = sourceRoot.localToWorld(source.localPoint.clone());
+  const translation = reference.point.clone().sub(sourceSurfacePoint);
+  sourceRoot.position.add(translation);
+  sourceRoot.updateMatrixWorld(true);
+
+  if (sourceObject.kind === 'cable' || sourceObject.kind === 'tray') {
+    const euler = new THREE.Euler().setFromQuaternion(sourceRoot.quaternion, 'XYZ');
+    sourceObject.rotation_deg = {
+      x: THREE.MathUtils.radToDeg(euler.x),
+      y: THREE.MathUtils.radToDeg(euler.y),
+      z: THREE.MathUtils.radToDeg(euler.z)
+    };
+    sourceObject.points.forEach(function(p){ p.add(translation); });
+  }
+
+  state.selected = source.objectId;
+  state.surfaceAlignStart = null;
+  clearSurfaceSelectionVisuals();
+  recordHistory(beforeHistory);
+  rebuildRoutes();
+  syncMeasurements();
+  rebuildMeasurements();
+  render();
+  toast('Second surface aligned to first surface');
+}
+
 function renderScene() {
   const box = $('sceneList');
   if (!state.objects.length) { box.innerHTML = '<div class="hint" style="padding:10px">No objects yet.</div>'; return; }
