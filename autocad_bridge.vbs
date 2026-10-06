@@ -4,6 +4,7 @@ Dim args, sourceFile, outputFile, sourceExt
 Dim acadApp, acadDoc, docItem
 Dim startedByUs, openedByBridge
 Dim fso, attempts, fileDated, oldFileDia, oldFacetres
+Dim insertPoint(2)
 Dim commandText, saveErr, saveDescription
 
 Set args = WScript.Arguments
@@ -63,15 +64,32 @@ If Not acadDoc Is Nothing Then
     WScript.Echo "BRIDGE_ALREADY_OPEN|name=" & acadDoc.Name
 End If
 
-' Open through the ActiveX Documents collection. AutoCAD documents are made
-' active when opened; DXF is attempted here first and falls back to Shell.
-If acadDoc Is Nothing Then
+' DWG is opened through the Documents collection. DXF is imported into
+' a temporary drawing because AutoCAD documents.Open is for DWG files,
+' while the ActiveX Import method explicitly supports DXF.
+If acadDoc Is Nothing And sourceExt = ".dwg" Then
     Err.Clear
     WScript.Echo "BRIDGE_OPEN|source=" & sourceFile
     Set acadDoc = acadApp.Documents.Open(sourceFile, False)
     saveErr = Err.Number
     saveDescription = Err.Description
     WScript.Echo "BRIDGE_OPEN_RESULT|document=" & Not (acadDoc Is Nothing) & "|COM=" & saveErr & "|" & saveDescription
+    Err.Clear
+    If Not acadDoc Is Nothing Then openedByBridge = True
+End If
+
+If acadDoc Is Nothing And sourceExt = ".dxf" Then
+    Err.Clear
+    WScript.Echo "BRIDGE_DXF_IMPORT|source=" & sourceFile
+    Set acadDoc = acadApp.Documents.Add("")
+    insertPoint(0) = 0#
+    insertPoint(1) = 0#
+    insertPoint(2) = 0#
+    Err.Clear
+    acadDoc.Import sourceFile, insertPoint, 1#
+    saveErr = Err.Number
+    saveDescription = Err.Description
+    WScript.Echo "BRIDGE_DXF_IMPORT_RESULT|document=" & Not (acadDoc Is Nothing) & "|COM=" & saveErr & "|" & saveDescription
     Err.Clear
     If Not acadDoc Is Nothing Then openedByBridge = True
 End If
