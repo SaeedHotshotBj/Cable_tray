@@ -14,7 +14,7 @@ const state = {
   modelRoots: new Map(), routeRoots: new Map(), measureStart: null,
   sourceModels: [], dragging: null, skipClick: false,
   surfacePickMode: false, surfacePick: null,
-  measureStart: null, autoRouteStart: null, autoRoutePendingEnd: null, autoRoutePreviewRoot: null, measurements: [], measurementsVisible: true,
+  measureStart: null, autoRoutePoints: [], autoRoutePreviewRoot: null, measurements: [], measurementsVisible: true,
   selectedMeasurementId: null,
   surfaceAlignStart: null,
   clipboard: null,
@@ -226,8 +226,7 @@ function setTool(tool) {
   state.surfacePickMode = false;
   state.surfacePick = null;
   state.surfaceAlignStart = null;
-  state.autoRouteStart = null;
-  state.autoRoutePendingEnd = null;
+  state.autoRoutePoints = [];
   autoRoutePreviewRoot.clear();
   state.tool = tool;
   state.drawing = (tool === 'cable' || tool === 'tray') ? { type: tool, points: [] } : null;
@@ -244,7 +243,7 @@ function setTool(tool) {
     tray: 'Click route points. Press Enter to finish.',
     model: 'Use Load Model for 3D, SolidWorks, AutoCAD DWG or DXF files.',
     measure: 'Click two points, or two CAD/model surfaces, to create a persistent distance dimension.',
-    'auto-route': 'Select Cable or Tray, then click the start point and end point. A straight shortest route is created between them.'
+    'auto-route': 'Select Cable or Tray, click as many route points as needed, then press Enter to create the route.'
   };
   $('toolHint').textContent = hint[tool] || '';
   $('routeOverlay').classList.toggle('hidden', tool !== 'cable' && tool !== 'tray');
@@ -310,80 +309,90 @@ function autoRoutePoint(event) {
 
 function clearAutoRoutePreview() {
   autoRoutePreviewRoot.clear();
+  const lengthElement = $('autoRoutePreviewLength');
+  if (lengthElement) lengthElement.textContent = '0.000 m';
+  const actions = $('autoRouteActions');
+  if (actions) actions.classList.toggle('hidden', !state.autoRoutePoints.length);
 }
 
-function showAutoRoutePreview(start, end) {
+function autoRouteLength(points) {
+  let length = 0;
+  for (let i = 1; i < points.length; i++) {
+    length += points[i - 1].distanceTo(points[i]);
+  }
+  return length;
+}
+
+function showAutoRoutePreview(points) {
   clearAutoRoutePreview();
+  if (!points || !points.length) return;
 
   const markerRadius = Math.max(2, mmToScene(40));
-  const startMarker = new THREE.Mesh(
-    new THREE.SphereGeometry(markerRadius, 16, 16),
-    new THREE.MeshBasicMaterial({ color: 0xffd45a, depthTest: false })
-  );
-  startMarker.position.copy(start);
-  startMarker.renderOrder = 40;
 
-  const endMarker = new THREE.Mesh(
-    new THREE.SphereGeometry(markerRadius, 16, 16),
-    new THREE.MeshBasicMaterial({ color: 0x66d9ff, depthTest: false })
-  );
-  endMarker.position.copy(end);
-  endMarker.renderOrder = 40;
-
-  const lineGeometry = new THREE.BufferGeometry().setFromPoints([start.clone(), end.clone()]);
-  const lineMaterial = new THREE.LineDashedMaterial({
-    color: 0x66d9ff,
-    dashSize: Math.max(1.5, mmToScene(120)),
-    gapSize: Math.max(0.8, mmToScene(70)),
-    transparent: true,
-    opacity: 0.95,
-    depthTest: false
+  points.forEach(function(point, index){
+    const color = index === 0 ? 0xffd45a : (index === points.length - 1 ? 0x66d9ff : 0xb7c7d9);
+    const marker = new THREE.Mesh(
+      new THREE.SphereGeometry(markerRadius, 16, 16),
+      new THREE.MeshBasicMaterial({ color: color, depthTest: false })
+    );
+    marker.position.copy(point);
+    marker.renderOrder = 40;
+    autoRoutePreviewRoot.add(marker);
   });
-  const line = new THREE.Line(lineGeometry, lineMaterial);
-  line.computeLineDistances();
-  line.renderOrder = 39;
 
-  autoRoutePreviewRoot.add(line);
-  autoRoutePreviewRoot.add(startMarker);
-  autoRoutePreviewRoot.add(endMarker);
+  if (points.length >= 2) {
+    const lineGeometry = new THREE.BufferGeometry().setFromPoints(
+      points.map(function(point){ return point.clone(); })
+    );
+    const lineMaterial = new THREE.LineDashedMaterial({
+      color: 0x66d9ff,
+      dashSize: Math.max(1.5, mmToScene(120)),
+      gapSize: Math.max(0.8, mmToScene(70)),
+      transparent: true,
+      opacity: 0.95,
+      depthTest: false
+    });
+    const line = new THREE.Line(lineGeometry, lineMaterial);
+    line.computeLineDistances();
+    line.renderOrder = 39;
+    autoRoutePreviewRoot.add(line);
+  }
 
-  const distance = sceneToM(start.distanceTo(end));
   const lengthElement = $('autoRoutePreviewLength');
-  if (lengthElement) lengthElement.textContent = distance.toFixed(3) + ' m';
+  if (lengthElement) {
+    lengthElement.textContent = sceneToM(autoRouteLength(points)).toFixed(3) + ' m';
+  }
+
   const actions = $('autoRouteActions');
   if (actions) actions.classList.remove('hidden');
 }
 
-function createAutoRouteFromPreview() {
-  const start = state.autoRouteStart;
-  const end = state.autoRoutePendingEnd;
-  if (!start || !end) return;
-
-  const distance = start.distanceTo(end);
-  if (distance < 1e-8) {
-    toast('Start and end points must be different');
+function finishAutoRoute() {
+  const points = state.autoRoutePoints || [];
+  if (points.length < 2) {
+    toast('Select at least two points for Auto Route');
     return;
   }
 
-  const type = $('autoRouteType').value === 'tray' ? 'tray' : 'cable';
   const beforeHistory = captureDesignState();
-  const obj = createRoute(type, [start.clone(), end.clone()]);
+  const type = $('autoRouteType').value === 'tray' ? 'tray' : 'cable';
+  const routePoints = points.map(function(point){ return point.clone(); });
+  const obj = createRoute(type, routePoints);
 
   recordHistory(beforeHistory);
   state.selected = obj.id;
+  state.autoRoutePoints = [];
+  clearAutoRoutePreview();
   setTool('select');
   render();
-  toast(obj.name + ' created — shortest straight route: ' + sceneToM(distance).toFixed(3) + ' m');
+  toast(obj.name + ' created — route length: ' + sceneToM(autoRouteLength(routePoints)).toFixed(3) + ' m');
 }
 
-function resetAutoRoutePoints() {
-  state.autoRouteStart = null;
-  state.autoRoutePendingEnd = null;
+function cancelAutoRoute() {
+  state.autoRoutePoints = [];
   clearAutoRoutePreview();
-  const actions = $('autoRouteActions');
-  if (actions) actions.classList.add('hidden');
-  status('Auto Route: select start point');
-  toast('Auto Route points cleared');
+  status('Ready');
+  toast('Auto Route cancelled');
 }
 
 function createRoute(type, points) {
@@ -846,29 +855,14 @@ renderer.domElement.addEventListener('click', function(e){
   if (state.tool === 'auto-route') {
     const point = autoRoutePoint(e);
     if (!point) {
-      toast('Click a valid start or end point in the 3D view');
+      toast('Click a valid route point in the 3D view');
       return;
     }
 
-    if (!state.autoRouteStart) {
-      state.autoRouteStart = point;
-      state.autoRoutePendingEnd = null;
-      clearAutoRoutePreview();
-      const marker = new THREE.Mesh(
-        new THREE.SphereGeometry(Math.max(2, mmToScene(40)), 16, 16),
-        new THREE.MeshBasicMaterial({ color: 0xffd45a, depthTest: false })
-      );
-      marker.position.copy(point);
-      marker.renderOrder = 40;
-      autoRoutePreviewRoot.add(marker);
-      status('Auto Route: select end point');
-      toast('Start point selected — click the end point');
-    } else {
-      state.autoRoutePendingEnd = point;
-      showAutoRoutePreview(state.autoRouteStart, point);
-      status('Shortest route preview shown');
-      toast('Shortest route preview shown — review it before creating');
-    }
+    state.autoRoutePoints.push(point);
+    showAutoRoutePreview(state.autoRoutePoints);
+    status('Auto Route: ' + state.autoRoutePoints.length + ' point(s) selected');
+    toast('Point ' + state.autoRoutePoints.length + ' added — press Enter when finished');
     return;
   }
 
@@ -951,8 +945,8 @@ function handleKeyboardShortcut(e) {
       e.preventDefault();
       return;
     }
-    if (state.autoRouteStart) {
-      resetAutoRoutePoints();
+    if (state.tool === 'auto-route' && state.autoRoutePoints.length) {
+      cancelAutoRoute();
       e.preventDefault();
       return;
     }
@@ -969,6 +963,11 @@ function handleKeyboardShortcut(e) {
     if (key === 'd') { e.preventDefault(); e.stopPropagation(); if(e.stopImmediatePropagation)e.stopImmediatePropagation(); copySelected(); pasteClipboard(); return; }
   }
 
+  if (key === 'enter' && state.tool === 'auto-route' && !isTextEditing) {
+    e.preventDefault();
+    finishAutoRoute();
+    return;
+  }
   if (key === 'enter' && state.drawing) { e.preventDefault(); finishRoute(); return; }
   if ((key === 'delete' || key === 'backspace') && state.selectedMeasurementId && !isTextEditing) {
     e.preventDefault();
@@ -2615,5 +2614,3 @@ function animate(){
   updateMeasurementOverlay();
   renderer.render(scene,camera);
 }
-$('createAutoRouteBtn').addEventListener('click', createAutoRouteFromPreview);
-$('resetAutoRouteBtn').addEventListener('click', resetAutoRoutePoints);
