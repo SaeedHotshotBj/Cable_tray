@@ -687,6 +687,7 @@ renderer.domElement.addEventListener('click', function(e){
   pointerRay(e);
   const hits = raycaster.intersectObjects(scene.children, true);
   const hit = hits.find(function(x){ return x.object.userData && x.object.userData.objectId; });
+  state.selectedMeasurementId = null;
   state.selected = hit ? hit.object.userData.objectId : null;
   render();
 });
@@ -1195,7 +1196,13 @@ function renderScene() {
     const qty = (o.kind === 'cable' || o.kind === 'tray') ? lengthOf(o.points).toFixed(2) + ' m' : o.format;
     return '<div class="scene-item ' + (o.id === state.selected ? 'active' : '') + '" data-id="' + esc(o.id) + '"><div><div class="scene-name">' + esc(o.name) + '</div><div class="scene-type">' + esc(String(o.kind).toUpperCase()) + '</div></div><div class="scene-type">' + esc(qty) + '</div></div>';
   }).join('');
-  box.querySelectorAll('.scene-item').forEach(function(n){ n.addEventListener('click', function(){ state.selected = n.dataset.id; render(); }); });
+  box.querySelectorAll('.scene-item').forEach(function(n){
+    n.addEventListener('click', function(){
+      state.selectedMeasurementId = null;
+      state.selected = n.dataset.id;
+      render();
+    });
+  });
 }
 function resizeRouteToLength(o, targetMeters) {
   const target = Number(targetMeters);
