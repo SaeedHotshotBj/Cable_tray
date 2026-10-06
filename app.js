@@ -1188,6 +1188,9 @@ function syncMeasurements() {
     if(m.label) {
       m.label.textContent=formatDistance(m.distance_m);
     }
+    if(m.listValue) {
+      m.listValue.textContent=formatDistance(m.distance_m);
+    }
   });
 }
 
@@ -1262,6 +1265,8 @@ function renderMeasurementList() {
 
   box.querySelectorAll('.measurement-item').forEach(function(row){
     const id = row.dataset.id;
+    const measurement = state.measurements.find(function(m){ return m.id === id; });
+    if (measurement) measurement.listValue = row.querySelector('.measurement-select b');
     row.querySelector('.measurement-select').addEventListener('click', function(){ selectMeasurement(id); });
     row.querySelector('.measurement-delete').addEventListener('click', function(){ deleteMeasurement(id); });
   });
