@@ -91,6 +91,60 @@ function sceneToM(v) { return Number(v) * 0.01; }
 function lengthOf(points) { let n = 0; for (let i = 1; i < points.length; i++) n += points[i - 1].distanceTo(points[i]); return sceneToM(n); }
 function elbows(points) { let n = 0; for (let i = 1; i < points.length - 1; i++) { const a = points[i].clone().sub(points[i - 1]).normalize(); const b = points[i + 1].clone().sub(points[i]).normalize(); if (a.dot(b) < 0.999) n++; } return n; }
 function esc(v) { return String(v == null ? '' : v).replace(/[&<>"']/g, function(c){ return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]); }); }
+function elbowAngleDeg(points, index) {
+  if (!points || index <= 0 || index >= points.length - 1) return 0;
+  const incoming = points[index].clone().sub(points[index - 1]);
+  const outgoing = points[index + 1].clone().sub(points[index]);
+  if (incoming.lengthSq() < 1e-12 || outgoing.lengthSq() < 1e-12) return 0;
+  incoming.normalize();
+  outgoing.normalize();
+  const dot = THREE.MathUtils.clamp(incoming.dot(outgoing), -1, 1);
+  return THREE.MathUtils.radToDeg(Math.acos(dot));
+}
+
+function setRouteElbowAngle(route, index, targetDeg) {
+  if (!route || index <= 0 || index >= route.points.length - 1) return false;
+
+  const angle = Number(targetDeg);
+  if (!Number.isFinite(angle) || angle < 0 || angle > 180) return false;
+
+  const pivot = route.points[index].clone();
+  const incoming = pivot.clone().sub(route.points[index - 1]);
+  const outgoing = route.points[index + 1].clone().sub(pivot);
+  if (incoming.lengthSq() < 1e-12 || outgoing.lengthSq() < 1e-12) return false;
+
+  incoming.normalize();
+  const outgoingLength = outgoing.length();
+  if (outgoingLength < 1e-9) return false;
+  outgoing.normalize();
+
+  let bendAxis = outgoing.clone().sub(
+    incoming.clone().multiplyScalar(outgoing.dot(incoming))
+  );
+  if (bendAxis.lengthSq() < 1e-12) {
+    const fallback = Math.abs(incoming.y) < 0.999
+      ? new THREE.Vector3(0, 1, 0)
+      : new THREE.Vector3(0, 0, 1);
+    bendAxis = fallback.sub(incoming.clone().multiplyScalar(fallback.dot(incoming)));
+  }
+  if (bendAxis.lengthSq() < 1e-12) return false;
+  bendAxis.normalize();
+
+  const targetRad = THREE.MathUtils.degToRad(angle);
+  const desiredOutgoing = incoming.clone().multiplyScalar(Math.cos(targetRad))
+    .add(bendAxis.clone().multiplyScalar(Math.sin(targetRad)))
+    .normalize();
+
+  const rotation = new THREE.Quaternion().setFromUnitVectors(outgoing, desiredOutgoing);
+
+  for (let i = index + 1; i < route.points.length; i++) {
+    const offset = route.points[i].clone().sub(pivot);
+    offset.applyQuaternion(rotation);
+    route.points[i].copy(pivot).add(offset);
+  }
+  return true;
+}
+
 function toast(message) { const e = $('toast'); e.textContent = message; e.classList.add('show'); clearTimeout(toast.timer); toast.timer = setTimeout(function(){ e.classList.remove('show'); }, 1800); }
 function status(message) { $('statusText').textContent = message; }
 
@@ -2048,6 +2102,12 @@ function renderProperties() {
           Number((o.surface_alignment && o.surface_alignment.angle_deg) || 0).toFixed(1) + '"></div>' +
         '<button class="small" id="applySurfaceAlignBtn">Apply Surface Alignment</button>') +
       '<div class="prop-row"><div class="prop-label">Length (m)</div><input class="prop-value" id="p_length" type="number" min="0.01" step="0.01" value="' + lengthOf(o.points).toFixed(2) + '"></div>' +
+      (cable || o.points.length < 3 ? '' : '<div class="property-group-title">Elbow Angles</div>' +
+        '<div class="property-hint">0° = straight. 90° = a right-angle bend. Changing one elbow rotates the connected downstream tray while preserving its segment lengths.</div>' +
+        o.points.slice(1, -1).map(function(_, index){
+          const pointIndex = index + 1;
+          return '<div class="prop-row"><div class="prop-label">Elbow ' + (index + 1) + ' (deg)</div><input class="prop-value" id="p_elbow_' + pointIndex + '" type="number" min="0" max="180" step="0.1" value="' + elbowAngleDeg(o.points, pointIndex).toFixed(1) + '"></div>';
+        }).join('')) +
       '<div class="prop-row"><div class="prop-label">Elbows</div><div class="prop-value">' + elbows(o.points) + '</div></div>' +
       '<div class="property-hint">Drag the selected route in the 3D view for free 3D movement. Position fields give exact XYZ control.</div>' +
       '<button class="small danger" id="deleteObjectBtn">Delete</button>';
@@ -2055,6 +2115,20 @@ function renderProperties() {
     bindPropertyHistoryInput('p_name', function(e){ o.name = e.target.value; renderScene(); });
     bindPropertyHistoryInput('p_spec', function(e){ o.specification = e.target.value; renderBoq(); });
     bindPropertyHistoryInput('p_material', function(e){ o.material = e.target.value; renderBoq(); });
+
+    if (!cable && o.points.length >= 3) {
+      o.points.slice(1, -1).forEach(function(_, index){
+        const pointIndex = index + 1;
+        bindPropertyHistoryChange('p_elbow_' + pointIndex, function(e){
+          const value = Number(e.target.value);
+          if (!setRouteElbowAngle(o, pointIndex, value)) return;
+          rebuildRoutes();
+          renderScene();
+          renderBoq();
+          renderProperties();
+        });
+      });
+    }
     bindPropertyHistoryChange('p_length', function(e){
       if (!resizeRouteToLength(o, e.target.value)) return;
       rebuildRoutes();
