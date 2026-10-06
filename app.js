@@ -813,28 +813,77 @@ function downloadBlob(blob, filename) {
   setTimeout(function(){ URL.revokeObjectURL(url); }, 1000);
 }
 
+function exportMaterial(sourceMaterial) {
+  const material = Array.isArray(sourceMaterial) ? sourceMaterial[0] : sourceMaterial;
+  let color = 0xb6bec7;
+  if (material && material.color) {
+    if (typeof material.color.getHex === "function") color = material.color.getHex();
+    else if (Number.isFinite(material.color)) color = material.color;
+  }
+
+  const result = new THREE.MeshStandardMaterial({
+    color: color,
+    roughness: material && Number.isFinite(material.roughness) ? material.roughness : 0.55,
+    metalness: material && Number.isFinite(material.metalness) ? material.metalness : 0.15,
+    transparent: !!(material && material.transparent),
+    opacity: material && Number.isFinite(material.opacity) ? material.opacity : 1,
+    side: material && Number.isFinite(material.side) ? material.side : THREE.FrontSide
+  });
+
+  if (material && material.map) result.map = material.map.clone();
+  return result;
+}
+
+function prepareExportClone(sourceRoot) {
+  const clone = sourceRoot.clone(true);
+  const removeNodes = [];
+
+  clone.traverse(function(node){
+    // Lines are editor overlays only; they are not part of the saved 3D model.
+    if (node.isLine || node.isLineSegments || node.isPoints) {
+      removeNodes.push(node);
+      return;
+    }
+
+    // Keep exporter-facing userData JSON-safe. The live material objects used
+    // by the editor must never be serialized into GLB extras.
+    if (node.userData) {
+      node.userData = { ...node.userData };
+      delete node.userData.meshMaterial;
+      delete node.userData.lineMaterial;
+    }
+
+    if (node.isMesh && node.material) {
+      node.material = Array.isArray(node.material)
+        ? node.material.map(function(m){ return exportMaterial(m); })
+        : exportMaterial(node.material);
+    }
+  });
+
+  removeNodes.forEach(function(node){
+    if (node.parent) node.parent.remove(node);
+  });
+
+  clone.updateMatrixWorld(true);
+  return clone;
+}
+
 function exportSceneRoot() {
   const exportRoot = new THREE.Group();
   exportRoot.name = state.project.name || 'Cable_Tray_Model';
 
   state.modelRoots.forEach(function(root){
-    exportRoot.add(root.clone(true));
+    exportRoot.add(prepareExportClone(root));
   });
   state.routeRoots.forEach(function(root){
-    const clone = root.clone(true);
-    clone.traverse(function(node){
-      if (node.material) {
-        if (Array.isArray(node.material)) node.material = node.material.map(function(m){ return m.clone(); });
-        else node.material = node.material.clone();
-      }
-    });
+    const clone = prepareExportClone(root);
     applyRouteSelectionVisual(clone, false);
     exportRoot.add(clone);
   });
 
+  exportRoot.updateMatrixWorld(true);
   return exportRoot;
 }
-
 function exportModel(format) {
   const chosen = String(format || '').toUpperCase();
   const exportRoot = exportSceneRoot();
@@ -849,12 +898,20 @@ function exportModel(format) {
     exporter.parse(
       exportRoot,
       function(result){
-        if (!(result instanceof ArrayBuffer)) throw new Error('GLB export did not return binary data.');
+        if (!(result instanceof ArrayBuffer)) {
+          status('Ready');
+          toast('Export failed: GLB export did not return binary data.');
+          return;
+        }
         downloadBlob(new Blob([result], { type: 'model/gltf-binary' }), baseName + '.glb');
         status('Model exported');
         toast('GLB exported');
       },
-      function(error){ throw error; },
+      function(error){
+        console.error(error);
+        status('Ready');
+        toast('Export failed: ' + (error && error.message ? error.message : String(error)));
+      },
       { binary: true, trs: false, onlyVisible: true }
     );
     return;
