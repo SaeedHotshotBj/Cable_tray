@@ -18,6 +18,7 @@ HOST = "127.0.0.1"
 PORT = 8765
 ROOT = Path(__file__).resolve().parent
 SOLIDWORKS_RESULTS = {}
+CAD_RESULTS = SOLIDWORKS_RESULTS
 RESULT_TTL_SECONDS = 3600
 LOG_DIR = ROOT / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
