@@ -311,20 +311,63 @@ function showAutoRoutePoint(point, color) {
   surfaceSelectionRoot.add(marker);
 }
 
+function buildOrthogonalAutoRoute(start, end) {
+  const a = start.clone();
+  const b = end.clone();
+  const points = [a.clone()];
+  const eps = 1e-7;
+
+  // The route follows the project's world/device axes only.
+  // Prefer horizontal X/Z movement first and finish with the vertical Y move.
+  const horizontalAxes = ['x', 'z'].sort(function(axisA, axisB){
+    return Math.abs(b[axisB] - a[axisB]) - Math.abs(b[axisA] - a[axisA]);
+  });
+
+  horizontalAxes.forEach(function(axis){
+    if (Math.abs(b[axis] - a[axis]) <= eps) return;
+    const p = points[points.length - 1].clone();
+    p[axis] = b[axis];
+    points.push(p);
+  });
+
+  if (Math.abs(b.y - a.y) > eps) {
+    const p = points[points.length - 1].clone();
+    p.y = b.y;
+    points.push(p);
+  }
+
+  if (points[points.length - 1].distanceToSquared(b) > eps) {
+    points.push(b.clone());
+  }
+
+  // Remove any accidental duplicate points.
+  return points.filter(function(point, index){
+    return index === 0 || point.distanceToSquared(points[index - 1]) > eps * eps;
+  });
+}
+
 function createAutoRoute() {
   if (!state.autoRouteStart) return;
   const end = state.autoRoutePendingEnd;
   if (!end) return;
 
-  const distance = state.autoRouteStart.distanceTo(end);
-  if (distance < 1e-8) {
+  const straightDistance = state.autoRouteStart.distanceTo(end);
+  if (straightDistance < 1e-8) {
     toast('Start and end points must be different');
+    return;
+  }
+
+  const points = buildOrthogonalAutoRoute(state.autoRouteStart, end);
+  if (points.length < 2) {
+    toast('Could not create an Auto Route');
     return;
   }
 
   const type = $('autoRouteType').value === 'tray' ? 'tray' : 'cable';
   const beforeHistory = captureDesignState();
-  const obj = createRoute(type, [state.autoRouteStart.clone(), end.clone()]);
+  const obj = createRoute(type, points);
+  const routeLength = lengthOf(points);
+
   recordHistory(beforeHistory);
   state.selected = obj.id;
   state.autoRouteStart = null;
@@ -332,7 +375,7 @@ function createAutoRoute() {
   rebuildRoutes();
   render();
   setTool('select');
-  toast(obj.name + ' created — shortest straight route: ' + sceneToM(distance).toFixed(3) + ' m');
+  toast(obj.name + ' created — axis-aligned route: ' + routeLength.toFixed(3) + ' m');
 }
 
 function createRoute(type, points) {
