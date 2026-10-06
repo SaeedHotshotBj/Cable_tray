@@ -156,6 +156,79 @@ def combine_stl_files(parts, output):
     }
 
 
+def convert_autocad_file(source):
+    cache_root = Path(tempfile.gettempdir()) / "Cable_tray" / "autocad"
+    cache_root.mkdir(parents=True, exist_ok=True)
+    token = uuid.uuid4().hex
+    export_dir = cache_root / token
+    export_dir.mkdir(parents=True, exist_ok=True)
+    output = export_dir / "__cable_tray_autocad__.stl"
+    bridge = ROOT / "autocad_bridge.vbs"
+    if not bridge.exists():
+        raise RuntimeError("AutoCAD bridge script is missing.")
+
+    command = ["cscript.exe", "//nologo", str(bridge), str(source), str(output)]
+    log_event("AUTOCAD_COMMAND_START", source=str(source), output=str(output), export_dir=str(export_dir), bridge=str(bridge))
+    completed = subprocess.run(command, capture_output=True, text=True, timeout=900)
+    stdout = (completed.stdout or "").strip()
+    stderr = (completed.stderr or "").strip()
+    stl_files = sorted(p for p in export_dir.rglob("*") if p.is_file() and p.suffix.lower() == ".stl")
+
+    log_event(
+        "AUTOCAD_PROCESS_RESULT",
+        returncode=completed.returncode,
+        stdout=stdout[-6000:],
+        stderr=stderr[-6000:],
+        output_exists=output.exists(),
+        output_size=output.stat().st_size if output.exists() else 0,
+        stl_files=[str(p) for p in stl_files],
+    )
+    print(f"AUTOCAD IMPORT: file={source} exit={completed.returncode}", flush=True)
+    if stdout:
+        print(f"AUTOCAD STDOUT: {stdout[-4000:]}", flush=True)
+    if stderr:
+        print(f"AUTOCAD STDERR: {stderr[-4000:]}", flush=True)
+
+    if completed.returncode != 0:
+        raise RuntimeError(stdout or stderr or f"cscript exited with code {completed.returncode}")
+
+    if not output.exists() or output.stat().st_size < 84:
+        raise RuntimeError(
+            "AutoCAD completed without producing a usable STL. "
+            "The drawing may not contain supported 3D solids or watertight meshes."
+        )
+
+    records, _ = _read_stl_records(output)
+    if not records:
+        raise RuntimeError("AutoCAD produced an STL file, but it contains no readable triangles.")
+
+    CAD_RESULTS[token] = {
+        "path": str(output),
+        "created_at": time.time(),
+        "kind": "autocad",
+    }
+    cleanup_solidworks_results()
+    log_event(
+        "AUTOCAD_CONVERT_OK",
+        token=token,
+        source=str(source),
+        output=str(output),
+        output_size=output.stat().st_size,
+        triangles=len(records),
+    )
+    return {
+        "name": source.name,
+        "native_format": source.suffix.upper().lstrip("."),
+        "format": "STL",
+        "extension": ".stl",
+        "url": f"/api/cad/result/{token}.stl",
+        "load_errors": 0,
+        "warnings": 0,
+        "triangles": len(records),
+        "path": str(source),
+    }
+
+
 def convert_solidworks_file(source):
     cache_root = Path(tempfile.gettempdir()) / "Cable_tray" / "solidworks"
     cache_root.mkdir(parents=True, exist_ok=True)
@@ -418,6 +491,10 @@ class Handler(SimpleHTTPRequestHandler):
                     converted = convert_solidworks_file(p)
                     converted["path"] = str(p)
                     return json_response(self, 200, converted)
+                if ext in {".dwg", ".dxf"}:
+                    converted = convert_autocad_file(p)
+                    converted["path"] = str(p)
+                    return json_response(self, 200, converted)
                 token_path = Path(tempfile.gettempdir()) / "Cable_tray" / "models"
                 token_path.mkdir(parents=True, exist_ok=True)
                 cached = token_path / f"{token}{ext}"
@@ -524,29 +601,29 @@ class Handler(SimpleHTTPRequestHandler):
             except OSError as exc:
                 return json_response(self, 500, {"error": str(exc)})
 
-        route = urlparse(self.path).path
-        prefix = "/api/solidworks/result/"
-        if route.startswith(prefix) and route.endswith(".stl"):
-            cleanup_solidworks_results()
-            token = route[len(prefix):-4]
-            info = SOLIDWORKS_RESULTS.get(token)
-            if not info:
-                return json_response(self, 404, {"error": "Converted SolidWorks model expired or was not found."})
-            path = Path(info["path"])
-            if not path.exists():
-                SOLIDWORKS_RESULTS.pop(token, None)
-                return json_response(self, 404, {"error": "Converted SolidWorks model is no longer available."})
-            try:
-                data = path.read_bytes()
-                self.send_response(200)
-                self.send_header("Content-Type", "model/stl")
-                self.send_header("Content-Length", str(len(data)))
-                self.send_header("Cache-Control", "no-store")
-                self.end_headers()
-                self.wfile.write(data)
-                return
-            except OSError as exc:
-                return json_response(self, 500, {"error": str(exc)})
+        prefixes = ("/api/cad/result/", "/api/solidworks/result/")
+        for prefix in prefixes:
+            if route.startswith(prefix) and route.endswith(".stl"):
+                cleanup_solidworks_results()
+                token = route[len(prefix):-4]
+                info = CAD_RESULTS.get(token)
+                if not info:
+                    return json_response(self, 404, {"error": "Converted CAD model expired or was not found."})
+                path = Path(info["path"])
+                if not path.exists():
+                    CAD_RESULTS.pop(token, None)
+                    return json_response(self, 404, {"error": "Converted CAD model is no longer available."})
+                try:
+                    data = path.read_bytes()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "model/stl")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.send_header("Cache-Control", "no-store")
+                    self.end_headers()
+                    self.wfile.write(data)
+                    return
+                except OSError as exc:
+                    return json_response(self, 500, {"error": str(exc)})
         super().do_GET()
 
 
@@ -554,5 +631,7 @@ if __name__ == "__main__":
     print(f"Cable Tray Designer running at http://{HOST}:{PORT}")
     print(f"Project directory: {ROOT}")
     print("SolidWorks import bridge: enabled")
+    print("AutoCAD import bridge: enabled")
     print("Requirement for SLDASM/SLDPRT import: SOLIDWORKS installed on this Windows PC.")
+    print("Requirement for DWG/DXF import: AutoCAD for Windows installed on this Windows PC.")
     ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
