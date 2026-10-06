@@ -12,7 +12,11 @@ const state = {
   project: { name: 'Factory Cable Routing', units: 'mm', schema_version: 1 },
   objects: [], selected: null, tool: 'select', drawing: null,
   modelRoots: new Map(), routeRoots: new Map(), measureStart: null,
-  sourceModels: [], dragging: null, skipClick: false
+  sourceModels: [], dragging: null, skipClick: false,
+  surfacePickMode: false, surfacePick: null,
+  clipboard: null,
+  undoStack: [], redoStack: [],
+  restoringHistory: false
 };
 const $ = id => document.getElementById(id);
 
@@ -77,7 +81,111 @@ function esc(v) { return String(v == null ? '' : v).replace(/[&<>"']/g, function
 function toast(message) { const e = $('toast'); e.textContent = message; e.classList.add('show'); clearTimeout(toast.timer); toast.timer = setTimeout(function(){ e.classList.remove('show'); }, 1800); }
 function status(message) { $('statusText').textContent = message; }
 
+function cloneRouteData(o) {
+  return {
+    ...o,
+    points: (o.points || []).map(function(p){ return p.clone(); }),
+    rotation_deg: {
+      x: Number(o.rotation_deg && o.rotation_deg.x) || 0,
+      y: Number(o.rotation_deg && o.rotation_deg.y) || 0,
+      z: Number(o.rotation_deg && o.rotation_deg.z) || 0
+    },
+    surface_alignment: o.surface_alignment ? {
+      mode: o.surface_alignment.mode,
+      angle_deg: Number(o.surface_alignment.angle_deg) || 0,
+      normal: o.surface_alignment.normal ? {
+        x: Number(o.surface_alignment.normal.x) || 0,
+        y: Number(o.surface_alignment.normal.y) || 0,
+        z: Number(o.surface_alignment.normal.z) || 0
+      } : null
+    } : null
+  };
+}
+
+function captureDesignState() {
+  return {
+    project: { ...state.project },
+    routes: state.objects
+      .filter(function(o){ return o.kind === 'cable' || o.kind === 'tray'; })
+      .map(cloneRouteData),
+    selected: state.selected
+  };
+}
+
+function recordHistory(before) {
+  if (!before || state.restoringHistory) return;
+  state.undoStack.push(before);
+  if (state.undoStack.length > 100) state.undoStack.shift();
+  state.redoStack.length = 0;
+}
+
+function resetHistory() {
+  state.undoStack.length = 0;
+  state.redoStack.length = 0;
+}
+
+function restoreDesignState(snapshot) {
+  if (!snapshot) return;
+  state.restoringHistory = true;
+  try {
+    const modelObjects = state.objects.filter(function(o){ return o.kind === 'model'; });
+    const restoredRoutes = (snapshot.routes || []).map(cloneRouteData);
+    state.objects = modelObjects.concat(restoredRoutes);
+    state.project = { ...state.project, ...(snapshot.project || {}) };
+    const selectedExists = state.objects.some(function(o){ return o.id === snapshot.selected; });
+    state.selected = selectedExists ? snapshot.selected : null;
+    rebuildRoutes();
+    render();
+  } finally {
+    state.restoringHistory = false;
+  }
+}
+
+function undo() {
+  if (state.surfacePickMode) cancelSurfacePick();
+  if (state.drawing) {
+    if (state.drawing.points.length) {
+      state.drawing.points.pop();
+      status('Removed last route point');
+    }
+    return;
+  }
+  const before = state.undoStack.pop();
+  if (!before) {
+    toast('Nothing to undo');
+    return;
+  }
+  state.redoStack.push(captureDesignState());
+  restoreDesignState(before);
+  toast('Undo');
+}
+
+function redo() {
+  if (state.surfacePickMode || state.drawing) return;
+  const next = state.redoStack.pop();
+  if (!next) {
+    toast('Nothing to redo');
+    return;
+  }
+  state.undoStack.push(captureDesignState());
+  restoreDesignState(next);
+  toast('Redo');
+}
+
+function saveProjectFile() {
+  const blob = new Blob([JSON.stringify(projectData(), null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = slug(state.project.name) + '.json';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(function(){ URL.revokeObjectURL(a.href); }, 1000);
+}
+
 function setTool(tool) {
+  state.surfacePickMode = false;
+  state.surfacePick = null;
   state.tool = tool;
   state.drawing = (tool === 'cable' || tool === 'tray') ? { type: tool, points: [] } : null;
   state.measureStart = null;
@@ -143,7 +251,8 @@ function createRoute(type, points) {
     diameter_mm: dia, width_mm: width, height_mm: height,
     specification: cable ? 'POWER-CABLE' : width + 'x' + height + ' TRAY',
     material: cable ? 'Copper/PVC' : 'Galvanized Steel',
-    rotation_deg: { x: 0, y: 0, z: 0 }
+    rotation_deg: { x: 0, y: 0, z: 0 },
+    surface_alignment: null
   };
   state.objects.push(obj);
   return obj;
@@ -417,7 +526,9 @@ function finishRoute() {
   const d = state.drawing;
   state.drawing = null;
   if (d.points.length < 2) { setTool('select'); return; }
+  const beforeHistory = captureDesignState();
   const obj = createRoute(d.type, d.points);
+  recordHistory(beforeHistory);
   state.selected = obj.id;
   rebuildRoutes();
   render();
@@ -447,7 +558,11 @@ function finishRouteDrag() {
     const delta = drag.root.position.clone().sub(drag.startPosition);
     if (delta.lengthSq() > 1e-10) {
       const obj = state.objects.find(function(o){ return o.id === drag.objectId; });
-      if (obj) obj.points.forEach(function(p){ p.add(delta); });
+      if (obj) {
+        const beforeHistory = drag.historyBefore;
+        obj.points.forEach(function(p){ p.add(delta); });
+        recordHistory(beforeHistory);
+      }
     }
     rebuildRoutes();
     render();
@@ -461,6 +576,7 @@ function finishRouteDrag() {
 }
 
 renderer.domElement.addEventListener('pointerdown', function(e){
+  if (state.surfacePickMode) return;
   if (state.tool !== 'select' || e.button !== 0) return;
   const picked = routeHitAtEvent(e);
   if (!picked) return;
@@ -474,6 +590,7 @@ renderer.domElement.addEventListener('pointerdown', function(e){
     objectId: picked.objectId,
     root: picked.root,
     startPosition: picked.root.position.clone(),
+    historyBefore: captureDesignState(),
     pointerOffset: picked.hit.point.clone().sub(picked.root.position),
     plane: dragPlane,
     moved: false,
@@ -523,6 +640,11 @@ renderer.domElement.addEventListener('click', function(e){
     return;
   }
 
+  if (state.surfacePickMode) {
+    pickSurfaceFromEvent(e);
+    return;
+  }
+
   if (state.tool === 'cable' || state.tool === 'tray') {
     const p = routePoint(e); if (!p) return;
     state.drawing.points.push(p);
@@ -549,19 +671,329 @@ renderer.domElement.addEventListener('click', function(e){
   render();
 });
 document.addEventListener('keydown', function(e){
-  if (e.key === 'Enter' && state.drawing) { e.preventDefault(); finishRoute(); }
-  if (e.key === 'Escape' && state.drawing) setTool('select');
-  if ((e.key === 'Delete' || e.key === 'Backspace') && state.selected) deleteSelected();
+  const key = String(e.key || '').toLowerCase();
+  const modifier = e.ctrlKey || e.metaKey;
+  const tag = e.target && e.target.tagName ? e.target.tagName.toUpperCase() : '';
+  const isTextEditing = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || !!(e.target && e.target.isContentEditable);
+
+  if (modifier && key === 'r') {
+    e.preventDefault();
+    rebuildRoutes();
+    render();
+    status('3D view refreshed');
+    toast('3D view refreshed');
+    return;
+  }
+
+  if (modifier && key === 's') {
+    e.preventDefault();
+    if (e.shiftKey) {
+      const format = $('exportModelFormat').value;
+      try { exportModel(format); } catch (err) {
+        console.error(err);
+        status('Ready');
+        toast('Export failed: ' + err.message);
+      }
+    } else {
+      saveProjectFile();
+      toast('Project saved');
+    }
+    return;
+  }
+
+  if (key === 'escape') {
+    if (state.surfacePickMode) {
+      cancelSurfacePick();
+      e.preventDefault();
+      return;
+    }
+    if (state.drawing) setTool('select');
+    return;
+  }
+
+  if (modifier && !isTextEditing) {
+    if (key === 'z' && !e.shiftKey) {
+      e.preventDefault();
+      undo();
+      return;
+    }
+    if ((key === 'z' && e.shiftKey) || key === 'y') {
+      e.preventDefault();
+      redo();
+      return;
+    }
+    if (key === 'c') {
+      e.preventDefault();
+      copySelected();
+      return;
+    }
+    if (key === 'v') {
+      e.preventDefault();
+      pasteClipboard();
+      return;
+    }
+    if (key === 'x') {
+      e.preventDefault();
+      cutSelected();
+      return;
+    }
+    if (key === 'd') {
+      e.preventDefault();
+      copySelected();
+      pasteClipboard();
+      return;
+    }
+  }
+
+  if (key === 'enter' && state.drawing) {
+    e.preventDefault();
+    finishRoute();
+    return;
+  }
+
+  if (key === 'f' && !modifier && !isTextEditing && !state.drawing) {
+    e.preventDefault();
+    fitAllScene();
+    return;
+  }
+  if (key === '1' && !modifier && !isTextEditing && !state.drawing) {
+    e.preventDefault();
+    $('topBtn').click();
+    return;
+  }
+  if (key === '2' && !modifier && !isTextEditing && !state.drawing) {
+    e.preventDefault();
+    $('frontBtn').click();
+    return;
+  }
+  if (key === '3' && !modifier && !isTextEditing && !state.drawing) {
+    e.preventDefault();
+    $('isoBtn').click();
+    return;
+  }
+
+  if ((key === 'delete' || key === 'backspace') && state.selected && !isTextEditing) {
+    e.preventDefault();
+    deleteSelected();
+  }
 });
 
 function deleteSelected() {
   const idx = state.objects.findIndex(function(o){ return o.id === state.selected; });
   if (idx < 0) return;
+  const object = state.objects[idx];
+  const beforeHistory = object.kind === 'cable' || object.kind === 'tray' ? captureDesignState() : null;
   const root = state.modelRoots.get(state.selected);
   if (root) { scene.remove(root); state.modelRoots.delete(state.selected); }
   state.objects.splice(idx, 1);
   state.selected = null;
+  if (beforeHistory) recordHistory(beforeHistory);
   rebuildRoutes(); render(); toast('Object deleted');
+}
+
+function bindPropertyHistoryInput(id, onInput) {
+  const field = $(id);
+  if (!field) return;
+  let before = null;
+  field.addEventListener('focus', function(){ before = captureDesignState(); });
+  field.addEventListener('input', onInput);
+  field.addEventListener('change', function(){
+    if (before) recordHistory(before);
+    before = null;
+  });
+}
+
+function bindPropertyHistoryChange(id, onChange) {
+  const field = $(id);
+  if (!field) return;
+  field.addEventListener('focus', function(){ field.__historyBefore = captureDesignState(); });
+  field.addEventListener('change', function(e){
+    const before = field.__historyBefore || captureDesignState();
+    onChange(e);
+    recordHistory(before);
+    field.__historyBefore = null;
+  });
+}
+
+function copySelected() {
+  const o = state.objects.find(function(x){ return x.id === state.selected; });
+  if (!o || (o.kind !== 'cable' && o.kind !== 'tray')) {
+    toast('Select a cable or tray to copy');
+    return;
+  }
+  state.clipboard = cloneRouteData(o);
+  try {
+    if (navigator.clipboard) {
+      navigator.clipboard.writeText(JSON.stringify({
+        application: 'CableTrayDesigner',
+        kind: 'route',
+        object: state.clipboard
+      }));
+    }
+  } catch (_) {}
+  toast(o.name + ' copied');
+}
+
+function pasteClipboard() {
+  if (!state.clipboard) {
+    toast('Nothing to paste');
+    return;
+  }
+  const beforeHistory = captureDesignState();
+  const o = cloneRouteData(state.clipboard);
+  o.id = id(o.kind);
+  o.name = (o.name || (o.kind === 'tray' ? 'Tray' : 'Cable')) + ' Copy';
+  const offset = new THREE.Vector3(mmToScene(500), 0, mmToScene(500));
+  o.points = o.points.map(function(p){ return p.clone().add(offset); });
+  o.surface_alignment = null;
+  state.objects.push(o);
+  state.selected = o.id;
+  recordHistory(beforeHistory);
+  rebuildRoutes();
+  render();
+  toast(o.name + ' pasted');
+}
+
+function cutSelected() {
+  const o = state.objects.find(function(x){ return x.id === state.selected; });
+  if (!o || (o.kind !== 'cable' && o.kind !== 'tray')) {
+    toast('Select a cable or tray to cut');
+    return;
+  }
+  copySelected();
+  deleteSelected();
+}
+
+function cancelSurfacePick() {
+  state.surfacePickMode = false;
+  state.surfacePick = null;
+  status('Ready');
+  renderProperties();
+  toast('Surface pick cancelled');
+}
+
+function pickSurfaceFromEvent(event) {
+  pointerRay(event);
+  const roots = Array.from(state.modelRoots.values());
+  if (!roots.length) {
+    cancelSurfacePick();
+    toast('Load a CAD/model surface first');
+    return;
+  }
+
+  const hits = [];
+  roots.forEach(function(root){
+    raycaster.intersectObject(root, true).forEach(function(hit){ hits.push(hit); });
+  });
+  hits.sort(function(a,b){ return a.distance - b.distance; });
+  const hit = hits[0];
+
+  const o = state.objects.find(function(x){ return x.id === state.selected; });
+  if (!o || o.kind !== 'tray') {
+    cancelSurfacePick();
+    toast('Select a tray before picking a surface');
+    return;
+  }
+  if (!hit || !hit.face) {
+    toast('No model surface selected');
+    return;
+  }
+
+  const normal = hit.face.normal.clone().transformDirection(hit.object.matrixWorld).normalize();
+  state.surfacePick = {
+    routeId: o.id,
+    point: hit.point.clone(),
+    normal: normal,
+    modelId: hit.object.userData && hit.object.userData.objectId ? hit.object.userData.objectId : null
+  };
+  state.surfacePickMode = false;
+  status('Surface selected');
+  renderProperties();
+  toast('Surface selected');
+}
+
+function surfaceAlignmentRotation(o, surfaceNormal, mode, angleDeg) {
+  const rot = o.rotation_deg || { x: 0, y: 0, z: 0 };
+  const currentEuler = new THREE.Euler(
+    THREE.MathUtils.degToRad(Number(rot.x) || 0),
+    THREE.MathUtils.degToRad(Number(rot.y) || 0),
+    THREE.MathUtils.degToRad(Number(rot.z) || 0),
+    'XYZ'
+  );
+  const currentQ = new THREE.Quaternion().setFromEuler(currentEuler);
+  const currentUp = new THREE.Vector3(0, 1, 0).applyQuaternion(currentQ).normalize();
+
+  const rawRoute = o.points.length > 1
+    ? o.points[o.points.length - 1].clone().sub(o.points[0]).normalize()
+    : new THREE.Vector3(0, 0, 1);
+  const currentTangent = rawRoute.applyQuaternion(currentQ).normalize();
+
+  const normal = surfaceNormal.clone().normalize();
+  let referenceTangent = currentTangent.clone().projectOnPlane(normal);
+  if (referenceTangent.lengthSq() < 1e-8) {
+    referenceTangent = new THREE.Vector3(0, 1, 0).cross(normal);
+    if (referenceTangent.lengthSq() < 1e-8) referenceTangent = new THREE.Vector3(1, 0, 0).cross(normal);
+  }
+  referenceTangent.normalize();
+
+  let degrees = Number(angleDeg);
+  if (!Number.isFinite(degrees)) degrees = 0;
+  if (mode === 'parallel') degrees = 0;
+  if (mode === 'perpendicular') degrees = 90;
+  degrees = Math.max(-90, Math.min(90, degrees));
+
+  const desiredNormal = normal.clone().applyAxisAngle(referenceTangent, THREE.MathUtils.degToRad(degrees)).normalize();
+  let targetTangent = currentTangent.clone().projectOnPlane(desiredNormal);
+  if (targetTangent.lengthSq() < 1e-8) targetTangent = referenceTangent.clone().projectOnPlane(desiredNormal);
+  if (targetTangent.lengthSq() < 1e-8) {
+    targetTangent = new THREE.Vector3(0, 1, 0).projectOnPlane(desiredNormal);
+    if (targetTangent.lengthSq() < 1e-8) targetTangent = new THREE.Vector3(1, 0, 0).projectOnPlane(desiredNormal);
+  }
+  targetTangent.normalize();
+
+  const qAlignUp = new THREE.Quaternion().setFromUnitVectors(currentUp, desiredNormal);
+  let alignedTangent = currentTangent.clone().applyQuaternion(qAlignUp).projectOnPlane(desiredNormal);
+  if (alignedTangent.lengthSq() < 1e-8) alignedTangent = referenceTangent.clone().projectOnPlane(desiredNormal);
+  alignedTangent.normalize();
+
+  const cross = alignedTangent.clone().cross(targetTangent);
+  const signedAngle = Math.atan2(desiredNormal.dot(cross), alignedTangent.dot(targetTangent));
+  const qRoll = new THREE.Quaternion().setFromAxisAngle(desiredNormal, signedAngle);
+  const finalQ = qRoll.multiply(qAlignUp).multiply(currentQ);
+
+  const finalEuler = new THREE.Euler().setFromQuaternion(finalQ, 'XYZ');
+  return {
+    x: THREE.MathUtils.radToDeg(finalEuler.x),
+    y: THREE.MathUtils.radToDeg(finalEuler.y),
+    z: THREE.MathUtils.radToDeg(finalEuler.z)
+  };
+}
+
+function applySurfaceAlignment(o, mode, angleDeg) {
+  if (!o || o.kind !== 'tray' || !state.surfacePick || state.surfacePick.routeId !== o.id) {
+    toast('Pick a surface for this tray first');
+    return;
+  }
+  const beforeHistory = captureDesignState();
+  const degrees = mode === 'parallel' ? 0 : mode === 'perpendicular' ? 90 : Number(angleDeg);
+  if (!Number.isFinite(degrees)) {
+    toast('Enter a valid surface angle');
+    return;
+  }
+  o.rotation_deg = surfaceAlignmentRotation(o, state.surfacePick.normal, mode, degrees);
+  o.surface_alignment = {
+    mode: mode,
+    angle_deg: Math.max(-90, Math.min(90, degrees)),
+    normal: {
+      x: state.surfacePick.normal.x,
+      y: state.surfacePick.normal.y,
+      z: state.surfacePick.normal.z
+    }
+  };
+  recordHistory(beforeHistory);
+  rebuildRoutes();
+  render();
+  toast('Tray aligned to selected surface');
 }
 function renderScene() {
   const box = $('sceneList');
@@ -621,15 +1053,26 @@ function renderProperties() {
       '<div class="prop-row"><div class="prop-label">X</div><input class="prop-value" id="p_rot_x" type="number" step="0.1" value="' + Number(rot.x || 0).toFixed(1) + '"></div>' +
       '<div class="prop-row"><div class="prop-label">Y</div><input class="prop-value" id="p_rot_y" type="number" step="0.1" value="' + Number(rot.y || 0).toFixed(1) + '"></div>' +
       '<div class="prop-row"><div class="prop-label">Z</div><input class="prop-value" id="p_rot_z" type="number" step="0.1" value="' + Number(rot.z || 0).toFixed(1) + '"></div>' +
+      (cable ? '' : '<div class="property-group-title">Surface Alignment</div>' +
+        '<button class="small secondary" id="pickSurfaceBtn">Pick Surface</button>' +
+        '<div class="property-hint">' + (state.surfacePick && state.surfacePick.routeId === o.id ? 'Surface selected. ' : 'Select a face on an imported CAD/model surface. ') + '0° = parallel, 90° = perpendicular.</div>' +
+        '<div class="prop-row"><div class="prop-label">Relation</div><select class="prop-value" id="p_surface_mode">' +
+          '<option value="parallel">Parallel to surface</option>' +
+          '<option value="perpendicular">Perpendicular to surface</option>' +
+          '<option value="angle">Custom angle</option>' +
+        '</select></div>' +
+        '<div class="prop-row"><div class="prop-label">Angle (deg)</div><input class="prop-value" id="p_surface_angle" type="number" min="-90" max="90" step="0.1" value="' +
+          Number((o.surface_alignment && o.surface_alignment.angle_deg) || 0).toFixed(1) + '"></div>' +
+        '<button class="small" id="applySurfaceAlignBtn">Apply Surface Alignment</button>') +
       '<div class="prop-row"><div class="prop-label">Length (m)</div><input class="prop-value" id="p_length" type="number" min="0.01" step="0.01" value="' + lengthOf(o.points).toFixed(2) + '"></div>' +
       '<div class="prop-row"><div class="prop-label">Elbows</div><div class="prop-value">' + elbows(o.points) + '</div></div>' +
       '<div class="property-hint">Drag the selected route in the 3D view for free 3D movement. Position fields give exact XYZ control.</div>' +
       '<button class="small danger" id="deleteObjectBtn">Delete</button>';
 
-    $('p_name').addEventListener('input', function(e){ o.name = e.target.value; renderScene(); });
-    $('p_spec').addEventListener('input', function(e){ o.specification = e.target.value; renderBoq(); });
-    $('p_material').addEventListener('input', function(e){ o.material = e.target.value; renderBoq(); });
-    $('p_length').addEventListener('change', function(e){
+    bindPropertyHistoryInput('p_name', function(e){ o.name = e.target.value; renderScene(); });
+    bindPropertyHistoryInput('p_spec', function(e){ o.specification = e.target.value; renderBoq(); });
+    bindPropertyHistoryInput('p_material', function(e){ o.material = e.target.value; renderBoq(); });
+    bindPropertyHistoryChange('p_length', function(e){
       if (!resizeRouteToLength(o, e.target.value)) return;
       rebuildRoutes();
       renderScene();
@@ -637,16 +1080,38 @@ function renderProperties() {
       renderProperties();
     });
 
-    $('p_a').addEventListener('input', function(e){
+    bindPropertyHistoryInput('p_a', function(e){
       if (cable) o.diameter_mm = Number(e.target.value) || 1;
       else o.width_mm = Number(e.target.value) || 1;
       rebuildRoutes(); renderBoq(); updateRouteSelectionVisuals();
     });
 
     if (!cable) {
-      $('p_h').addEventListener('input', function(e){
+      bindPropertyHistoryInput('p_h', function(e){
         o.height_mm = Number(e.target.value) || 1;
         rebuildRoutes(); renderBoq(); updateRouteSelectionVisuals();
+      });
+
+      const surfaceMode = $('p_surface_mode');
+      const surfaceAngle = $('p_surface_angle');
+      if (surfaceMode && surfaceAngle) {
+        const alignment = o.surface_alignment || {};
+        surfaceMode.value = alignment.mode === 'perpendicular' || alignment.mode === 'angle' ? alignment.mode : 'parallel';
+        surfaceMode.addEventListener('change', function(e){
+          const mode = e.target.value;
+          if (mode === 'parallel') surfaceAngle.value = '0';
+          if (mode === 'perpendicular') surfaceAngle.value = '90';
+        });
+      }
+
+      $('pickSurfaceBtn').addEventListener('click', function(){
+        state.surfacePickMode = true;
+        status('Click a CAD/model surface');
+        toast('Click the surface to align this tray');
+      });
+
+      $('applySurfaceAlignBtn').addEventListener('click', function(){
+        applySurfaceAlignment(o, $('p_surface_mode').value, $('p_surface_angle').value);
       });
     }
 
@@ -664,9 +1129,9 @@ function renderProperties() {
       renderProperties();
     }
 
-    $('p_pos_x').addEventListener('change', function(e){ updatePosition('x', e.target.value); });
-    $('p_pos_y').addEventListener('change', function(e){ updatePosition('y', e.target.value); });
-    $('p_pos_z').addEventListener('change', function(e){ updatePosition('z', e.target.value); });
+    bindPropertyHistoryChange('p_pos_x', function(e){ updatePosition('x', e.target.value); });
+    bindPropertyHistoryChange('p_pos_y', function(e){ updatePosition('y', e.target.value); });
+    bindPropertyHistoryChange('p_pos_z', function(e){ updatePosition('z', e.target.value); });
 
     function updateRotation(axis, value) {
       const target = Number(value);
@@ -679,9 +1144,9 @@ function renderProperties() {
       renderProperties();
     }
 
-    $('p_rot_x').addEventListener('change', function(e){ updateRotation('x', e.target.value); });
-    $('p_rot_y').addEventListener('change', function(e){ updateRotation('y', e.target.value); });
-    $('p_rot_z').addEventListener('change', function(e){ updateRotation('z', e.target.value); });
+    bindPropertyHistoryChange('p_rot_x', function(e){ updateRotation('x', e.target.value); });
+    bindPropertyHistoryChange('p_rot_y', function(e){ updateRotation('y', e.target.value); });
+    bindPropertyHistoryChange('p_rot_z', function(e){ updateRotation('z', e.target.value); });
   }
 
   $('deleteObjectBtn').addEventListener('click', deleteSelected);
@@ -797,7 +1262,16 @@ function projectData() {
           height_mm:o.height_mm,
           specification:o.specification,
           material:o.material,
-          rotation_deg:{x:Number(o.rotation_deg && o.rotation_deg.x) || 0,y:Number(o.rotation_deg && o.rotation_deg.y) || 0,z:Number(o.rotation_deg && o.rotation_deg.z) || 0}
+          rotation_deg:{x:Number(o.rotation_deg && o.rotation_deg.x) || 0,y:Number(o.rotation_deg && o.rotation_deg.y) || 0,z:Number(o.rotation_deg && o.rotation_deg.z) || 0},
+          surface_alignment:o.surface_alignment ? {
+            mode:o.surface_alignment.mode || 'parallel',
+            angle_deg:Number(o.surface_alignment.angle_deg) || 0,
+            normal:o.surface_alignment.normal ? {
+              x:Number(o.surface_alignment.normal.x) || 0,
+              y:Number(o.surface_alignment.normal.y) || 0,
+              z:Number(o.surface_alignment.normal.z) || 0
+            } : null
+          } : null
         };
       })
   };
@@ -954,10 +1428,7 @@ $('exportModelBtn').addEventListener('click', function(){
   }
 });
 
-$('saveProjectBtn').addEventListener('click', function(){
-  const blob = new Blob([JSON.stringify(projectData(), null, 2)], { type: 'application/json' });
-  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = slug(state.project.name) + '.json'; a.click(); URL.revokeObjectURL(a.href);
-});
+$('saveProjectBtn').addEventListener('click', saveProjectFile);
 function loadProject(data) {
   if (!data || data.schema !== 'cable-tray-project') throw new Error('Not a Cable_tray project');
   state.modelRoots.forEach(function(root){ scene.remove(root); }); state.modelRoots.clear();
@@ -977,13 +1448,13 @@ function loadProject(data) {
   state.project = { ...state.project, ...(data.project || {}) };
   $('projectName').value = state.project.name || 'Factory Cable Routing';
   $('unitSystem').value = state.project.units || 'mm';
-  state.selected = null; rebuildRoutes(); render();
+  state.selected = null; resetHistory(); rebuildRoutes(); render();
 }
 $('newProjectBtn').addEventListener('click', function(){
   if (!confirm('Clear the current design?')) return;
   state.modelRoots.forEach(function(root){ scene.remove(root); }); state.modelRoots.clear();
   state.sourceModels = [];
-  state.objects = []; state.selected = null; render(); toast('New project created');
+  state.objects = []; state.selected = null; resetHistory(); state.surfacePick = null; state.surfacePickMode = false; render(); toast('New project created');
 });
 $('exportBoqBtn').addEventListener('click', function(){
   const rows = [['Item','Specification','Name','Quantity','Unit','Elbows']];
