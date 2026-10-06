@@ -258,6 +258,9 @@ function routeVisual(obj) {
       if (len < 0.001) continue;
       const dir = b.clone().sub(a).normalize();
       const centerSeg = a.clone().add(b).multiplyScalar(0.5);
+      let sideDir = new THREE.Vector3(-dir.z, 0, dir.x);
+      if (sideDir.lengthSq() < 1e-6) sideDir.set(1, 0, 0);
+      sideDir.normalize();
 
       // Bottom plate: repeated transverse sections create visible perforation gaps.
       const count = Math.max(2, Math.floor(len / slotPitch));
@@ -275,15 +278,15 @@ function routeVisual(obj) {
 
       // Side walls: lower/upper continuous rails + vertical perforation ribs.
       for (const side of [-1, 1]) {
-        const x = side * (width * 0.5 - rail * 0.5);
+        const sideOffset = sideDir.clone().multiplyScalar(side * (width * 0.5 - rail * 0.5));
         addOrientedPart(
           new RoundedBoxGeometry(rail, rail, Math.max(len, rail), 3, rail * 0.28),
-          new THREE.Vector3(centerSeg.x + (side * (width * 0.5 - rail * 0.5)), -height * 0.5 + rail * 0.5, centerSeg.z),
+          centerSeg.clone().add(sideOffset).setY(-height * 0.5 + rail * 0.5),
           dir
         );
         addOrientedPart(
           new RoundedBoxGeometry(rail, rail, Math.max(len, rail), 3, rail * 0.28),
-          new THREE.Vector3(centerSeg.x + (side * (width * 0.5 - rail * 0.5)), height * 0.5 - rail * 0.5, centerSeg.z),
+          centerSeg.clone().add(sideOffset).setY(height * 0.5 - rail * 0.5),
           dir
         );
 
@@ -293,7 +296,7 @@ function routeVisual(obj) {
           const q = a.clone().lerp(b, t);
           addOrientedPart(
             new RoundedBoxGeometry(rail, Math.max(height - rail * 2, rail), rail, 3, rail * 0.28),
-            new THREE.Vector3(q.x + side * (width * 0.5 - rail * 0.5), 0, q.z),
+            q.clone().add(sideOffset),
             dir
           );
         }
@@ -301,10 +304,10 @@ function routeVisual(obj) {
 
       // Top rolled lips for a more realistic industrial finish.
       for (const side of [-1, 1]) {
-        const lipX = side * (width * 0.5 + rail * 0.2);
+        const lipOffset = sideDir.clone().multiplyScalar(side * (width * 0.5 + rail * 0.2));
         addOrientedPart(
           new RoundedBoxGeometry(rail * 1.25, rail * 0.75, Math.max(len, rail), 4, rail * 0.32),
-          new THREE.Vector3(lipX, height * 0.5 + rail * 0.12, centerSeg.z),
+          centerSeg.clone().add(lipOffset).setY(height * 0.5 + rail * 0.12),
           dir
         );
       }
