@@ -14,6 +14,7 @@ const state = {
   modelRoots: new Map(), routeRoots: new Map(), measureStart: null,
   sourceModels: [], dragging: null, skipClick: false,
   surfacePickMode: false, surfacePick: null,
+  measureStart: null, measurements: [], measurementsVisible: true,
   clipboard: null,
   undoStack: [], redoStack: [],
   restoringHistory: false
@@ -60,6 +61,9 @@ scene.add(axes);
 const ground = new THREE.Mesh(new THREE.PlaneGeometry(30000, 30000), new THREE.MeshBasicMaterial({ transparent: true, opacity: 0 }));
 ground.rotation.x = -Math.PI / 2;
 scene.add(ground);
+const measurementRoot = new THREE.Group();
+measurementRoot.name = 'MeasurementAnnotations';
+scene.add(measurementRoot);
 const raycaster = new THREE.Raycaster();
 const mouse = new THREE.Vector2();
 
@@ -197,7 +201,7 @@ function setTool(tool) {
     cable: 'Click route points. Press Enter to finish.',
     tray: 'Click route points. Press Enter to finish.',
     model: 'Use Load Model for 3D, SolidWorks, AutoCAD DWG or DXF files.',
-    measure: 'Click two points on the ground plane to measure.'
+    measure: 'Click two points, or two CAD/model surfaces, to create a persistent distance dimension.'
   };
   $('toolHint').textContent = hint[tool] || '';
   $('routeOverlay').classList.toggle('hidden', tool !== 'cable' && tool !== 'tray');
@@ -654,12 +658,13 @@ renderer.domElement.addEventListener('click', function(e){
     return;
   }
   if (state.tool === 'measure') {
-    const p = routePoint(e); if (!p) return;
+    const target = measurementTargetFromEvent(e);
+    if (!target) return;
     if (!state.measureStart) {
-      state.measureStart = p.clone();
-      toast('Measurement start set');
+      state.measureStart = target;
+      toast(target.kind === 'surface' ? 'First surface selected' : 'First measurement point set');
     } else {
-      toast('Distance: ' + (sceneToM(state.measureStart.distanceTo(p))).toFixed(3) + ' m');
+      addMeasurement(state.measureStart, target);
       state.measureStart = null;
     }
     return;
@@ -672,113 +677,54 @@ renderer.domElement.addEventListener('click', function(e){
   state.selected = hit ? hit.object.userData.objectId : null;
   render();
 });
-document.addEventListener('keydown', function(e){
+function handleKeyboardShortcut(e) {
+  if (e.repeat) return;
   const key = String(e.key || '').toLowerCase();
   const modifier = e.ctrlKey || e.metaKey;
   const tag = e.target && e.target.tagName ? e.target.tagName.toUpperCase() : '';
   const isTextEditing = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || !!(e.target && e.target.isContentEditable);
 
   if (modifier && key === 'r') {
-    e.preventDefault();
-    rebuildRoutes();
-    render();
-    status('3D view refreshed');
-    toast('3D view refreshed');
-    return;
+    e.preventDefault(); e.stopPropagation();
+    if (e.stopImmediatePropagation) e.stopImmediatePropagation();
+    rebuildRoutes(); render(); status('3D view refreshed'); toast('3D view refreshed'); return;
   }
 
   if (modifier && key === 's') {
-    e.preventDefault();
+    e.preventDefault(); e.stopPropagation();
+    if (e.stopImmediatePropagation) e.stopImmediatePropagation();
     if (e.shiftKey) {
-      const format = $('exportModelFormat').value;
-      try { exportModel(format); } catch (err) {
-        console.error(err);
-        status('Ready');
-        toast('Export failed: ' + err.message);
-      }
+      try { exportModel($('exportModelFormat').value); }
+      catch (err) { console.error(err); status('Ready'); toast('Export failed: ' + err.message); }
     } else {
-      saveProjectFile();
-      toast('Project saved');
+      saveProjectFile(); toast('Project saved');
     }
     return;
   }
 
   if (key === 'escape') {
-    if (state.surfacePickMode) {
-      cancelSurfacePick();
-      e.preventDefault();
-      return;
-    }
-    if (state.drawing) setTool('select');
+    if (state.surfacePickMode) { cancelSurfacePick(); e.preventDefault(); return; }
+    if (state.drawing) { setTool('select'); e.preventDefault(); }
     return;
   }
 
   if (modifier && !isTextEditing) {
-    if (key === 'z' && !e.shiftKey) {
-      e.preventDefault();
-      undo();
-      return;
-    }
-    if ((key === 'z' && e.shiftKey) || key === 'y') {
-      e.preventDefault();
-      redo();
-      return;
-    }
-    if (key === 'c') {
-      e.preventDefault();
-      copySelected();
-      return;
-    }
-    if (key === 'v') {
-      e.preventDefault();
-      pasteClipboard();
-      return;
-    }
-    if (key === 'x') {
-      e.preventDefault();
-      cutSelected();
-      return;
-    }
-    if (key === 'd') {
-      e.preventDefault();
-      copySelected();
-      pasteClipboard();
-      return;
-    }
+    if (key === 'z' && !e.shiftKey) { e.preventDefault(); e.stopPropagation(); if(e.stopImmediatePropagation)e.stopImmediatePropagation(); undo(); return; }
+    if ((key === 'z' && e.shiftKey) || key === 'y') { e.preventDefault(); e.stopPropagation(); if(e.stopImmediatePropagation)e.stopImmediatePropagation(); redo(); return; }
+    if (key === 'c') { e.preventDefault(); e.stopPropagation(); if(e.stopImmediatePropagation)e.stopImmediatePropagation(); copySelected(); return; }
+    if (key === 'v') { e.preventDefault(); e.stopPropagation(); if(e.stopImmediatePropagation)e.stopImmediatePropagation(); pasteClipboard(); return; }
+    if (key === 'x') { e.preventDefault(); e.stopPropagation(); if(e.stopImmediatePropagation)e.stopImmediatePropagation(); cutSelected(); return; }
+    if (key === 'd') { e.preventDefault(); e.stopPropagation(); if(e.stopImmediatePropagation)e.stopImmediatePropagation(); copySelected(); pasteClipboard(); return; }
   }
 
-  if (key === 'enter' && state.drawing) {
-    e.preventDefault();
-    finishRoute();
-    return;
-  }
-
-  if (key === 'f' && !modifier && !isTextEditing && !state.drawing) {
-    e.preventDefault();
-    fitAllScene();
-    return;
-  }
-  if (key === '1' && !modifier && !isTextEditing && !state.drawing) {
-    e.preventDefault();
-    $('topBtn').click();
-    return;
-  }
-  if (key === '2' && !modifier && !isTextEditing && !state.drawing) {
-    e.preventDefault();
-    $('frontBtn').click();
-    return;
-  }
-  if (key === '3' && !modifier && !isTextEditing && !state.drawing) {
-    e.preventDefault();
-    $('isoBtn').click();
-    return;
-  }
-
-  if ((key === 'delete' || key === 'backspace') && state.selected && !isTextEditing) {
-    e.preventDefault();
-    deleteSelected();
-  }
-});
+  if (key === 'enter' && state.drawing) { e.preventDefault(); finishRoute(); return; }
+  if (key === 'f' && !modifier && !isTextEditing && !state.drawing) { e.preventDefault(); fitAllScene(); return; }
+  if (key === '1' && !modifier && !isTextEditing && !state.drawing) { e.preventDefault(); $('topBtn').click(); return; }
+  if (key === '2' && !modifier && !isTextEditing && !state.drawing) { e.preventDefault(); $('frontBtn').click(); return; }
+  if (key === '3' && !modifier && !isTextEditing && !state.drawing) { e.preventDefault(); $('isoBtn').click(); return; }
+  if ((key === 'delete' || key === 'backspace') && state.selected && !isTextEditing) { e.preventDefault(); deleteSelected(); }
+}
+window.addEventListener('keydown', handleKeyboardShortcut, true);
 
 function deleteSelected() {
   const idx = state.objects.findIndex(function(o){ return o.id === state.selected; });
@@ -864,6 +810,121 @@ function cutSelected() {
   }
   copySelected();
   deleteSelected();
+}
+
+function formatDistance(meters) {
+  const mm = Math.abs(Number(meters) || 0) * 1000;
+  return mm >= 1000 ? (mm / 1000).toFixed(3) + ' m' : mm.toFixed(1) + ' mm';
+}
+
+function measurementTargetFromEvent(event) {
+  pointerRay(event);
+  const roots = Array.from(state.modelRoots.values());
+  if (roots.length) {
+    const hits = [];
+    roots.forEach(function(root){ raycaster.intersectObject(root, true).forEach(function(hit){ hits.push(hit); }); });
+    hits.sort(function(a,b){ return a.distance - b.distance; });
+    const hit = hits[0];
+    if (hit && hit.face) {
+      return {
+        kind:'surface',
+        point:hit.point.clone(),
+        normal:hit.face.normal.clone().transformDirection(hit.object.matrixWorld).normalize(),
+        modelId:hit.object.userData && hit.object.userData.objectId ? hit.object.userData.objectId : null
+      };
+    }
+  }
+  const groundHit=raycaster.intersectObject(ground,false)[0];
+  return groundHit ? {kind:'point',point:groundHit.point.clone(),normal:null,modelId:null} : null;
+}
+
+function rebuildMeasurements() {
+  measurementRoot.clear();
+  const overlay=$('measurementOverlay');
+  if(overlay) overlay.innerHTML='';
+  state.measurements.forEach(function(m){
+    const geometry=new THREE.BufferGeometry().setFromPoints([m.start,m.end]);
+    const material=new THREE.LineBasicMaterial({color:m.kind==='surface'?0xffc857:0x66d9ff,transparent:true,opacity:0.95});
+    const line=new THREE.Line(geometry,material);
+    line.userData.measurementId=m.id;
+    m.line=line;
+    measurementRoot.add(line);
+    if(overlay){
+      const label=document.createElement('div');
+      label.className='measurement-label';
+      label.textContent=formatDistance(m.distance_m);
+      label.title=m.kind==='surface'?'Surface distance':'Point distance';
+      overlay.appendChild(label);
+      m.label=label;
+    }
+  });
+  measurementRoot.visible=state.measurementsVisible;
+  updateMeasurementOverlay();
+}
+
+function updateMeasurementOverlay() {
+  const overlay=$('measurementOverlay');
+  if(!overlay)return;
+  overlay.style.display=state.measurementsVisible?'block':'none';
+  if(!state.measurementsVisible)return;
+  const rect=renderer.domElement.getBoundingClientRect();
+  state.measurements.forEach(function(m){
+    if(!m.label)return;
+    const mid=m.start.clone().add(m.end).multiplyScalar(0.5);
+    const projected=mid.project(camera);
+    const visible=projected.z>=-1 && projected.z<=1 && projected.x>=-1.15 && projected.x<=1.15 && projected.y>=-1.15 && projected.y<=1.15;
+    m.label.style.display=visible?'block':'none';
+    if(visible){
+      m.label.style.left=((projected.x*0.5+0.5)*rect.width)+'px';
+      m.label.style.top=((-projected.y*0.5+0.5)*rect.height)+'px';
+    }
+  });
+}
+
+function addMeasurement(first,second) {
+  const delta=second.point.clone().sub(first.point);
+  let start=first.point.clone();
+  let end=second.point.clone();
+  let distance=delta.length();
+
+  if(first.kind==='surface' && second.kind==='surface'){
+    const n1=first.normal.clone().normalize();
+    const n2=second.normal.clone().normalize();
+    if(Math.abs(n1.dot(n2))>=0.95){
+      const signed=delta.dot(n1);
+      end=start.clone().add(n1.multiplyScalar(signed));
+      distance=Math.abs(signed);
+    }
+  }
+
+  const m={
+    id:id('measure'),
+    kind:first.kind==='surface' && second.kind==='surface'?'surface':'point',
+    start:start,
+    end:end,
+    distance_m:sceneToM(distance),
+    start_normal:first.normal?first.normal.clone():null,
+    end_normal:second.normal?second.normal.clone():null
+  };
+  state.measurements.push(m);
+  rebuildMeasurements();
+  renderMeasurementsToggle();
+  toast((m.kind==='surface'?'Surface distance: ':'Distance: ')+formatDistance(m.distance_m));
+}
+
+function toggleMeasurements() {
+  state.measurementsVisible=!state.measurementsVisible;
+  measurementRoot.visible=state.measurementsVisible;
+  updateMeasurementOverlay();
+  renderMeasurementsToggle();
+}
+
+function renderMeasurementsToggle() {
+  const button=$('toggleMeasurementsBtn');
+  if(button){
+    button.textContent=state.measurementsVisible?'Hide Dimensions':'Show Dimensions';
+    button.title=state.measurementsVisible?'Hide all measurement numbers':'Show all measurement numbers';
+  }
 }
 
 function cancelSurfacePick() {
@@ -1275,7 +1336,19 @@ function projectData() {
             } : null
           } : null
         };
-      })
+      }),
+    measurements: state.measurements.map(function(m){
+      return {
+        id:m.id,
+        kind:m.kind,
+        start:{x:m.start.x*10,y:m.start.y*10,z:m.start.z*10},
+        end:{x:m.end.x*10,y:m.end.y*10,z:m.end.z*10},
+        distance_m:Number(m.distance_m)||0,
+        start_normal:m.start_normal?{x:m.start_normal.x,y:m.start_normal.y,z:m.start_normal.z}:null,
+        end_normal:m.end_normal?{x:m.end_normal.x,y:m.end_normal.y,z:m.end_normal.z}:null
+      };
+    }),
+    measurements_visible:state.measurementsVisible
   };
 }
 function downloadBlob(blob, filename) {
@@ -1448,15 +1521,28 @@ function loadProject(data) {
     };
   });
   state.project = { ...state.project, ...(data.project || {}) };
+  state.measurementsVisible = data.measurements_visible !== false;
+  state.measurements = (data.measurements || []).map(function(m){
+    return {
+      id:m.id || id('measure'),
+      kind:m.kind === 'surface' ? 'surface' : 'point',
+      start:new THREE.Vector3(mmToScene(m.start.x),mmToScene(m.start.y),mmToScene(m.start.z)),
+      end:new THREE.Vector3(mmToScene(m.end.x),mmToScene(m.end.y),mmToScene(m.end.z)),
+      distance_m:Number(m.distance_m)||0,
+      start_normal:m.start_normal ? new THREE.Vector3(m.start_normal.x,m.start_normal.y,m.start_normal.z) : null,
+      end_normal:m.end_normal ? new THREE.Vector3(m.end_normal.x,m.end_normal.y,m.end_normal.z) : null
+    };
+  });
   $('projectName').value = state.project.name || 'Factory Cable Routing';
   $('unitSystem').value = state.project.units || 'mm';
-  state.selected = null; resetHistory(); rebuildRoutes(); render();
+  state.selected = null; state.measureStart = null; resetHistory(); rebuildRoutes(); rebuildMeasurements(); renderMeasurementsToggle(); render();
 }
 $('newProjectBtn').addEventListener('click', function(){
   if (!confirm('Clear the current design?')) return;
   state.modelRoots.forEach(function(root){ scene.remove(root); }); state.modelRoots.clear();
   state.sourceModels = [];
-  state.objects = []; state.selected = null; resetHistory(); state.surfacePick = null; state.surfacePickMode = false; render(); toast('New project created');
+  state.objects = []; state.selected = null; resetHistory(); state.surfacePick = null; state.surfacePickMode = false;
+  state.measureStart = null; state.measurements = []; rebuildMeasurements(); renderMeasurementsToggle(); render(); toast('New project created');
 });
 $('exportBoqBtn').addEventListener('click', function(){
   const rows = [['Item','Specification','Name','Quantity','Unit','Elbows']];
@@ -1481,6 +1567,12 @@ $('fitBtn').addEventListener('click', fitAllScene);
 $('topBtn').addEventListener('click', function(){ camera.position.set(0,18000,0.01); controls.target.set(0,0,0); controls.update(); });
 $('frontBtn').addEventListener('click', function(){ camera.position.set(0,5000,18000); controls.target.set(0,0,0); controls.update(); });
 $('isoBtn').addEventListener('click', function(){ camera.position.set(12000,9500,12000); controls.target.set(0,1500,0); controls.update(); });
-setTool('select'); render(); animate();
+$('toggleMeasurementsBtn').addEventListener('click', toggleMeasurements);
+setTool('select'); rebuildMeasurements(); renderMeasurementsToggle(); render(); animate();
 
-function animate(){ requestAnimationFrame(animate); controls.update(); renderer.render(scene,camera); }
+function animate(){
+  requestAnimationFrame(animate);
+  controls.update();
+  updateMeasurementOverlay();
+  renderer.render(scene,camera);
+}
