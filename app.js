@@ -289,8 +289,15 @@ function setTool(tool) {
   surfaceSelectionRoot.clear();
   document.querySelectorAll('.tool').forEach(function(b){ b.classList.toggle('active', b.dataset.tool === tool); });
   const autoRouteTypeRow = $('autoRouteTypeRow');
+  const autoRouteOffsetAxisRow = $('autoRouteOffsetAxisRow');
   const autoRouteActions = $('autoRouteActions');
   if (autoRouteTypeRow) autoRouteTypeRow.classList.toggle('hidden', tool !== 'auto-route');
+  if (autoRouteOffsetAxisRow) {
+    autoRouteOffsetAxisRow.classList.toggle(
+      'hidden',
+      tool !== 'auto-route' || $('autoRouteType').value !== 'tray'
+    );
+  }
   if (autoRouteActions) autoRouteActions.classList.add('hidden');
   const hint = {
     select: 'Click a route to select it. Drag a selected tray or cable to move it in 3D; edit Position/Slope in Properties.',
@@ -305,6 +312,10 @@ function setTool(tool) {
   status(tool === 'cable' || tool === 'tray' ? 'Drawing ' + tool + ' route' : tool === 'auto-route' ? 'Auto Route: select start point' : 'Ready');
 }
 document.querySelectorAll('.tool').forEach(function(b){ b.addEventListener('click', function(){ setTool(b.dataset.tool); }); });
+$('autoRouteType').addEventListener('change', function(){
+  const row = $('autoRouteOffsetAxisRow');
+  if (row) row.classList.toggle('hidden', state.tool !== 'auto-route' || this.value !== 'tray');
+});
 $('projectName').addEventListener('input', function(e){ state.project.name = e.target.value; });
 $('unitSystem').addEventListener('change', function(e){ state.project.units = e.target.value; });
 
