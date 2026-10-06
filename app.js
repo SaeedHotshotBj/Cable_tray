@@ -3,10 +3,13 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { STLLoader } from 'three/addons/loaders/STLLoader.js';
+import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
 
 const state = {
   project: { name: 'Factory Cable Routing', units: 'mm', schema_version: 1 },
-  objects: [], selected: null, tool: 'select', drawing: null, modelRoots: new Map(), measureStart: null
+  objects: [], selected: null, tool: 'select', drawing: null,
+  modelRoots: new Map(), routeRoots: new Map(), measureStart: null,
+  dragging: null, skipClick: false
 };
 const $ = id => document.getElementById(id);
 
@@ -77,7 +80,7 @@ function setTool(tool) {
   state.measureStart = null;
   document.querySelectorAll('.tool').forEach(function(b){ b.classList.toggle('active', b.dataset.tool === tool); });
   const hint = {
-    select: 'Select an object in the 3D scene or Scene panel.',
+    select: 'Click a route to select it. Drag a selected tray or cable to move it in 3D; edit Position/Slope in Properties.',
     cable: 'Click route points. Press Enter to finish.',
     tray: 'Click route points. Press Enter to finish.',
     model: 'Use Load Model for 3D, SolidWorks, AutoCAD DWG or DXF files.',
@@ -126,9 +129,8 @@ function createRoute(type, points) {
   const height = Number($('defaultTrayHeight').value) || 100;
   const elevation = Number($('defaultElevation').value) || 3000;
   const p = points.map(function(v){
-    // A point picked on imported CAD geometry already has the exact world X/Y/Z
-    // returned by Three.js raycasting. Keep it untouched. For points picked on
-    // the fallback ground plane, apply the configured routing elevation.
+    // A point picked on imported CAD geometry already has exact world X/Y/Z.
+    // Points falling back to the ground plane use the configured elevation.
     return new THREE.Vector3(v.x, v.__routeSnapToModel ? v.y : mmToScene(elevation), v.z);
   });
   const obj = {
@@ -137,43 +139,209 @@ function createRoute(type, points) {
     points: p,
     diameter_mm: dia, width_mm: width, height_mm: height,
     specification: cable ? 'POWER-CABLE' : width + 'x' + height + ' TRAY',
-    material: cable ? 'Copper/PVC' : 'Galvanized Steel'
+    material: cable ? 'Copper/PVC' : 'Galvanized Steel',
+    rotation_deg: { x: 0, y: 0, z: 0 }
   };
   state.objects.push(obj);
   return obj;
 }
+
+function routeCenter(points) {
+  const center = new THREE.Vector3();
+  if (!points.length) return center;
+  points.forEach(function(p){ center.add(p); });
+  return center.multiplyScalar(1 / points.length);
+}
+
+function roundedRouteCurve(points, radius) {
+  const path = new THREE.CurvePath();
+  if (points.length < 2) return path;
+  if (points.length === 2) {
+    path.add(new THREE.LineCurve3(points[0], points[1]));
+    return path;
+  }
+
+  const entries = new Array(points.length);
+  const exits = new Array(points.length);
+  entries[0] = points[0].clone();
+  exits[0] = points[0].clone();
+  entries[points.length - 1] = points[points.length - 1].clone();
+  exits[points.length - 1] = points[points.length - 1].clone();
+
+  for (let i = 1; i < points.length - 1; i++) {
+    const prev = points[i - 1];
+    const cur = points[i];
+    const next = points[i + 1];
+    const inLength = cur.distanceTo(prev);
+    const outLength = next.distanceTo(cur);
+    const localRadius = Math.max(0, Math.min(radius, inLength * 0.35, outLength * 0.35));
+    const inDir = cur.clone().sub(prev).normalize();
+    const outDir = next.clone().sub(cur).normalize();
+    entries[i] = cur.clone().sub(inDir.multiplyScalar(localRadius));
+    exits[i] = cur.clone().add(outDir.multiplyScalar(localRadius));
+  }
+
+  let cursor = points[0].clone();
+  for (let i = 1; i < points.length - 1; i++) {
+    path.add(new THREE.LineCurve3(cursor, entries[i]));
+    path.add(new THREE.QuadraticBezierCurve3(entries[i], points[i], exits[i]));
+    cursor = exits[i].clone();
+  }
+  path.add(new THREE.LineCurve3(cursor, points[points.length - 1]));
+  return path;
+}
+
 function routeVisual(obj) {
   const g = new THREE.Group();
   g.userData.objectId = obj.id;
-  const color = obj.kind === 'cable' ? 0xffb347 : 0x55b6ff;
-  const mat = new THREE.MeshStandardMaterial({ color: color, roughness: 0.72, metalness: 0.25 });
+  g.userData.routeVisual = true;
+
+  const center = routeCenter(obj.points);
+  const localPoints = obj.points.map(function(p){ return p.clone().sub(center); });
+  const rot = obj.rotation_deg || { x: 0, y: 0, z: 0 };
+  g.position.copy(center);
+  g.rotation.set(
+    THREE.MathUtils.degToRad(Number(rot.x) || 0),
+    THREE.MathUtils.degToRad(Number(rot.y) || 0),
+    THREE.MathUtils.degToRad(Number(rot.z) || 0)
+  );
+
+  const baseColor = obj.kind === 'cable' ? 0xffb347 : 0x55b6ff;
+  const mat = new THREE.MeshStandardMaterial({
+    color: baseColor,
+    roughness: 0.72,
+    metalness: 0.25
+  });
+  g.userData.baseColor = baseColor;
+  g.userData.meshMaterial = mat;
+
+  const curveRadius = obj.kind === 'cable'
+    ? Math.max(0.8, mmToScene(obj.diameter_mm * 3))
+    : Math.max(1.0, mmToScene(Math.min(obj.width_mm, obj.height_mm) * 0.8));
+  const roundedCurve = roundedRouteCurve(localPoints, curveRadius);
+
   if (obj.kind === 'cable') {
-    const curve = new THREE.CatmullRomCurve3(obj.points, false, 'centripetal', 0.1);
-    curve.arcLengthDivisions = Math.max(32, obj.points.length * 16);
-    const tube = new THREE.Mesh(new THREE.TubeGeometry(curve, Math.max(8, obj.points.length * 16), Math.max(0.2, mmToScene(obj.diameter_mm) / 2), 10, false), mat);
+    const tube = new THREE.Mesh(
+      new THREE.TubeGeometry(
+        roundedCurve,
+        Math.max(24, localPoints.length * 20),
+        Math.max(0.2, mmToScene(obj.diameter_mm) / 2),
+        12,
+        false
+      ),
+      mat
+    );
     tube.userData.objectId = obj.id;
     g.add(tube);
   } else {
-    for (let i = 1; i < obj.points.length; i++) {
-      const a = obj.points[i - 1], b = obj.points[i];
+    const width = mmToScene(obj.width_mm);
+    const height = mmToScene(obj.height_mm);
+    const segmentRadius = Math.min(width, height) * 0.12;
+
+    for (let i = 1; i < localPoints.length; i++) {
+      const a = localPoints[i - 1];
+      const b = localPoints[i];
       const len = a.distanceTo(b);
-      const box = new THREE.Mesh(new THREE.BoxGeometry(mmToScene(obj.width_mm), mmToScene(obj.height_mm), len), mat);
+      const boxDepth = Math.max(len, Math.min(width, height) * 0.08);
+      const box = new THREE.Mesh(
+        new RoundedBoxGeometry(
+          Math.max(width, 0.2),
+          Math.max(height, 0.2),
+          boxDepth,
+          4,
+          segmentRadius
+        ),
+        mat
+      );
       box.position.copy(a.clone().add(b).multiplyScalar(0.5));
       box.lookAt(b);
       box.userData.objectId = obj.id;
       g.add(box);
     }
+
+    // Soft geometric elbow connectors make direction changes read as a
+    // continuous tray rather than two hard-intersecting boxes.
+    for (let i = 1; i < localPoints.length - 1; i++) {
+      const corner = localPoints[i];
+      const inDir = corner.clone().sub(localPoints[i - 1]).normalize();
+      const outDir = localPoints[i + 1].clone().sub(corner).normalize();
+      let bisector = inDir.clone().add(outDir);
+      if (bisector.lengthSq() < 1e-6) bisector = outDir.clone();
+      bisector.normalize();
+
+      const connectorDepth = Math.max(width * 0.75, height);
+      const connector = new THREE.Mesh(
+        new RoundedBoxGeometry(
+          Math.max(width, 0.2),
+          Math.max(height, 0.2),
+          connectorDepth,
+          4,
+          segmentRadius
+        ),
+        mat
+      );
+      connector.position.copy(corner);
+      connector.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), bisector);
+      connector.userData.objectId = obj.id;
+      g.add(connector);
+    }
   }
-  const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(obj.points), new THREE.LineBasicMaterial({ color: 0xdceeff, transparent: true, opacity: 0.35 }));
+
+  const linePoints = roundedCurve.getPoints(Math.max(16, localPoints.length * 16));
+  const lineMaterial = new THREE.LineBasicMaterial({
+    color: 0xdceeff,
+    transparent: true,
+    opacity: 0.34
+  });
+  const line = new THREE.Line(
+    new THREE.BufferGeometry().setFromPoints(linePoints),
+    lineMaterial
+  );
   line.userData.objectId = obj.id;
+  g.userData.lineMaterial = lineMaterial;
   g.add(line);
+
+  applyRouteSelectionVisual(g, obj.id === state.selected);
   return g;
 }
+
+function applyRouteSelectionVisual(root, selected) {
+  if (!root) return;
+  const baseColor = root.userData.baseColor || 0x55b6ff;
+  root.traverse(function(node){
+    if (node.isMesh && node.material && node.material.color) {
+      node.material.color.setHex(selected ? 0xffdf59 : baseColor);
+      if (node.material.emissive) {
+        node.material.emissive.setHex(selected ? 0x6b4e00 : 0x000000);
+        node.material.emissiveIntensity = selected ? 0.55 : 0;
+      }
+    }
+  });
+  if (root.userData.lineMaterial) {
+    root.userData.lineMaterial.color.setHex(selected ? 0xfff3a6 : 0xdceeff);
+    root.userData.lineMaterial.opacity = selected ? 0.9 : 0.34;
+  }
+}
+
+function updateRouteSelectionVisuals() {
+  state.routeRoots.forEach(function(root, objectId){
+    applyRouteSelectionVisual(root, objectId === state.selected);
+  });
+}
+
 function rebuildRoutes() {
-  const remove = [];
-  scene.traverse(function(o){ if (o.userData && o.userData.routeVisual) remove.push(o); });
-  remove.forEach(function(o){ if (o.parent) o.parent.remove(o); });
-  state.objects.filter(function(o){ return o.kind === 'cable' || o.kind === 'tray'; }).forEach(function(o){ const g = routeVisual(o); g.userData.routeVisual = true; scene.add(g); });
+  state.routeRoots.forEach(function(root){
+    if (root.parent) root.parent.remove(root);
+  });
+  state.routeRoots.clear();
+
+  state.objects
+    .filter(function(o){ return o.kind === 'cable' || o.kind === 'tray'; })
+    .forEach(function(o){
+      const g = routeVisual(o);
+      scene.add(g);
+      state.routeRoots.set(o.id, g);
+    });
 }
 function finishRoute() {
   if (!state.drawing) return;
@@ -187,7 +355,105 @@ function finishRoute() {
   setTool('select');
   toast(obj.name + ' created');
 }
+function routeHitAtEvent(event) {
+  pointerRay(event);
+  const roots = Array.from(state.routeRoots.values());
+  if (!roots.length) return null;
+  const hits = raycaster.intersectObjects(roots, true);
+  const hit = hits[0];
+  if (!hit || !hit.object || !hit.object.userData) return null;
+  const objectId = hit.object.userData.objectId;
+  const root = objectId ? state.routeRoots.get(objectId) : null;
+  if (!root) return null;
+  return { hit: hit, objectId: objectId, root: root };
+}
+
+function finishRouteDrag() {
+  if (!state.dragging) return;
+  const drag = state.dragging;
+  state.dragging = null;
+  controls.enabled = true;
+
+  if (drag.moved) {
+    const delta = drag.root.position.clone().sub(drag.startPosition);
+    if (delta.lengthSq() > 1e-10) {
+      const obj = state.objects.find(function(o){ return o.id === drag.objectId; });
+      if (obj) obj.points.forEach(function(p){ p.add(delta); });
+    }
+    rebuildRoutes();
+    render();
+    state.skipClick = true;
+    status('Route moved');
+    return;
+  }
+
+  state.selected = drag.objectId;
+  render();
+}
+
+renderer.domElement.addEventListener('pointerdown', function(e){
+  if (state.tool !== 'select' || e.button !== 0) return;
+  const picked = routeHitAtEvent(e);
+  if (!picked) return;
+
+  state.selected = picked.objectId;
+  render();
+
+  const normal = camera.getWorldDirection(new THREE.Vector3()).normalize();
+  const dragPlane = new THREE.Plane().setFromNormalAndCoplanarPoint(normal, picked.hit.point);
+  state.dragging = {
+    objectId: picked.objectId,
+    root: picked.root,
+    startPosition: picked.root.position.clone(),
+    pointerOffset: picked.hit.point.clone().sub(picked.root.position),
+    plane: dragPlane,
+    moved: false,
+    startPointer: { x: e.clientX, y: e.clientY }
+  };
+  controls.enabled = false;
+  try { renderer.domElement.setPointerCapture(e.pointerId); } catch (_) {}
+});
+
+renderer.domElement.addEventListener('pointermove', function(e){
+  if (!state.dragging) return;
+  const drag = state.dragging;
+  const r = renderer.domElement.getBoundingClientRect();
+  mouse.x = ((e.clientX - r.left) / r.width) * 2 - 1;
+  mouse.y = -((e.clientY - r.top) / r.height) * 2 + 1;
+  raycaster.setFromCamera(mouse, camera);
+
+  const point = new THREE.Vector3();
+  if (!raycaster.ray.intersectPlane(drag.plane, point)) return;
+
+  const nextPosition = point.sub(drag.pointerOffset);
+  if (!drag.moved) {
+    const px = e.clientX - drag.startPointer.x;
+    const py = e.clientY - drag.startPointer.y;
+    drag.moved = (px * px + py * py) >= 16;
+  }
+  if (!drag.moved) return;
+
+  drag.root.position.copy(nextPosition);
+  status('Moving ' + (state.objects.find(function(o){ return o.id === drag.objectId; }) || {}).name);
+});
+
+renderer.domElement.addEventListener('pointerup', function(){
+  finishRouteDrag();
+});
+
+renderer.domElement.addEventListener('pointercancel', function(){
+  if (state.dragging) {
+    state.dragging = null;
+    controls.enabled = true;
+  }
+});
+
 renderer.domElement.addEventListener('click', function(e){
+  if (state.skipClick) {
+    state.skipClick = false;
+    return;
+  }
+
   if (state.tool === 'cable' || state.tool === 'tray') {
     const p = routePoint(e); if (!p) return;
     state.drawing.points.push(p);
@@ -206,10 +472,8 @@ renderer.domElement.addEventListener('click', function(e){
     return;
   }
   if (state.tool !== 'select') return;
-  const r = renderer.domElement.getBoundingClientRect();
-  mouse.x = ((e.clientX - r.left) / r.width) * 2 - 1;
-  mouse.y = -((e.clientY - r.top) / r.height) * 2 + 1;
-  raycaster.setFromCamera(mouse, camera);
+
+  pointerRay(e);
   const hits = raycaster.intersectObjects(scene.children, true);
   const hit = hits.find(function(x){ return x.object.userData && x.object.userData.objectId; });
   state.selected = hit ? hit.object.userData.objectId : null;
@@ -242,8 +506,14 @@ function renderScene() {
 function renderProperties() {
   const el = $('properties');
   const o = state.objects.find(function(x){ return x.id === state.selected; });
-  if (!o) { el.className = 'properties empty'; el.textContent = 'Select a route or imported model.'; return; }
+  if (!o) {
+    el.className = 'properties empty';
+    el.textContent = 'Select a route or imported model.';
+    return;
+  }
+
   el.className = 'properties';
+
   if (o.kind === 'model') {
     el.innerHTML = '<div class="prop-row"><div class="prop-label">Name</div><input class="prop-value" id="p_name" value="' + esc(o.name) + '"></div>' +
       '<div class="prop-row"><div class="prop-label">Format</div><div class="prop-value">' + esc(o.format) + '</div></div>' +
@@ -252,20 +522,81 @@ function renderProperties() {
     $('p_name').addEventListener('input', function(e){ o.name = e.target.value; renderScene(); });
   } else {
     const cable = o.kind === 'cable';
-    el.innerHTML = '<div class="prop-row"><div class="prop-label">Name</div><input class="prop-value" id="p_name" value="' + esc(o.name) + '"></div>' +
+    const center = routeCenter(o.points);
+    const rot = o.rotation_deg || { x: 0, y: 0, z: 0 };
+
+    el.innerHTML =
+      '<div class="property-group-title">Identity</div>' +
+      '<div class="prop-row"><div class="prop-label">Name</div><input class="prop-value" id="p_name" value="' + esc(o.name) + '"></div>' +
       '<div class="prop-row"><div class="prop-label">Specification</div><input class="prop-value" id="p_spec" value="' + esc(o.specification) + '"></div>' +
+      '<div class="prop-row"><div class="prop-label">Material</div><input class="prop-value" id="p_material" value="' + esc(o.material) + '"></div>' +
+      '<div class="property-group-title">Dimensions</div>' +
       '<div class="prop-row"><div class="prop-label">' + (cable ? 'Diameter' : 'Width') + ' (mm)</div><input class="prop-value" id="p_a" type="number" value="' + (cable ? o.diameter_mm : o.width_mm) + '"></div>' +
       (cable ? '' : '<div class="prop-row"><div class="prop-label">Height (mm)</div><input class="prop-value" id="p_h" type="number" value="' + o.height_mm + '"></div>') +
-      '<div class="prop-row"><div class="prop-label">Material</div><input class="prop-value" id="p_material" value="' + esc(o.material) + '"></div>' +
+      '<div class="property-group-title">Position (mm)</div>' +
+      '<div class="prop-row"><div class="prop-label">X</div><input class="prop-value" id="p_pos_x" type="number" step="1" value="' + (center.x * 10).toFixed(1) + '"></div>' +
+      '<div class="prop-row"><div class="prop-label">Y</div><input class="prop-value" id="p_pos_y" type="number" step="1" value="' + (center.y * 10).toFixed(1) + '"></div>' +
+      '<div class="prop-row"><div class="prop-label">Z</div><input class="prop-value" id="p_pos_z" type="number" step="1" value="' + (center.z * 10).toFixed(1) + '"></div>' +
+      '<div class="property-group-title">Slope / Rotation (deg)</div>' +
+      '<div class="prop-row"><div class="prop-label">X</div><input class="prop-value" id="p_rot_x" type="number" step="0.1" value="' + Number(rot.x || 0).toFixed(1) + '"></div>' +
+      '<div class="prop-row"><div class="prop-label">Y</div><input class="prop-value" id="p_rot_y" type="number" step="0.1" value="' + Number(rot.y || 0).toFixed(1) + '"></div>' +
+      '<div class="prop-row"><div class="prop-label">Z</div><input class="prop-value" id="p_rot_z" type="number" step="0.1" value="' + Number(rot.z || 0).toFixed(1) + '"></div>' +
       '<div class="prop-row"><div class="prop-label">Length</div><div class="prop-value">' + lengthOf(o.points).toFixed(2) + ' m</div></div>' +
       '<div class="prop-row"><div class="prop-label">Elbows</div><div class="prop-value">' + elbows(o.points) + '</div></div>' +
+      '<div class="property-hint">Drag the selected route in the 3D view for free 3D movement. Position fields give exact XYZ control.</div>' +
       '<button class="small danger" id="deleteObjectBtn">Delete</button>';
+
     $('p_name').addEventListener('input', function(e){ o.name = e.target.value; renderScene(); });
     $('p_spec').addEventListener('input', function(e){ o.specification = e.target.value; renderBoq(); });
     $('p_material').addEventListener('input', function(e){ o.material = e.target.value; renderBoq(); });
-    $('p_a').addEventListener('input', function(e){ if (cable) o.diameter_mm = Number(e.target.value) || 1; else o.width_mm = Number(e.target.value) || 1; rebuildRoutes(); renderBoq(); });
-    if (!cable) $('p_h').addEventListener('input', function(e){ o.height_mm = Number(e.target.value) || 1; rebuildRoutes(); renderBoq(); });
+
+    $('p_a').addEventListener('input', function(e){
+      if (cable) o.diameter_mm = Number(e.target.value) || 1;
+      else o.width_mm = Number(e.target.value) || 1;
+      rebuildRoutes(); renderBoq(); updateRouteSelectionVisuals();
+    });
+
+    if (!cable) {
+      $('p_h').addEventListener('input', function(e){
+        o.height_mm = Number(e.target.value) || 1;
+        rebuildRoutes(); renderBoq(); updateRouteSelectionVisuals();
+      });
+    }
+
+    function updatePosition(axis, value) {
+      const target = Number(value);
+      if (!Number.isFinite(target)) return;
+      const currentCenter = routeCenter(o.points);
+      const targetScene = target / 10;
+      const delta = targetScene - currentCenter[axis];
+      if (Math.abs(delta) < 1e-9) return;
+      o.points.forEach(function(p){ p[axis] += delta; });
+      rebuildRoutes();
+      renderScene();
+      renderBoq();
+      renderProperties();
+    }
+
+    $('p_pos_x').addEventListener('change', function(e){ updatePosition('x', e.target.value); });
+    $('p_pos_y').addEventListener('change', function(e){ updatePosition('y', e.target.value); });
+    $('p_pos_z').addEventListener('change', function(e){ updatePosition('z', e.target.value); });
+
+    function updateRotation(axis, value) {
+      const target = Number(value);
+      if (!Number.isFinite(target)) return;
+      if (!o.rotation_deg) o.rotation_deg = { x: 0, y: 0, z: 0 };
+      o.rotation_deg[axis] = target;
+      rebuildRoutes();
+      renderScene();
+      renderBoq();
+      renderProperties();
+    }
+
+    $('p_rot_x').addEventListener('change', function(e){ updateRotation('x', e.target.value); });
+    $('p_rot_y').addEventListener('change', function(e){ updateRotation('y', e.target.value); });
+    $('p_rot_z').addEventListener('change', function(e){ updateRotation('z', e.target.value); });
   }
+
   $('deleteObjectBtn').addEventListener('click', deleteSelected);
 }
 function renderBoq() {
@@ -278,7 +609,7 @@ function renderBoq() {
   $('totalElbows').textContent = String(elbowN);
   $('boqTableWrap').innerHTML = routes.length ? '<table><thead><tr><th>Item</th><th>Specification</th><th>Qty</th><th>Unit</th><th>Elbow</th></tr></thead><tbody>' + routes.map(function(o){ return '<tr><td>' + esc(o.kind === 'cable' ? 'Cable' : 'Cable Tray') + '</td><td>' + esc(o.specification) + '</td><td>' + lengthOf(o.points).toFixed(2) + '</td><td>m</td><td>' + elbows(o.points) + '</td></tr>'; }).join('') + '</tbody></table>' : '<div class="hint" style="padding:10px">No routing quantities yet.</div>';
 }
-function render() { renderScene(); renderProperties(); renderBoq(); }
+function render() { renderScene(); renderProperties(); renderBoq(); updateRouteSelectionVisuals(); }
 
 async function importModelFile(fileUrl, displayName, format, nativeFormat) {
   const url = fileUrl;
@@ -335,7 +666,27 @@ async function importModelFile(fileUrl, displayName, format, nativeFormat) {
 }
 
 function projectData() {
-  return { schema: 'cable-tray-project', schema_version: 1, project: state.project, objects: state.objects.filter(function(o){ return o.kind !== 'model'; }).map(function(o){ return { id:o.id, kind:o.kind, name:o.name, points:o.points.map(function(p){ return {x:p.x*10,y:p.y*10,z:p.z*10}; }), diameter_mm:o.diameter_mm, width_mm:o.width_mm, height_mm:o.height_mm, specification:o.specification, material:o.material }; }) };
+  return {
+    schema: 'cable-tray-project',
+    schema_version: 1,
+    project: state.project,
+    objects: state.objects
+      .filter(function(o){ return o.kind !== 'model'; })
+      .map(function(o){
+        return {
+          id:o.id,
+          kind:o.kind,
+          name:o.name,
+          points:o.points.map(function(p){ return {x:p.x*10,y:p.y*10,z:p.z*10}; }),
+          diameter_mm:o.diameter_mm,
+          width_mm:o.width_mm,
+          height_mm:o.height_mm,
+          specification:o.specification,
+          material:o.material,
+          rotation_deg:{x:Number(o.rotation_deg && o.rotation_deg.x) || 0,y:Number(o.rotation_deg && o.rotation_deg.y) || 0,z:Number(o.rotation_deg && o.rotation_deg.z) || 0}
+        };
+      })
+  };
 }
 $('saveProjectBtn').addEventListener('click', function(){
   const blob = new Blob([JSON.stringify(projectData(), null, 2)], { type: 'application/json' });
@@ -344,7 +695,18 @@ $('saveProjectBtn').addEventListener('click', function(){
 function loadProject(data) {
   if (!data || data.schema !== 'cable-tray-project') throw new Error('Not a Cable_tray project');
   state.modelRoots.forEach(function(root){ scene.remove(root); }); state.modelRoots.clear();
-  state.objects = (data.objects || []).map(function(o){ return { ...o, points:(o.points || []).map(function(p){ return new THREE.Vector3(mmToScene(p.x), mmToScene(p.y), mmToScene(p.z)); }) }; });
+  state.objects = (data.objects || []).map(function(o){
+    const rotation = o.rotation_deg || { x: 0, y: 0, z: 0 };
+    return {
+      ...o,
+      rotation_deg: {
+        x: Number(rotation.x) || 0,
+        y: Number(rotation.y) || 0,
+        z: Number(rotation.z) || 0
+      },
+      points:(o.points || []).map(function(p){ return new THREE.Vector3(mmToScene(p.x), mmToScene(p.y), mmToScene(p.z)); })
+    };
+  });
   state.project = { ...state.project, ...(data.project || {}) };
   $('projectName').value = state.project.name || 'Factory Cable Routing';
   $('unitSystem').value = state.project.units || 'mm';
