@@ -14,7 +14,7 @@ const state = {
   modelRoots: new Map(), routeRoots: new Map(), measureStart: null,
   sourceModels: [], dragging: null, skipClick: false,
   surfacePickMode: false, surfacePick: null,
-  measureStart: null, measurements: [], measurementsVisible: true,
+  measureStart: null, autoRouteStart: null, measurements: [], measurementsVisible: true,
   selectedMeasurementId: null,
   surfaceAlignStart: null,
   clipboard: null,
@@ -222,21 +222,25 @@ function setTool(tool) {
   state.surfacePickMode = false;
   state.surfacePick = null;
   state.surfaceAlignStart = null;
+  state.autoRouteStart = null;
   state.tool = tool;
   state.drawing = (tool === 'cable' || tool === 'tray') ? { type: tool, points: [] } : null;
   state.measureStart = null;
   surfaceSelectionRoot.clear();
   document.querySelectorAll('.tool').forEach(function(b){ b.classList.toggle('active', b.dataset.tool === tool); });
+  const autoRouteTypeRow = $('autoRouteTypeRow');
+  if (autoRouteTypeRow) autoRouteTypeRow.classList.toggle('hidden', tool !== 'auto-route');
   const hint = {
     select: 'Click a route to select it. Drag a selected tray or cable to move it in 3D; edit Position/Slope in Properties.',
     cable: 'Click route points. Press Enter to finish.',
     tray: 'Click route points. Press Enter to finish.',
     model: 'Use Load Model for 3D, SolidWorks, AutoCAD DWG or DXF files.',
-    measure: 'Click two points, or two CAD/model surfaces, to create a persistent distance dimension.'
+    measure: 'Click two points, or two CAD/model surfaces, to create a persistent distance dimension.',
+    'auto-route': 'Select Cable or Tray, then click the start point and end point. A straight shortest route is created between them.'
   };
   $('toolHint').textContent = hint[tool] || '';
   $('routeOverlay').classList.toggle('hidden', tool !== 'cable' && tool !== 'tray');
-  status(tool === 'cable' || tool === 'tray' ? 'Drawing ' + tool + ' route' : 'Ready');
+  status(tool === 'cable' || tool === 'tray' ? 'Drawing ' + tool + ' route' : tool === 'auto-route' ? 'Auto Route: select start point' : 'Ready');
 }
 document.querySelectorAll('.tool').forEach(function(b){ b.addEventListener('click', function(){ setTool(b.dataset.tool); }); });
 $('projectName').addEventListener('input', function(e){ state.project.name = e.target.value; });
@@ -268,6 +272,62 @@ function routePoint(event) {
   }
   const groundHit = raycaster.intersectObject(ground, false)[0];
   return groundHit ? groundHit.point.clone() : null;
+}
+
+function autoRoutePoint(event) {
+  pointerRay(event);
+  const roots = Array.from(state.modelRoots.values()).concat(Array.from(state.routeRoots.values()));
+  if (roots.length) {
+    const hits = [];
+    roots.forEach(function(root){
+      raycaster.intersectObject(root, true).forEach(function(hit){ hits.push(hit); });
+    });
+    hits.sort(function(a,b){ return a.distance - b.distance; });
+    const hit = hits[0];
+    if (hit && hit.point) return hit.point.clone();
+  }
+
+  const groundHit = raycaster.intersectObject(ground, false)[0];
+  if (!groundHit) return null;
+
+  const point = groundHit.point.clone();
+  point.y = mmToScene(Number($('defaultElevation').value) || 3000);
+  return point;
+}
+
+function showAutoRoutePoint(point, color) {
+  if (!point) return;
+  const marker = new THREE.Mesh(
+    new THREE.SphereGeometry(Math.max(2, mmToScene(40)), 16, 16),
+    new THREE.MeshBasicMaterial({ color: color || 0xffd45a, depthTest: false })
+  );
+  marker.position.copy(point);
+  marker.renderOrder = 40;
+  surfaceSelectionRoot.add(marker);
+}
+
+function createAutoRoute() {
+  if (!state.autoRouteStart) return;
+  const end = state.autoRoutePendingEnd;
+  if (!end) return;
+
+  const distance = state.autoRouteStart.distanceTo(end);
+  if (distance < 1e-8) {
+    toast('Start and end points must be different');
+    return;
+  }
+
+  const type = $('autoRouteType').value === 'tray' ? 'tray' : 'cable';
+  const beforeHistory = captureDesignState();
+  const obj = createRoute(type, [state.autoRouteStart.clone(), end.clone()]);
+  recordHistory(beforeHistory);
+  state.selected = obj.id;
+  state.autoRouteStart = null;
+  state.autoRoutePendingEnd = null;
+  rebuildRoutes();
+  render();
+  setTool('select');
+  toast(obj.name + ' created — shortest straight route: ' + sceneToM(distance).toFixed(3) + ' m');
 }
 
 function createRoute(type, points) {
@@ -688,6 +748,27 @@ renderer.domElement.addEventListener('click', function(e){
     status(state.drawing.type + ' point ' + state.drawing.points.length);
     return;
   }
+
+  if (state.tool === 'auto-route') {
+    const point = autoRoutePoint(e);
+    if (!point) {
+      toast('Click a valid start or end point in the 3D view');
+      return;
+    }
+
+    if (!state.autoRouteStart) {
+      state.autoRouteStart = point;
+      showAutoRoutePoint(point, 0xffd45a);
+      status('Auto Route: select end point');
+      toast('Start point selected — click the end point');
+    } else {
+      state.autoRoutePendingEnd = point;
+      showAutoRoutePoint(point, 0x66d9ff);
+      createAutoRoute();
+    }
+    return;
+  }
+
   if (state.tool === 'align') {
     const target = measurementTargetFromEvent(e);
     if (!target) return;
@@ -764,6 +845,15 @@ function handleKeyboardShortcut(e) {
     if (state.surfaceAlignStart) {
       state.surfaceAlignStart = null;
       clearSurfaceSelectionVisuals();
+      e.preventDefault();
+      return;
+    }
+    if (state.autoRouteStart) {
+      state.autoRouteStart = null;
+      state.autoRoutePendingEnd = null;
+      clearSurfaceSelectionVisuals();
+      status('Ready');
+      toast('Auto Route cancelled');
       e.preventDefault();
       return;
     }
