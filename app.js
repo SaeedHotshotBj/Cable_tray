@@ -109,7 +109,11 @@ function routePoint(event) {
   const modelRoots = Array.from(state.modelRoots.values());
   if (modelRoots.length) {
     const modelHit = raycaster.intersectObjects(modelRoots, true)[0];
-    if (modelHit) return modelHit.point.clone();
+    if (modelHit) {
+      const point = modelHit.point.clone();
+      point.__routeSnapToModel = true;
+      return point;
+    }
   }
   const groundHit = raycaster.intersectObject(ground, false)[0];
   return groundHit ? groundHit.point.clone() : null;
@@ -121,7 +125,12 @@ function createRoute(type, points) {
   const width = Number($('defaultTrayWidth').value) || 300;
   const height = Number($('defaultTrayHeight').value) || 100;
   const elevation = Number($('defaultElevation').value) || 3000;
-  const p = points.map(function(v){ return new THREE.Vector3(v.x, mmToScene(elevation), v.z); });
+  const p = points.map(function(v){
+    // A point picked on imported CAD geometry already has the exact world X/Y/Z
+    // returned by Three.js raycasting. Keep it untouched. For points picked on
+    // the fallback ground plane, apply the configured routing elevation.
+    return new THREE.Vector3(v.x, v.__routeSnapToModel ? v.y : mmToScene(elevation), v.z);
+  });
   const obj = {
     id: id(type), kind: type,
     name: (cable ? 'Cable-' : 'Tray-') + (state.objects.filter(function(o){ return o.kind === type; }).length + 1),
@@ -181,7 +190,6 @@ function finishRoute() {
 renderer.domElement.addEventListener('click', function(e){
   if (state.tool === 'cable' || state.tool === 'tray') {
     const p = routePoint(e); if (!p) return;
-    p.y = mmToScene(Number($('defaultElevation').value) || 3000);
     state.drawing.points.push(p);
     status(state.drawing.type + ' point ' + state.drawing.points.length);
     return;
