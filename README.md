@@ -8,6 +8,8 @@ This project is being built as an engineering application for industrial plants:
 
 - 3D engineering viewport with orbit, pan, zoom, grid and axes.
 - Browser import for GLB/GLTF, OBJ and STL.
+- Windows-native AutoCAD DWG/DXF import through AutoCAD-to-STL export.
+- Windows-native SolidWorks SLDASM/SLDPRT import through SolidWorks-to-STL export.
 - Parametric Cable Route and Cable Tray Route objects.
 - Route drawing at a configurable elevation.
 - Automatic route length and basic elbow counting.
@@ -31,7 +33,7 @@ The first launch loads Three.js from jsDelivr, so the browser needs internet acc
 
 CAD / BIM / 3D files -> Import adapters -> Internal Engineering Model -> 3D View + Routing + Clash + Rules -> Quantity / BOQ.
 
-The routing engine must never depend directly on one vendor file format. Future adapters will target DWG/DXF, STEP/IGES/Parasolid, SolidWorks, IFC/Revit/BIM, JT/CATIA/NX and additional industrial formats.
+The routing engine must never depend directly on one vendor file format. Current Windows bridges cover AutoCAD DWG/DXF and SolidWorks SLDASM/SLDPRT by converting them to browser-loadable STL. Future adapters will target STEP/IGES/Parasolid, IFC/Revit/BIM, JT/CATIA/NX and additional industrial formats.
 
 ## Engineering data rule
 
