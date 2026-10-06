@@ -846,25 +846,43 @@ function formatDistance(meters) {
 
 function measurementTargetFromEvent(event) {
   pointerRay(event);
-  const roots = Array.from(state.modelRoots.values());
-  if (roots.length) {
-    const hits = [];
-    roots.forEach(function(root){ raycaster.intersectObject(root, true).forEach(function(hit){ hits.push(hit); }); });
-    hits.sort(function(a,b){ return a.distance - b.distance; });
-    const hit = hits[0];
-    if (hit && hit.face) {
-      return {
-        kind:'surface',
-        point:hit.point.clone(),
-        normal:hit.face.normal.clone().transformDirection(hit.object.matrixWorld).normalize(),
-        modelId:hit.object.userData && hit.object.userData.objectId ? hit.object.userData.objectId : null,
-        object:hit.object,
-        faceIndex:hit.faceIndex
-      };
-    }
+
+  // Measure only against real project geometry:
+  // imported CAD/model surfaces and surfaces of routes already created in the project.
+  // The editor ground plane is intentionally excluded so clicking empty space
+  // can never create a measurement point.
+  const roots = Array.from(state.modelRoots.values()).concat(Array.from(state.routeRoots.values()));
+  if (!roots.length) {
+    toast('No project surfaces are available for measurement');
+    return null;
   }
-  const groundHit=raycaster.intersectObject(ground,false)[0];
-  return groundHit ? {kind:'point',point:groundHit.point.clone(),normal:null,modelId:null} : null;
+
+  const hits = [];
+  roots.forEach(function(root){
+    raycaster.intersectObject(root, true).forEach(function(hit){
+      if (hit && hit.face) hits.push(hit);
+    });
+  });
+  hits.sort(function(a,b){ return a.distance - b.distance; });
+
+  const hit = hits[0];
+  if (!hit || !hit.face) {
+    toast('Click a surface that belongs to the project');
+    return null;
+  }
+
+  const objectId = hit.object.userData && hit.object.userData.objectId ? hit.object.userData.objectId : null;
+  const modelObject = objectId ? state.objects.find(function(o){ return o.id === objectId; }) : null;
+
+  return {
+    kind: 'surface',
+    point: hit.point.clone(),
+    normal: hit.face.normal.clone().transformDirection(hit.object.matrixWorld).normalize(),
+    modelId: modelObject && modelObject.kind === 'model' ? objectId : null,
+    objectId: objectId,
+    object: hit.object,
+    faceIndex: hit.faceIndex
+  };
 }
 
 function clearSurfaceSelectionVisuals() {
