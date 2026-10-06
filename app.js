@@ -15,13 +15,15 @@ const $ = id => document.getElementById(id);
 window.CableTrayAcceptModel = async function(selected) {
   if (!selected || !selected.url) throw new Error('The model picker did not return a loadable model.');
   const url = new URL(selected.url, window.location.href).href;
+  const nativeFormat = selected.native_format || selected.format || 'STL';
   window.CableTrayDebugLog && window.CableTrayDebugLog('INFO', 'MODEL_ENGINE_START', {
     name: selected.name,
     format: selected.format,
+    nativeFormat: nativeFormat,
     url: url
   });
   status('Loading model...');
-  await importModelFile(url, selected.name, selected.format || 'STL');
+  await importModelFile(url, selected.name, selected.format || 'STL', nativeFormat);
 };
 
 const viewport = $('viewport');
@@ -265,7 +267,7 @@ function renderBoq() {
 }
 function render() { renderScene(); renderProperties(); renderBoq(); }
 
-async function importModelFile(fileUrl, displayName, format) {
+async function importModelFile(fileUrl, displayName, format, nativeFormat) {
   const url = fileUrl;
   try {
     let root;
@@ -285,6 +287,21 @@ async function importModelFile(fileUrl, displayName, format) {
     } else {
       throw new Error('Unsupported model format: ' + format);
     }
+
+    // Routing coordinates use a scene scale of 10 mm per scene unit.
+    // Native CAD bridges export STL geometry in millimetre coordinates, so
+    // scale those results to the same scene coordinate system.
+    const nativeCadFormats = ['SLDASM', 'SLDPRT', 'DWG', 'DXF'];
+    if (format === 'STL' && nativeCadFormats.indexOf(String(nativeFormat || '').toUpperCase()) >= 0) {
+      root.scale.setScalar(0.1);
+      root.updateMatrixWorld(true);
+      window.CableTrayDebugLog && window.CableTrayDebugLog('INFO', 'CAD_MODEL_SCALE_APPLIED', {
+        nativeFormat: nativeFormat,
+        scale: 0.1,
+        sceneMillimetersPerUnit: 10
+      });
+    }
+
     const objectId = id('model');
     root.userData.objectId = objectId;
     root.traverse(function(n){ if (n.isMesh) n.userData.objectId = objectId; });
