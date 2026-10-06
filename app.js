@@ -501,10 +501,26 @@ function routeVisual(obj) {
     const rail = Math.max(0.22, sheet * 1.4);
     const lipWidth = Math.max(rail * 1.2, mmToScene(Math.min(obj.width_mm, 80) * 0.045));
 
-    function addOrientedPart(geometry, position, direction) {
+    function addOrientedPart(geometry, position, direction, upDirection) {
       const mesh = new THREE.Mesh(geometry, mat);
       mesh.position.copy(position);
-      mesh.lookAt(position.clone().add(direction));
+
+      const zAxis = direction.clone().normalize();
+      let yAxis = (upDirection || new THREE.Vector3(0, 1, 0)).clone();
+      yAxis.sub(zAxis.clone().multiplyScalar(yAxis.dot(zAxis)));
+
+      if (yAxis.lengthSq() < 1e-8) {
+        yAxis = Math.abs(zAxis.y) < 0.999
+          ? new THREE.Vector3(0, 1, 0)
+          : new THREE.Vector3(0, 0, 1);
+        yAxis.sub(zAxis.clone().multiplyScalar(yAxis.dot(zAxis)));
+      }
+
+      yAxis.normalize();
+      const xAxis = zAxis.clone().cross(yAxis).normalize();
+      const basis = new THREE.Matrix4().makeBasis(xAxis, yAxis, zAxis);
+      mesh.quaternion.setFromRotationMatrix(basis);
+
       mesh.userData.objectId = obj.id;
       g.add(mesh);
       return mesh;
@@ -517,14 +533,24 @@ function routeVisual(obj) {
 
       const dir = b.clone().sub(a).normalize();
       const centerSeg = a.clone().add(b).multiplyScalar(0.5);
-      let sideDir = new THREE.Vector3(-dir.z, 0, dir.x);
-      if (sideDir.lengthSq() < 1e-6) sideDir.set(1, 0, 0);
-      sideDir.normalize();
+
+      // World Y is the normal/up direction for horizontal tray runs.
+      // For a vertical run, use world Z as the tray's local up direction
+      // so the cross-section remains well-defined instead of collapsing.
+      let trayUp = new THREE.Vector3(0, 1, 0);
+      if (Math.abs(trayUp.dot(dir)) > 0.999) trayUp.set(0, 0, 1);
+      trayUp.sub(dir.clone().multiplyScalar(trayUp.dot(dir))).normalize();
+
+      const sideDir = dir.clone().cross(trayUp).normalize();
 
       const depth = Math.max(len, sheet * 2);
       const edgeRadius = Math.min(sheet * 0.5, Math.max(0.05, depth * 0.03));
 
-      // Continuous solid floor.
+      // Continuous solid floor. All offsets are relative to the segment's
+      // own cross-section so vertical segments are positioned correctly too.
+      const floorPosition = centerSeg.clone()
+        .add(trayUp.clone().multiplyScalar(-height * 0.5 + sheet * 0.5));
+
       addOrientedPart(
         new RoundedBoxGeometry(
           Math.max(width, 0.2),
@@ -533,8 +559,9 @@ function routeVisual(obj) {
           5,
           edgeRadius
         ),
-        centerSeg.clone().setY(-height * 0.5 + sheet * 0.5),
-        dir
+        floorPosition,
+        dir,
+        trayUp
       );
 
       // Continuous solid sidewalls.
@@ -549,12 +576,17 @@ function routeVisual(obj) {
             5,
             edgeRadius
           ),
-          centerSeg.clone().add(wallOffset).setY(0),
-          dir
+          centerSeg.clone().add(wallOffset),
+          dir,
+          trayUp
         );
 
         // Rolled top lip for a cleaner industrial profile.
         const lipOffset = sideDir.clone().multiplyScalar(side * (width * 0.5 + lipWidth * 0.5));
+        const lipPosition = centerSeg.clone()
+          .add(lipOffset)
+          .add(trayUp.clone().multiplyScalar(height * 0.5 - lipWidth * 0.35));
+
         addOrientedPart(
           new RoundedBoxGeometry(
             lipWidth,
@@ -563,12 +595,17 @@ function routeVisual(obj) {
             5,
             Math.min(lipWidth * 0.3, depth * 0.035)
           ),
-          centerSeg.clone().add(lipOffset).setY(height * 0.5 - lipWidth * 0.35),
-          dir
+          lipPosition,
+          dir,
+          trayUp
         );
 
         // Subtle lower return flange: solid, continuous, and hole-free.
         const lowerFlangeOffset = sideDir.clone().multiplyScalar(side * (width * 0.5 - sheet * 0.5));
+        const lowerFlangePosition = centerSeg.clone()
+          .add(lowerFlangeOffset)
+          .add(trayUp.clone().multiplyScalar(-height * 0.5 + sheet * 1.45));
+
         addOrientedPart(
           new RoundedBoxGeometry(
             Math.max(sheet * 1.8, lipWidth * 0.9),
@@ -577,8 +614,9 @@ function routeVisual(obj) {
             5,
             Math.min(sheet * 0.5, depth * 0.03)
           ),
-          centerSeg.clone().add(lowerFlangeOffset).setY(-height * 0.5 + sheet * 1.45),
-          dir
+          lowerFlangePosition,
+          dir,
+          trayUp
         );
       }
     }
