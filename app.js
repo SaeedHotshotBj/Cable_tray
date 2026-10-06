@@ -1899,15 +1899,94 @@ function renderProperties() {
 
   $('deleteObjectBtn').addEventListener('click', deleteSelected);
 }
+function trimNumber(value, decimals) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return '0';
+  return n.toFixed(decimals).replace(/\\.?0+$/, '');
+}
+
+function quantitySizeLabel(group) {
+  if (group.kind === 'cable') {
+    return 'Ø' + trimNumber(group.diameter_mm, 3) + ' mm';
+  }
+  return trimNumber(group.width_mm / 10, 2) + ' × ' + trimNumber(group.height_mm / 10, 2) + ' cm';
+}
+
+function buildQuantityTakeoffRows() {
+  const grouped = new Map();
+  state.objects
+    .filter(function(o){ return o.kind === 'cable' || o.kind === 'tray'; })
+    .forEach(function(o){
+      const length = lengthOf(o.points);
+      const elbowCount = elbows(o.points);
+      const diameter = Number(o.diameter_mm);
+      const width = Number(o.width_mm);
+      const height = Number(o.height_mm);
+
+      let key;
+      let group;
+      if (o.kind === 'cable') {
+        key = 'cable|' + (Number.isFinite(diameter) ? diameter.toFixed(6) : '0');
+        group = grouped.get(key);
+        if (!group) {
+          group = {
+            kind: 'cable',
+            diameter_mm: Number.isFinite(diameter) ? diameter : 0,
+            length_m: 0,
+            elbows: 0
+          };
+          grouped.set(key, group);
+        }
+      } else {
+        key = 'tray|' +
+          (Number.isFinite(width) ? width.toFixed(6) : '0') + '|' +
+          (Number.isFinite(height) ? height.toFixed(6) : '0');
+        group = grouped.get(key);
+        if (!group) {
+          group = {
+            kind: 'tray',
+            width_mm: Number.isFinite(width) ? width : 0,
+            height_mm: Number.isFinite(height) ? height : 0,
+            length_m: 0,
+            elbows: 0
+          };
+          grouped.set(key, group);
+        }
+      }
+
+      group.length_m += length;
+      group.elbows += elbowCount;
+    });
+
+  return Array.from(grouped.values()).sort(function(a,b){
+    if (a.kind !== b.kind) return a.kind === 'tray' ? -1 : 1;
+    if (a.kind === 'tray') {
+      return (a.width_mm - b.width_mm) || (a.height_mm - b.height_mm);
+    }
+    return a.diameter_mm - b.diameter_mm;
+  });
+}
+
 function renderBoq() {
   const routes = state.objects.filter(function(o){ return o.kind === 'cable' || o.kind === 'tray'; });
   const cableM = routes.filter(function(o){ return o.kind === 'cable'; }).reduce(function(s,o){ return s + lengthOf(o.points); }, 0);
   const trayM = routes.filter(function(o){ return o.kind === 'tray'; }).reduce(function(s,o){ return s + lengthOf(o.points); }, 0);
   const elbowN = routes.reduce(function(s,o){ return s + elbows(o.points); }, 0);
+  const rows = buildQuantityTakeoffRows();
+
   $('totalCable').textContent = cableM.toFixed(2) + ' m';
   $('totalTray').textContent = trayM.toFixed(2) + ' m';
   $('totalElbows').textContent = String(elbowN);
-  $('boqTableWrap').innerHTML = routes.length ? '<table><thead><tr><th>Item</th><th>Specification</th><th>Qty</th><th>Unit</th><th>Elbow</th></tr></thead><tbody>' + routes.map(function(o){ return '<tr><td>' + esc(o.kind === 'cable' ? 'Cable' : 'Cable Tray') + '</td><td>' + esc(o.specification) + '</td><td>' + lengthOf(o.points).toFixed(2) + '</td><td>m</td><td>' + elbows(o.points) + '</td></tr>'; }).join('') + '</tbody></table>' : '<div class="hint" style="padding:10px">No routing quantities yet.</div>';
+
+  $('boqTableWrap').innerHTML = rows.length
+    ? '<table><thead><tr><th>Item</th><th>Size</th><th>Total Quantity</th><th>Unit</th><th>Elbows</th></tr></thead><tbody>' +
+      rows.map(function(group){
+        const item = group.kind === 'cable' ? 'Cable' : 'Cable Tray';
+        return '<tr><td>' + item + '</td><td>' + esc(quantitySizeLabel(group)) + '</td><td>' +
+          group.length_m.toFixed(2) + '</td><td>m</td><td>' + group.elbows + '</td></tr>';
+      }).join('') +
+      '</tbody></table>'
+    : '<div class="hint" style="padding:10px">No routing quantities yet.</div>';
 }
 function render() { renderScene(); renderProperties(); renderBoq(); updateRouteSelectionVisuals(); }
 
@@ -2302,8 +2381,16 @@ $('newProjectBtn').addEventListener('click', function(){
   state.measureStart = null; state.surfaceAlignStart = null; state.selectedMeasurementId = null; state.measurements = []; clearSurfaceSelectionVisuals(); rebuildMeasurements(); renderMeasurementsToggle(); renderMeasurementList(); render(); toast('New project created');
 });
 $('exportBoqBtn').addEventListener('click', function(){
-  const rows = [['Item','Specification','Name','Quantity','Unit','Elbows']];
-  state.objects.filter(function(o){ return o.kind === 'cable' || o.kind === 'tray'; }).forEach(function(o){ rows.push([o.kind === 'cable' ? 'Cable' : 'Cable Tray', o.specification, o.name, lengthOf(o.points).toFixed(3), 'm', String(elbows(o.points))]); });
+  const rows = [['Item','Size','Total Quantity','Unit','Elbows']];
+  buildQuantityTakeoffRows().forEach(function(group){
+    rows.push([
+      group.kind === 'cable' ? 'Cable' : 'Cable Tray',
+      quantitySizeLabel(group),
+      group.length_m.toFixed(3),
+      'm',
+      String(group.elbows)
+    ]);
+  });
   const csv = rows.map(function(r){ return r.map(function(v){ return '"' + String(v).replace(/"/g,'""') + '"'; }).join(','); }).join('\\n');
   const blob = new Blob([csv], { type:'text/csv;charset=utf-8' }); const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = slug(state.project.name) + '_BOQ.csv'; a.click(); URL.revokeObjectURL(a.href);
 });
