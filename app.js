@@ -539,7 +539,7 @@ function routeVisual(obj) {
       }
 
       yAxis.normalize();
-      const xAxis = zAxis.clone().cross(yAxis).normalize();
+      const xAxis = yAxis.clone().cross(zAxis).normalize();
       const basis = new THREE.Matrix4().makeBasis(xAxis, yAxis, zAxis);
       mesh.quaternion.setFromRotationMatrix(basis);
 
