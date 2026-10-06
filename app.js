@@ -89,13 +89,28 @@ document.querySelectorAll('.tool').forEach(function(b){ b.addEventListener('clic
 $('projectName').addEventListener('input', function(e){ state.project.name = e.target.value; });
 $('unitSystem').addEventListener('change', function(e){ state.project.units = e.target.value; });
 
-function groundPoint(event) {
+function pointerRay(event) {
   const r = renderer.domElement.getBoundingClientRect();
   mouse.x = ((event.clientX - r.left) / r.width) * 2 - 1;
   mouse.y = -((event.clientY - r.top) / r.height) * 2 + 1;
   raycaster.setFromCamera(mouse, camera);
+}
+
+function groundPoint(event) {
+  pointerRay(event);
   const hit = raycaster.intersectObject(ground, false)[0];
   return hit ? hit.point.clone() : null;
+}
+
+function routePoint(event) {
+  pointerRay(event);
+  const modelRoots = Array.from(state.modelRoots.values());
+  if (modelRoots.length) {
+    const modelHit = raycaster.intersectObjects(modelRoots, true)[0];
+    if (modelHit) return modelHit.point.clone();
+  }
+  const groundHit = raycaster.intersectObject(ground, false)[0];
+  return groundHit ? groundHit.point.clone() : null;
 }
 
 function createRoute(type, points) {
@@ -163,7 +178,7 @@ function finishRoute() {
 }
 renderer.domElement.addEventListener('click', function(e){
   if (state.tool === 'cable' || state.tool === 'tray') {
-    const p = groundPoint(e); if (!p) return;
+    const p = routePoint(e); if (!p) return;
     p.y = mmToScene(Number($('defaultElevation').value) || 3000);
     state.drawing.points.push(p);
     status(state.drawing.type + ' point ' + state.drawing.points.length);
