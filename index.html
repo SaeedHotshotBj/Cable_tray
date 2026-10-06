@@ -45,6 +45,13 @@
         <button class="tool" data-tool="align">＋ Align Surfaces</button>
         <button class="tool" data-tool="auto-route">＋ Auto Route</button>
         <label id="autoRouteTypeRow" class="field hidden"><span>Auto Route Type</span><select id="autoRouteType"><option value="cable">Cable</option><option value="tray">Cable Tray</option></select></label>
+        <div id="autoRouteActions" class="hidden">
+          <div class="hint">Shortest straight distance: <b id="autoRoutePreviewLength">0.000 m</b></div>
+          <div class="toolbar-group">
+            <button id="createAutoRouteBtn" class="small">Create Route</button>
+            <button id="resetAutoRouteBtn" class="small secondary">Reset Points</button>
+          </div>
+        </div>
         <div class="hint" id="toolHint">Select an object in the 3D scene or Scene panel.</div>
       </section>
       <section>
