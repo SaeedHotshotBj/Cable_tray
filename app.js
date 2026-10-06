@@ -7,7 +7,6 @@ import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
 import { OBJExporter } from 'three/addons/exporters/OBJExporter.js';
 import { STLExporter } from 'three/addons/exporters/STLExporter.js';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
-import { ObjectLoader } from 'three/addons/loaders/ObjectLoader.js';
 
 const state = {
   project: { name: 'Factory Cable Routing', units: 'mm', schema_version: 1 },
@@ -1850,7 +1849,7 @@ function loadProject(data) {
     };
   });
 
-  const objectLoader = new ObjectLoader();
+  const objectLoader = new THREE.ObjectLoader();
   let missingModels = 0;
   state.sourceModels.forEach(function(m){
     if (!m.snapshot) {
