@@ -1258,6 +1258,68 @@ export function routeEngineeringNetwork(inputs) {
 
     if (!prepared.length) return;
 
+    // Keep the existing Main Tray Minimum Cables setting meaningful:
+    // with fewer cables than the threshold, route the cable directly to the panel
+    // and classify its tray as a branch-only path.
+    const mainMinCables = Math.max(2, Number(options.mainMinCables) || 2);
+    if (prepared.length < mainMinCables) {
+      prepared.forEach(function(entry) {
+        const direct = findGridPath3D(
+          entry.start,
+          panelStandoff.point,
+          obstacles,
+          routeOptions,
+          new Set()
+        );
+
+        if (!direct.points || !direct.points.length) {
+          warnings.push(
+            entry.equipment.name + ' → ' + group.panel.name +
+            ': no collision-free branch route was found.'
+          );
+          return;
+        }
+
+        cablePlans.push({
+          equipment:entry.equipment,
+          panel:group.panel,
+          cable:{
+            name:entry.equipment.cable_name || 'Power Cable',
+            diameter_mm:Number(entry.equipment.cable_diameter_mm) || 0
+          },
+          routing_start:entry.start,
+          routing_goal:panelStandoff.point,
+          main_corridor_equipment_id:null,
+          standoff_distance_mm:Math.max(entry.startDistanceMm, panelStandoff.distance_mm),
+          planning_tray_width_mm:planningTrayWidth,
+          branch_points:(direct.points || []).map(clonePoint),
+          points:(function(){
+            const points = [];
+            function pushDistinct(point) {
+              if (!point) return;
+              const candidate = clonePoint(point);
+              const previous = points[points.length - 1];
+              if (
+                previous &&
+                Math.abs(candidate.x - previous.x) < 0.001 &&
+                Math.abs(candidate.y - previous.y) < 0.001 &&
+                Math.abs(candidate.z - previous.z) < 0.001
+              ) return;
+              points.push(candidate);
+            }
+            pushDistinct(entry.equipment.anchor.point);
+            pushDistinct(entry.start);
+            (direct.points || []).forEach(pushDistinct);
+            pushDistinct(panelStandoff.point);
+            pushDistinct(group.panel.anchor.point);
+            return points;
+          })(),
+          warning:direct.warning || null,
+          fallback:!!direct.fallback
+        });
+      });
+      return;
+    }
     const densityRadius = Math.max(
       Number(options.gridStepMm) * 8,
       Number(options.maxBodyDistanceMm) * 0.75,
