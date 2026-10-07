@@ -1223,7 +1223,6 @@ function chooseTrayWidth(requiredWidthMm, standardWidths) {
 
 function buildTrayRuns(cablePlans, options, mainCorridors) {
   const networkWidthByPanel = new Map();
-  const networkNodeKeysByPanel = new Map();
 
   (cablePlans || []).forEach(function(plan) {
     const panelId = plan.panel && plan.panel.id;
@@ -1233,17 +1232,6 @@ function buildTrayRuns(cablePlans, options, mainCorridors) {
       panelId,
       Math.max(Number(networkWidthByPanel.get(panelId)) || 0, width)
     );
-  });
-
-  (mainCorridors || []).forEach(function(corridor) {
-    const panelId = corridor && corridor.panel_id;
-    if (!panelId) return;
-
-    const keys = networkNodeKeysByPanel.get(panelId) || new Set();
-    (corridor.network_nodes || []).forEach(function(point) {
-      keys.add(networkNodeKey(point));
-    });
-    networkNodeKeysByPanel.set(panelId, keys);
   });
 
   const segments = new Map();
@@ -1264,8 +1252,6 @@ function buildTrayRuns(cablePlans, options, mainCorridors) {
       : [];
 
     const mainLevelY = Number(plan.main_corridor_routing_y_mm);
-    const panelId = plan.panel && plan.panel.id;
-    const networkNodeKeys = networkNodeKeysByPanel.get(panelId) || new Set();
 
     for (let i = 1; i < points.length; i++) {
       const segment = segmentRecord(
@@ -1280,15 +1266,6 @@ function buildTrayRuns(cablePlans, options, mainCorridors) {
         Math.abs(segment.start.y - mainLevelY) < 0.001 &&
         Math.abs(segment.end.y - mainLevelY) < 0.001;
 
-      // A segment whose endpoints belong to the calculated network tree is
-      // part of the physical Main Tray even when, after a branch leaves the
-      // tree, only one cable continues on a terminal section. This keeps the
-      // Main Tray continuous instead of cutting it at cable-set changes.
-      segment.network_node_eligible =
-        networkNodeKeys.size > 0 &&
-        networkNodeKeys.has(networkNodeKey(segment.start)) &&
-        networkNodeKeys.has(networkNodeKey(segment.end));
-
       const existing = segments.get(segment.key);
       if (!existing) {
         segments.set(segment.key, segment);
@@ -1300,8 +1277,6 @@ function buildTrayRuns(cablePlans, options, mainCorridors) {
         );
         existing.main_level_eligible =
           existing.main_level_eligible || segment.main_level_eligible;
-        existing.network_node_eligible =
-          existing.network_node_eligible || segment.network_node_eligible;
       }
     }
   });
@@ -1328,11 +1303,8 @@ function buildTrayRuns(cablePlans, options, mainCorridors) {
         );
 
     const classification = (
-      segment.main_level_eligible &&
-      (
-        segment.cableIds.size >= mainMinCables ||
-        segment.network_node_eligible
-      )
+      segment.cableIds.size >= mainMinCables &&
+      segment.main_level_eligible
     ) ? 'main' : 'branch';
 
     classified.push({
