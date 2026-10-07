@@ -296,15 +296,18 @@ function bridgePath3D(from, to, obstacles, options) {
 }
 
 function findBridgeCell(point, otherPoint, blocked, bounds, step, obstacles, options) {
+  const hasFixedRoutingY = Number.isFinite(Number(options.fixedRoutingY));
   const center = {
     ix:Math.round(point.x / step),
-    iy:Math.round(point.y / step),
+    iy:hasFixedRoutingY
+      ? Math.round(Number(options.fixedRoutingY) / step)
+      : Math.round(point.y / step),
     iz:Math.round(point.z / step)
   };
 
   const candidates = [];
   for (let dx = -1; dx <= 1; dx++) {
-    for (let dy = -1; dy <= 1; dy++) {
+    for (let dy = hasFixedRoutingY ? 0 : -1; dy <= (hasFixedRoutingY ? 0 : 1); dy++) {
       for (let dz = -1; dz <= 1; dz++) {
         const ix = center.ix + dx;
         const iy = center.iy + dy;
@@ -758,7 +761,10 @@ function findGridPath3D(start, goal, obstacles, options, reuseCells) {
     // endpoint is unavailable (for example, when the endpoint falls between
     // grid cells). Prefer a validated orthogonal bridge before treating the
     // route as a fallback.
-    if (!networkMode) {
+    if (!networkMode && !Number.isFinite(Number(options.fixedRoutingY))) {
+      // Before reporting a failed A* search, retry a deterministic orthogonal
+      // bridge. This removes false fallback warnings for simple valid routes
+      // that do not need the full grid search.
       const orthogonalBridge = bridgePath3D(start, goal, obstacles, options);
       if (orthogonalBridge && orthogonalBridge.length >= 2) {
         return {
