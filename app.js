@@ -1091,7 +1091,8 @@ async function runEngineeringAutoDesign() {
       engineering_generated:true,
       engineering_equipment_id:item.id,
       engineering_panel_id:panel.id,
-      engineering_network_id:'network-' + panel.id
+      engineering_network_id:'network-' + panel.id,
+      engineering_tray_width_mm:Number(plan.planning_tray_width_mm) || null
     });
   });
 
@@ -1728,13 +1729,72 @@ function roundedRouteCurve(points, radius) {
   return path;
 }
 
+function engineeringCableDisplayOffset(obj) {
+  if (!obj || obj.kind !== 'cable' || !obj.engineering_generated || !obj.engineering_network_id) {
+    return new THREE.Vector3();
+  }
+
+  const cables = state.objects
+    .filter(function(item){
+      return item.kind === 'cable' &&
+        item.engineering_generated &&
+        item.engineering_network_id === obj.engineering_network_id;
+    })
+    .slice()
+    .sort(function(a,b){
+      return String(a.engineering_equipment_id || a.id)
+        .localeCompare(String(b.engineering_equipment_id || b.id));
+    });
+
+  if (cables.length < 2) return new THREE.Vector3();
+
+  const index = Math.max(0, cables.findIndex(function(item){ return item.id === obj.id; }));
+  const tray = state.objects.find(function(item){
+    return item.kind === 'tray' &&
+      item.engineering_generated &&
+      !item.panel_connection &&
+      item.engineering_network_id === obj.engineering_network_id &&
+      Array.isArray(item.points) &&
+      item.points.length >= 2;
+  });
+
+  let side = new THREE.Vector3(0, 0, 1);
+  if (tray) {
+    for (let i = 1; i < tray.points.length; i++) {
+      const direction = tray.points[i].clone().sub(tray.points[i - 1]);
+      if (direction.lengthSq() < 1e-10) continue;
+
+      if (Math.abs(direction.x) >= Math.abs(direction.z)) {
+        side.set(0, 0, 1);
+      } else {
+        side.set(1, 0, 0);
+      }
+      break;
+    }
+  }
+
+  const trayWidthMm = Math.max(
+    Number(obj.engineering_tray_width_mm) || Number(tray && tray.width_mm) || 100,
+    20
+  );
+  const pitchMm = Math.min(
+    20,
+    Math.max(8, (trayWidthMm - 20) / Math.max(1, cables.length - 1))
+  );
+  const centeredIndex = index - (cables.length - 1) / 2;
+  return side.multiplyScalar(mmToScene(centeredIndex * pitchMm));
+}
+
 function routeVisual(obj) {
   const g = new THREE.Group();
   g.userData.objectId = obj.id;
   g.userData.routeVisual = true;
 
   const center = routeCenter(obj.points);
-  const localPoints = obj.points.map(function(p){ return p.clone().sub(center); });
+  const cableDisplayOffset = engineeringCableDisplayOffset(obj);
+  const localPoints = obj.points.map(function(p){
+    return p.clone().sub(center).add(cableDisplayOffset);
+  });
   const rot = obj.rotation_deg || { x: 0, y: 0, z: 0 };
   g.position.copy(center);
   g.rotation.order = 'XYZ';
@@ -2155,103 +2215,13 @@ function endpointData(route) {
 }
 
 function rebuildEngineeringAccessories() {
+  // Engineering Auto Routing does not create reducer/converter accessories.
+  // Tray widths are kept consistent per engineering network, so no transition
+  // geometry is required between branch and main runs.
   disposeEngineeringAccessoryRoot();
-  const root = state.engineeringAccessoryRoot;
-  if (!root) return;
-
-  const trays = state.objects.filter(function(o){
-    return o.kind === 'tray' && o.engineering_generated && !o.panel_connection;
-  });
-
-  // A reducer is only a plan-view width transition. Height and elevation stay
-  // constant; no vertical taper is generated here.
-  const candidates = [];
-
-  function endpointKey(route, index) {
-    return route.id + '|' + index;
-  }
-
-  for (let i = 0; i < trays.length; i++) {
-    for (let j = i + 1; j < trays.length; j++) {
-      const a = trays[i];
-      const b = trays[j];
-      if (!a.engineering_network_id || a.engineering_network_id !== b.engineering_network_id) continue;
-      if (Math.abs(Number(a.width_mm) - Number(b.width_mm)) < 0.001) continue;
-
-      const endsA = endpointData(a);
-      const endsB = endpointData(b);
-      let match = null;
-      let matchAIndex = -1;
-      let matchBIndex = -1;
-
-      endsA.forEach(function(ea, eaIndex){
-        endsB.forEach(function(eb, ebIndex){
-          const d = ea.point.distanceTo(eb.point);
-          if (d < 0.05 && (!match || d < match.distance)) {
-            match = {a:ea,b:eb,distance:d};
-            matchAIndex = eaIndex;
-            matchBIndex = ebIndex;
-          }
-        });
-      });
-
-      if (!match || match.a.inward.dot(match.b.inward) > -0.95) continue;
-      if (Math.abs(match.a.point.y - match.b.point.y) > 0.001) continue;
-
-      const aSegment = a.points.length >= 2
-        ? a.points[a.points.length - 1].distanceTo(a.points[a.points.length - 2])
-        : 0;
-      const bSegment = b.points.length >= 2
-        ? b.points[b.points.length - 1].distanceTo(b.points[b.points.length - 2])
-        : 0;
-      const aLen = Math.min(mmToScene(200), aSegment * 0.35);
-      const bLen = Math.min(mmToScene(200), bSegment * 0.35);
-      if (aLen < 0.05 || bLen < 0.05) continue;
-
-      const startPoint = match.a.point.clone().add(match.a.inward.clone().multiplyScalar(aLen));
-      const endPoint = match.b.point.clone().add(match.b.inward.clone().multiplyScalar(bLen));
-
-      // Plan-view reducer only: Y is fixed and the tray height remains constant.
-      startPoint.y = match.a.point.y;
-      endPoint.y = match.a.point.y;
-
-      candidates.push({
-        a,
-        b,
-        start:startPoint,
-        end:endPoint,
-        aEndpointKey:endpointKey(a, matchAIndex),
-        bEndpointKey:endpointKey(b, matchBIndex),
-        widthDifference:Math.abs(Number(a.width_mm) - Number(b.width_mm)),
-        transitionLength:startPoint.distanceTo(endPoint)
-      });
-    }
-  }
-
-  candidates.sort(function(a, b){
-    return b.widthDifference - a.widthDifference ||
-      a.transitionLength - b.transitionLength;
-  });
-
-  const usedEndpoints = new Set();
-  candidates.forEach(function(candidate){
-    // Never place two reducers back-to-back at the same physical tray endpoint.
-    if (usedEndpoints.has(candidate.aEndpointKey) || usedEndpoints.has(candidate.bEndpointKey)) return;
-
-    addTaperedTrayTransition(
-      root,
-      candidate.start,
-      candidate.end,
-      Number(candidate.a.width_mm) || 100,
-      Number(candidate.b.width_mm) || 100,
-      Math.min(Number(candidate.a.height_mm) || 100, Number(candidate.b.height_mm) || 100),
-      candidate.a.id
-    );
-
-    usedEndpoints.add(candidate.aEndpointKey);
-    usedEndpoints.add(candidate.bEndpointKey);
-  });
 }
+
+
 function rebuildRoutes() {
   state.routeRoots.forEach(function(root){
     if(root.parent) root.parent.remove(root);
