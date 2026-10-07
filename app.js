@@ -643,6 +643,7 @@ function engineeringSegmentClear(a, b, context) {
   const width = Math.max(1, Number(context && context.trayWidthMm) || 100);
   const height = Math.max(1, Number(context && context.trayHeightMm) || 100);
   const clearance = Math.max(0, Number(context && context.bodyClearanceMm) || 0);
+  const ignoreStartMm = Math.max(0, Number(context && context.ignoreStartMm) || 0);
 
   const dx = Math.abs(Number(b.x) - Number(a.x));
   const dy = Math.abs(Number(b.y) - Number(a.y));
@@ -652,7 +653,8 @@ function engineeringSegmentClear(a, b, context) {
   const key = [
     Math.round(Number(a.x)), Math.round(Number(a.y)), Math.round(Number(a.z)),
     Math.round(Number(b.x)), Math.round(Number(b.y)), Math.round(Number(b.z)),
-    Math.round(width), Math.round(height), Math.round(clearance)
+    Math.round(width), Math.round(height), Math.round(clearance),
+    Math.round(ignoreStartMm)
   ].join('|');
 
   if (engineeringCollisionCache.has(key)) return engineeringCollisionCache.get(key);
@@ -660,7 +662,8 @@ function engineeringSegmentClear(a, b, context) {
   const clear = !engineeringSegmentHitsModel(a, b, {
     trayWidthMm:width,
     trayHeightMm:height,
-    bodyClearanceMm:clearance
+    bodyClearanceMm:clearance,
+    ignoreStartMm
   });
   engineeringCollisionCache.set(key, clear);
   return clear;
