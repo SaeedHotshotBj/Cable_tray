@@ -473,10 +473,59 @@ function resolveAnchorStandoff(anchor, obstacles, options) {
     };
   }
 
-  const directions = [normal, normal.clone().multiplyScalar(-1)];
+  const directions = [];
+  const bounds = normalizeRoutingBounds(options.routingBounds, options);
+
+  if (bounds) {
+    const center = {
+      x:(bounds.minX + bounds.maxX) / 2,
+      y:(bounds.minY + bounds.maxY) / 2,
+      z:(bounds.minZ + bounds.maxZ) / 2
+    };
+    const sx = Math.sign(center.x - base.x);
+    const sy = Math.sign(center.y - base.y);
+    const sz = Math.sign(center.z - base.z);
+
+    // Probe combinations that move from an attachment toward the interior.
+    // This handles anchors near an edge/corner where the surface normal alone
+    // cannot clear the tray cross-section from the surrounding structure.
+    [
+      {x:sx,y:sy,z:sz},
+      {x:sx,y:sy,z:0},
+      {x:sx,y:0,z:sz},
+      {x:0,y:sy,z:sz},
+      {x:sx,y:0,z:0},
+      {x:0,y:sy,z:0},
+      {x:0,y:0,z:sz}
+    ].forEach(function(vector){
+      const candidate = new THREEVector3Shim(vector.x, vector.y, vector.z);
+      if (candidate.lengthSq() < 1e-12) return;
+      candidate.normalize();
+      directions.push(candidate);
+    });
+  }
+
+  // Keep the attachment normal directions as fallbacks for non-enclosed or
+  // irregular models that do not provide a useful interior-vector probe.
+  directions.push(normal);
+  directions.push(normal.clone().multiplyScalar(-1));
+
+  const uniqueDirections = [];
+  directions.forEach(function(direction){
+    const duplicate = uniqueDirections.some(function(existing){
+      return (
+        Math.abs(existing.x - direction.x) < 1e-6 &&
+        Math.abs(existing.y - direction.y) < 1e-6 &&
+        Math.abs(existing.z - direction.z) < 1e-6
+      );
+    });
+    if (!duplicate) uniqueDirections.push(direction);
+  });
+
   let best = null;
 
-  for (let directionIndex = 0; directionIndex < directions.length; directionIndex++) {
+  for (let directionIndex = 0; directionIndex < uniqueDirections.length; directionIndex++) {
+    const direction = uniqueDirections[directionIndex];
     const direction = directions[directionIndex];
     for (let distance = startDistance; distance <= maxCenterlineDistance + 0.001; distance += probeStep) {
       const clampedDistance = Math.min(distance, maxCenterlineDistance);
