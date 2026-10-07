@@ -64,8 +64,15 @@ renderer.outputColorSpace = THREE.SRGBColorSpace;
 viewport.appendChild(renderer.domElement);
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
-controls.dampingFactor = 0.07;
+controls.dampingFactor = 0.085;
+controls.enablePan = true;
+controls.screenSpacePanning = true;
 controls.zoomToCursor = true;
+controls.zoomSpeed = 0.8;
+controls.panSpeed = 0.85;
+controls.rotateSpeed = 0.7;
+controls.minDistance = 2;
+controls.maxDistance = 300000;
 controls.target.set(0, 1500, 0);
 scene.add(new THREE.HemisphereLight(0xbfd8ef, 0x1a2632, 2.2));
 const sun = new THREE.DirectionalLight(0xffffff, 1.8);
@@ -1473,6 +1480,78 @@ function routeBendGeometry(points, index, radius) {
   };
 }
 
+function sweptRectGeometry(points, sideWidth, verticalHeight, sideOffset, verticalOffset) {
+  if (!points || points.length < 2) return null;
+
+  const halfSide = Math.max(0, Number(sideWidth) || 0) * 0.5;
+  const halfHeight = Math.max(0, Number(verticalHeight) || 0) * 0.5;
+  const vertices = [];
+  const indices = [];
+
+  function sampleTangent(index) {
+    const current = points[index];
+    const tangent = (index === 0
+      ? points[1].clone().sub(current)
+      : index === points.length - 1
+        ? current.clone().sub(points[index - 1])
+        : points[index + 1].clone().sub(points[index - 1])
+    );
+    if (tangent.lengthSq() < 1e-12) return new THREE.Vector3(1, 0, 0);
+    return tangent.normalize();
+  }
+
+  for (let i = 0; i < points.length; i++) {
+    const tangent = sampleTangent(i);
+    let referenceUp = new THREE.Vector3(0, 1, 0);
+    if (Math.abs(referenceUp.dot(tangent)) > 0.999) referenceUp.set(0, 0, 1);
+
+    let side = referenceUp.clone().cross(tangent);
+    if (side.lengthSq() < 1e-12) side = new THREE.Vector3(1, 0, 0).cross(tangent);
+    side.normalize();
+
+    let up = tangent.clone().cross(side).normalize();
+    if (up.dot(referenceUp) < 0) {
+      side.negate();
+      up.negate();
+    }
+
+    const center = points[i].clone()
+      .add(side.clone().multiplyScalar(Number(sideOffset) || 0))
+      .add(up.clone().multiplyScalar(Number(verticalOffset) || 0));
+
+    const sideVector = side.multiplyScalar(halfSide);
+    const upVector = up.multiplyScalar(halfHeight);
+
+    const ring = [
+      center.clone().sub(sideVector).sub(upVector),
+      center.clone().add(sideVector).sub(upVector),
+      center.clone().add(sideVector).add(upVector),
+      center.clone().sub(sideVector).add(upVector)
+    ];
+    ring.forEach(function(vertex){ vertices.push(vertex.x, vertex.y, vertex.z); });
+
+    if (i > 0) {
+      const a = (i - 1) * 4;
+      const b = i * 4;
+      for (let j = 0; j < 4; j++) {
+        const n = (j + 1) % 4;
+        indices.push(a + j, a + n, b + n);
+        indices.push(a + j, b + n, b + j);
+      }
+    }
+  }
+
+  const last = (points.length - 1) * 4;
+  indices.push(0, 1, 2, 0, 2, 3);
+  indices.push(last, last + 2, last + 1, last, last + 3, last + 2);
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
+  geometry.setIndex(indices);
+  geometry.computeVertexNormals();
+  return geometry;
+}
+
 function roundedRouteCurve(points, radius) {
   const path = new THREE.CurvePath();
   if (points.length < 2) return path;
@@ -1699,19 +1778,77 @@ function routeVisual(obj) {
       addTraySegment(start, end);
     }
 
-    // Replace the old bulky corner block with a segmented quadratic elbow.
-    // The small tangent-aligned pieces follow the same rounded centerline used
-    // by the route preview, making the tray bend smooth instead of boxy.
+    // Build each real bend as one continuous swept rectangular tray piece.
+    // This removes the faceted "stack of boxes" look while keeping the same
+    // industrial solid-bottom tray cross-section used by straight runs.
     for (let i = 1; i < localPoints.length - 1; i++) {
+      const bend = routeBendGeometry(localPoints, i, curveRadius);
+      if (!bend || bend.radius <= 1e-6 || bend.angle <= 1e-6) continue;
+
       const curve = new THREE.QuadraticBezierCurve3(
-        routeEntries[i],
+        bend.entry,
         localPoints[i],
-        routeExits[i]
+        bend.exit
       );
-      const elbowPoints = curve.getPoints(8);
-      for (let j = 1; j < elbowPoints.length; j++) {
-        addTraySegment(elbowPoints[j - 1], elbowPoints[j]);
+      const elbowPoints = curve.getPoints(20);
+      const bendHeight = height;
+      const bendSheet = sheet;
+      const bendLipWidth = lipWidth;
+
+      const bendFloor = sweptRectGeometry(
+        elbowPoints,
+        width,
+        bendSheet,
+        0,
+        -bendHeight * 0.5 + bendSheet * 0.5
+      );
+      if (bendFloor) {
+        const mesh = new THREE.Mesh(bendFloor, mat);
+        mesh.userData.objectId = obj.id;
+        g.add(mesh);
       }
+
+      const halfWallOffset = width * 0.5 - bendSheet * 0.5;
+      [-1, 1].forEach(function(side){
+        const wall = sweptRectGeometry(
+          elbowPoints,
+          bendSheet,
+          Math.max(bendHeight, bendSheet),
+          side * halfWallOffset,
+          0
+        );
+        if (wall) {
+          const mesh = new THREE.Mesh(wall, mat);
+          mesh.userData.objectId = obj.id;
+          g.add(mesh);
+        }
+
+        const lip = sweptRectGeometry(
+          elbowPoints,
+          bendLipWidth,
+          Math.max(bendSheet, bendLipWidth * 0.65),
+          side * (width * 0.5 + bendLipWidth * 0.5),
+          bendHeight * 0.5 - bendLipWidth * 0.35
+        );
+        if (lip) {
+          const mesh = new THREE.Mesh(lip, mat);
+          mesh.userData.objectId = obj.id;
+          g.add(mesh);
+        }
+
+        const lowerFlange = sweptRectGeometry(
+          elbowPoints,
+          Math.max(bendSheet * 1.8, bendLipWidth * 0.9),
+          bendSheet,
+          side * (width * 0.5 - bendSheet * 0.5),
+          -bendHeight * 0.5 + bendSheet * 1.45
+        );
+        if (lowerFlange) {
+          const mesh = new THREE.Mesh(lowerFlange, mat);
+          mesh.userData.objectId = obj.id;
+          g.add(mesh);
+        }
+      });
     }
   }
 
