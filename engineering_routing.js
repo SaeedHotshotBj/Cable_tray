@@ -403,15 +403,19 @@ function normalizeRoutingBounds(bounds, options) {
     minY:minY + inset,
     maxY:maxY - inset,
     minZ:minZ + inset,
-    maxZ:maxZ - inset
+    maxZ:maxZ - inset,
+    valid:true
   };
 
+  // An over-large clearance can make the usable interior envelope empty.
+  // That means an internal route is impossible; it must not silently disable
+  // the envelope and allow the router to escape outside the model.
   if (
     normalized.minX > normalized.maxX ||
     normalized.minY > normalized.maxY ||
     normalized.minZ > normalized.maxZ
   ) {
-    return null;
+    normalized.valid = false;
   }
 
   return normalized;
@@ -420,6 +424,7 @@ function normalizeRoutingBounds(bounds, options) {
 function pointWithinRoutingBounds(point, options) {
   const bounds = normalizeRoutingBounds(options && options.routingBounds, options || {});
   if (!bounds) return true;
+  if (bounds.valid === false) return false;
 
   const x = Number(point && point.x);
   const y = Number(point && point.y);
@@ -1490,6 +1495,8 @@ function resolveHighestValidRoutingY(points, options) {
   const clearance = Math.max(0, Number(options.clearanceMm) || 0);
   const safetyGap = Math.max(0, Number(options.ceilingSafetyGapMm) || 0);
   const routingBounds = normalizeRoutingBounds(options.routingBounds, options);
+  if (routingBounds && routingBounds.valid === false) return null;
+
   const desiredY = routingBounds
     ? Math.min(
         ceilingY - safetyGap - trayHeight / 2 - clearance,
