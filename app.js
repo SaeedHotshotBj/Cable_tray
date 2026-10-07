@@ -1697,7 +1697,10 @@ function createRoute(type, points, options) {
     engineering_panel_id: config.engineering_panel_id || null,
     engineering_network_id: config.engineering_network_id || null,
     engineering_classification: config.engineering_classification || null,
-    engineering_cable_ids: Array.isArray(config.engineering_cable_ids) ? config.engineering_cable_ids.slice() : []
+    engineering_cable_ids: Array.isArray(config.engineering_cable_ids) ? config.engineering_cable_ids.slice() : [],
+    engineering_shared_segment_keys: Array.isArray(config.engineering_shared_segment_keys)
+      ? config.engineering_shared_segment_keys.slice()
+      : []
   };
   state.objects.push(obj);
   return obj;
