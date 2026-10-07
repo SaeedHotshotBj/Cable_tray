@@ -1307,9 +1307,18 @@ function buildTrayRuns(cablePlans, options, mainCorridors) {
           options.standardTrayWidthsMm
         );
 
+    const parallelPlan = cablePlans.find(function(plan) {
+      return plan.equipment &&
+        segment.cableIds.has(plan.equipment.id) &&
+        plan.parallel_main_corridor === true;
+    });
+    const parallelAxis = planAxisForParallelMain(parallelPlan);
+    const corridorAxisEligible = !parallelAxis || segment.axis === parallelAxis;
+
     const classification = (
       segment.cableIds.size >= mainMinCables &&
-      segment.main_level_eligible
+      segment.main_level_eligible &&
+      corridorAxisEligible
     ) ? 'main' : 'branch';
 
     classified.push({
