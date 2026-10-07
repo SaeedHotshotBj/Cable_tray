@@ -1192,7 +1192,8 @@ function buildTrayRuns(cablePlans, options, mainCorridors) {
       height_mm:Number(corridor.height_mm) || Number(options.trayHeightMm) || 100,
       cable_ids:Array.isArray(corridor.cable_ids) ? corridor.cable_ids.slice() : [],
       points,
-      main_level_y_mm:Number(corridor.main_level_y_mm)
+      main_level_y_mm:Number(corridor.main_level_y_mm),
+      length_m:routeLengthMeters(points)
     };
   }).filter(function(run){ return run.points.length > 1; });
 
