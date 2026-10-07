@@ -53,6 +53,10 @@
         <button class="tool" data-tool="align">＋ Align Surfaces</button>
         <button class="tool" data-tool="auto-route">＋ Auto Route</button>
         <label id="autoRouteTypeRow" class="field hidden"><span>Auto Route Type</span><select id="autoRouteType"><option value="cable">Cable</option><option value="tray">Cable Tray</option></select></label>
+        <button class="tool" data-tool="equipment">＋ Place Equipment</button>
+        <button class="tool" data-tool="panel">＋ Place Panel</button>
+        <button id="autoDesignBtn" class="tool engineering-action">⚡ Auto Design Routing</button>
+        <div class="hint">Place motors, pumps, fans, heaters or other electrical loads directly on CAD/model surfaces, place the destination panels, assign each cable, then Auto Design Routing builds shortest valid grid routes and sizes main/branch trays.</div>
         <label id="autoRouteOffsetAxisRow" class="field hidden"><span>Tray Offset Axis</span><select id="autoRouteOffsetAxis"><option value="auto">Auto</option><option value="x">X</option><option value="y">Y</option><option value="z">Z</option></select></label>
         <div id="autoRouteActions" class="hidden">
           <div class="hint">Preview length: <b id="autoRoutePreviewLength">0.000 m</b></div>
@@ -76,6 +80,10 @@
         <label class="field"><span>Tray H (mm)</span><input id="defaultTrayHeight" type="number" min="25" step="25" value="100" /></label>
         <label class="field"><span>Tray Elevation (mm)</span><input id="defaultElevation" type="number" step="100" value="3000" /></label>
         <label class="field"><span>Fill Limit (%)</span><input id="fillLimit" type="number" min="1" max="100" step="1" value="80" /></label>
+        <label class="field"><span>Routing Grid Step (mm)</span><input id="routingGridStep" type="number" min="50" step="50" value="250" /></label>
+        <label class="field"><span>Auto Tray Clearance (mm)</span><input id="autoTrayClearance" type="number" min="0" step="10" value="100" /></label>
+        <label class="field"><span>Main Tray Minimum Cables</span><input id="mainTrayMinCables" type="number" min="2" step="1" value="2" /></label>
+        <label class="field"><span>Standard Tray Widths (mm)</span><input id="autoTrayStandards" type="text" value="100,150,200,300,400,500,600,800,1000,1200" /></label>
       </section>
       <section>
         <div class="section-title">Model Import</div>
@@ -100,6 +108,10 @@
       <section>
         <div class="section-title">Properties</div>
         <div id="properties" class="properties empty">Select a route or imported model.</div>
+      </section>
+      <section>
+        <div class="section-title">Engineering Takeoff</div>
+        <div id="engineeringTakeoff" class="engineering-takeoff"></div>
       </section>
       <section>
         <div class="section-title boq-head"><span>Measurements</span><button id="clearMeasurementsBtn" class="small danger">Clear All</button></div>
