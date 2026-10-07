@@ -1513,7 +1513,10 @@ function stitchTrayRuns(runs) {
     const groupKey = [
       run.classification || 'branch',
       Number(run.width_mm) || 0,
-      Number(run.height_mm) || 0
+      Number(run.height_mm) || 0,
+      run.classification === 'branch'
+        ? Array.from(run.cable_ids || []).sort().join(',')
+        : ''
     ].join('|');
 
     if (!grouped.has(groupKey)) grouped.set(groupKey, []);
@@ -2240,7 +2243,7 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
     const cablePlans = [];
 
     while (pending.length) {
-      const networkPoints = Array.from(tree.nodes.values());
+      const networkPoints = mainNetworkGoalPoints;
       let selected = null;
       const probeCount = Math.min(
         Math.max(1, Number(options.networkAttachmentCandidateLimit) || 4),
@@ -2256,43 +2259,76 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
       for (let candidateIndex = 0; candidateIndex < probeCount; candidateIndex++) {
         const entry = rankedPending[candidateIndex];
 
-        const branchResult = findGridPath3D(
-          entry.start,
-          null,
-          obstacles,
-          {
-            ...routeOptions,
-            fixedRoutingY:routingY,
-            preferredRoutingY:routingY,
-            routeTurnPenaltyRatio:Math.max(
-              Number(options.turnPenaltyRatio) || 20,
-              Number(options.mainCorridorTurnPenaltyRatio) || 100
-            ),
-            networkGoalPoints:mainNetworkGoalPoints
-          },
-          new Set()
+        const primaryValue = Math.max(
+          candidate.primaryMin,
+          Math.min(
+            candidate.primaryMax,
+            Number(entry.start[candidate.primaryAxis])
+          )
         );
+        const gridStep = Math.max(50, Number(options.gridStepMm) || 100);
+        const desiredPrimary = Math.round(primaryValue / gridStep) * gridStep;
+        const desiredPoint = candidate.primaryAxis === 'x'
+          ? {
+              x:Math.max(candidate.primaryMin, Math.min(candidate.primaryMax, desiredPrimary)),
+              y:routingY,
+              z:candidate.secondary
+            }
+          : {
+              x:candidate.secondary,
+              y:routingY,
+              z:Math.max(candidate.primaryMin, Math.min(candidate.primaryMax, desiredPrimary))
+            };
 
-        if (
-          !branchResult.points ||
-          branchResult.points.length < 1 ||
-          !branchResult.attachment_point
-        ) {
-          continue;
-        }
+        const branchTargets = networkPoints
+          .map(function(point){
+            return {
+              point,
+              distance:manhattanDistance3D(desiredPoint, point)
+            };
+          })
+          .sort(function(a,b){ return a.distance - b.distance; })
+          .slice(
+            0,
+            Math.max(1, Number(options.networkAttachmentCandidateLimit) || 4)
+          );
 
-        const score =
-          polylineLengthMm(branchResult.points) +
-          countPolylineTurns(branchResult.points) *
-          Math.max(1, Number(options.gridStepMm) || 100) *
-          50;
+        for (let targetIndex = 0; targetIndex < branchTargets.length; targetIndex++) {
+          const target = branchTargets[targetIndex].point;
+          const branchResult = findGridPath3D(
+            entry.start,
+            target,
+            obstacles,
+            {
+              ...routeOptions,
+              fixedRoutingY:routingY,
+              preferredRoutingY:routingY,
+              routeTurnPenaltyRatio:Math.max(
+                Number(options.turnPenaltyRatio) || 20,
+                Number(options.mainCorridorTurnPenaltyRatio) || 100
+              )
+            },
+            new Set()
+          );
 
-        if (!selected || score < selected.score) {
-          selected = {
-            entry,
-            branchResult,
-            score
-          };
+          if (!branchResult.points || branchResult.points.length < 1) {
+            continue;
+          }
+
+          const score =
+            polylineLengthMm(branchResult.points) +
+            countPolylineTurns(branchResult.points) *
+            Math.max(1, Number(options.gridStepMm) || 100) *
+            50 +
+            manhattanDistance3D(target, desiredPoint) * 0.1;
+
+          if (!selected || score < selected.score) {
+            selected = {
+              entry,
+              branchResult,
+              score
+            };
+          }
         }
       }
 
