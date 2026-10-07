@@ -542,11 +542,13 @@ function buildTrayRuns(cablePlans, options) {
 }
 
 function makeTrayRun(group, range) {
+  const cableIds = Array.from(group.cable_ids || []);
   if (group.axis === 'x') {
     return {
       classification:group.classification,
       width_mm:group.width_mm,
       height_mm:group.height_mm,
+      cable_ids:cableIds,
       points:[
         {x:range.low,y:group.fixed1,z:group.fixed2},
         {x:range.high,y:group.fixed1,z:group.fixed2}
@@ -559,6 +561,7 @@ function makeTrayRun(group, range) {
       classification:group.classification,
       width_mm:group.width_mm,
       height_mm:group.height_mm,
+      cable_ids:cableIds,
       points:[
         {x:group.fixed1,y:range.low,z:group.fixed2},
         {x:group.fixed1,y:range.high,z:group.fixed2}
@@ -570,6 +573,7 @@ function makeTrayRun(group, range) {
     classification:group.classification,
     width_mm:group.width_mm,
     height_mm:group.height_mm,
+    cable_ids:cableIds,
     points:[
       {x:group.fixed1,y:group.fixed2,z:range.low},
       {x:group.fixed1,y:group.fixed2,z:range.high}
