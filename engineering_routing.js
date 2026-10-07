@@ -475,6 +475,21 @@ function buildCablePoints(equipment, panel, routingStart, routingGoal, routedPoi
   return compressed;
 }
 
+function areCollinearForward(a, b, c) {
+  const abx = b.x - a.x;
+  const aby = b.y - a.y;
+  const abz = b.z - a.z;
+  const bcx = c.x - b.x;
+  const bcy = c.y - b.y;
+  const bcz = c.z - b.z;
+  const crossX = aby * bcz - abz * bcy;
+  const crossY = abz * bcx - abx * bcz;
+  const crossZ = abx * bcy - aby * bcx;
+  const crossSq = crossX * crossX + crossY * crossY + crossZ * crossZ;
+  const dot = abx * bcx + aby * bcy + abz * bcz;
+  return crossSq < 1e-6 && dot >= -1e-6;
+}
+
 function segmentAxis(a, b) {
   const dx = Math.abs(b.x - a.x);
   const dy = Math.abs(b.y - a.y);
