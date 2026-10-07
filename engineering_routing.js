@@ -2012,6 +2012,335 @@ function makeNetworkCablePlan(entry, group, branchPath, tree, attachmentPoint, p
   };
 }
 
+function clusterParallelAxisLevels(values, toleranceMm) {
+  const source = (values || [])
+    .map(function(value){ return Number(value); })
+    .filter(Number.isFinite)
+    .sort(function(a,b){ return a - b; });
+
+  if (!source.length) return [];
+
+  const tolerance = Math.max(1, Number(toleranceMm) || 1);
+  const clusters = [];
+
+  source.forEach(function(value){
+    const current = clusters[clusters.length - 1];
+    if (!current || Math.abs(value - current.max) > tolerance) {
+      clusters.push({min:value, max:value, sum:value, count:1});
+      return;
+    }
+
+    current.max = value;
+    current.sum += value;
+    current.count += 1;
+  });
+
+  return clusters.map(function(cluster){
+    return cluster.sum / cluster.count;
+  });
+}
+
+function resolveParallelMainCorridorCandidates(prepared, options) {
+  if (!prepared || prepared.length < 2) return [];
+
+  const gridStep = Math.max(50, Number(options && options.gridStepMm) || 100);
+  const primaryAxis = options && (options.structurePrimaryAxis === 'x' || options.structurePrimaryAxis === 'z')
+    ? options.structurePrimaryAxis
+    : (() => {
+        const xs = prepared.map(function(entry){ return Number(entry.start.x); });
+        const zs = prepared.map(function(entry){ return Number(entry.start.z); });
+        const xSpan = Math.max.apply(null, xs) - Math.min.apply(null, xs);
+        const zSpan = Math.max.apply(null, zs) - Math.min.apply(null, zs);
+        return xSpan >= zSpan ? 'x' : 'z';
+      })();
+
+  const primaryValues = prepared.map(function(entry){
+    return Number(entry.start[primaryAxis]);
+  });
+  const secondaryAxis = primaryAxis === 'x' ? 'z' : 'x';
+  const secondaryValues = prepared.map(function(entry){
+    return Number(entry.start[secondaryAxis]);
+  });
+
+  const primaryMin = Math.min.apply(null, primaryValues);
+  const primaryMax = Math.max.apply(null, primaryValues);
+  const secondaryLevels = clusterParallelAxisLevels(
+    secondaryValues,
+    Math.max(gridStep * 1.5, 50)
+  );
+
+  const primarySpan = primaryMax - primaryMin;
+  const secondarySpan = secondaryLevels.length >= 2
+    ? secondaryLevels[secondaryLevels.length - 1] - secondaryLevels[0]
+    : 0;
+
+  // Only activate this special topology when the loads visibly form two or
+  // more long, parallel rows. It must not replace ordinary network routing.
+  if (
+    secondaryLevels.length < 2 ||
+    primarySpan < Math.max(gridStep * 6, secondarySpan * 1.5)
+  ) {
+    return [];
+  }
+
+  const candidates = [];
+  for (let i = 0; i < secondaryLevels.length - 1; i++) {
+    const low = secondaryLevels[i];
+    const high = secondaryLevels[i + 1];
+    const gap = high - low;
+    if (gap < Math.max(gridStep * 2, 100)) continue;
+
+    const secondary = (low + high) * 0.5;
+    const lowerCount = secondaryValues.filter(function(value){ return value < secondary; }).length;
+    const upperCount = secondaryValues.length - lowerCount;
+    const balance = Math.abs(lowerCount - upperCount);
+    const cableDistance = secondaryValues.reduce(function(sum, value){
+      return sum + Math.abs(value - secondary);
+    }, 0);
+
+    candidates.push({
+      primaryAxis,
+      secondaryAxis,
+      primaryMin,
+      primaryMax,
+      secondary,
+      balance,
+      cableDistance
+    });
+  }
+
+  return candidates.sort(function(a,b){
+    return a.balance - b.balance ||
+      a.cableDistance - b.cableDistance ||
+      a.secondary - b.secondary;
+  }).slice(
+    0,
+    Math.max(1, Number(options && options.parallelMainCorridorCandidateLimit) || 6)
+  );
+}
+
+function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstacles, routeOptions, options, routingY, panelDrop) {
+  const candidates = resolveParallelMainCorridorCandidates(prepared, options);
+  if (!candidates.length || !panelDrop || !panelDrop.points || !panelDrop.points.length) {
+    return null;
+  }
+
+  let best = null;
+
+  candidates.forEach(function(candidate){
+    const nearCoordinate = candidate.primaryAxis === 'x'
+      ? {
+          x:Math.min(
+            candidate.primaryMax,
+            Math.max(candidate.primaryMin, Number(panelStandoff.point.x))
+          ),
+          y:routingY,
+          z:candidate.secondary
+        }
+      : {
+          x:candidate.secondary,
+          y:routingY,
+          z:Math.min(
+            candidate.primaryMax,
+            Math.max(candidate.primaryMin, Number(panelStandoff.point.z))
+          )
+        };
+
+    const farCoordinate = candidate.primaryAxis === 'x'
+      ? {
+          x:Math.abs(Number(panelStandoff.point.x) - candidate.primaryMin) <=
+            Math.abs(Number(panelStandoff.point.x) - candidate.primaryMax)
+            ? candidate.primaryMax
+            : candidate.primaryMin,
+          y:routingY,
+          z:candidate.secondary
+        }
+      : {
+          x:candidate.secondary,
+          y:routingY,
+          z:Math.abs(Number(panelStandoff.point.z) - candidate.primaryMin) <=
+            Math.abs(Number(panelStandoff.point.z) - candidate.primaryMax)
+            ? candidate.primaryMax
+            : candidate.primaryMin
+        };
+
+    const nearPoint = clonePoint(nearCoordinate);
+    const farPoint = clonePoint(farCoordinate);
+
+    const spinePath = findGridPath3D(
+      farPoint,
+      nearPoint,
+      obstacles,
+      {
+        ...routeOptions,
+        fixedRoutingY:routingY,
+        preferredRoutingY:routingY,
+        routeTurnPenaltyRatio:Math.max(
+          Number(options.turnPenaltyRatio) || 20,
+          Number(options.mainCorridorTurnPenaltyRatio) || 100
+        )
+      },
+      new Set()
+    );
+
+    if (!spinePath.points || spinePath.points.length < 2) return;
+
+    const panelConnector = findGridPath3D(
+      nearPoint,
+      pointAtRoutingY(panelStandoff.point, routingY),
+      obstacles,
+      {
+        ...routeOptions,
+        fixedRoutingY:routingY,
+        preferredRoutingY:routingY,
+        routeTurnPenaltyRatio:Math.max(
+          Number(options.turnPenaltyRatio) || 20,
+          Number(options.mainCorridorTurnPenaltyRatio) || 100
+        )
+      },
+      new Set()
+    );
+
+    if (!panelConnector.points || panelConnector.points.length < 2) return;
+
+    const corridorPath = [];
+    appendDistinctPoints(corridorPath, spinePath.points, 0);
+    appendDistinctPoints(corridorPath, panelConnector.points, 1);
+
+    const rootPoint = pointAtRoutingY(panelStandoff.point, routingY);
+    const rootKey = networkNodeKey(rootPoint);
+    const tree = {
+      nodes:new Map([[rootKey, clonePoint(rootPoint)]]),
+      parent:new Map([[rootKey, null]])
+    };
+
+    const registration = registerNetworkPath(tree, corridorPath, routingY);
+    if (!registration) return;
+
+    const pending = prepared.slice();
+    const cablePlans = [];
+
+    while (pending.length) {
+      const networkPoints = Array.from(tree.nodes.values());
+      let selected = null;
+      const probeCount = Math.min(
+        Math.max(1, Number(options.networkAttachmentCandidateLimit) || 4),
+        pending.length
+      );
+
+      const rankedPending = pending.slice().sort(function(a,b){
+        return networkDistanceToNodes(a.start, networkPoints) -
+          networkDistanceToNodes(b.start, networkPoints) ||
+          b.densityScore - a.densityScore;
+      });
+
+      for (let candidateIndex = 0; candidateIndex < probeCount; candidateIndex++) {
+        const entry = rankedPending[candidateIndex];
+
+        const branchResult = findGridPath3D(
+          entry.start,
+          null,
+          obstacles,
+          {
+            ...routeOptions,
+            fixedRoutingY:routingY,
+            preferredRoutingY:routingY,
+            routeTurnPenaltyRatio:Math.max(
+              Number(options.turnPenaltyRatio) || 20,
+              Number(options.mainCorridorTurnPenaltyRatio) || 100
+            ),
+            networkGoalPoints:networkPoints
+          },
+          new Set()
+        );
+
+        if (
+          !branchResult.points ||
+          branchResult.points.length < 1 ||
+          !branchResult.attachment_point
+        ) {
+          continue;
+        }
+
+        const score =
+          polylineLengthMm(branchResult.points) +
+          countPolylineTurns(branchResult.points) *
+          Math.max(1, Number(options.gridStepMm) || 100) *
+          50;
+
+        if (!selected || score < selected.score) {
+          selected = {
+            entry,
+            branchResult,
+            score
+          };
+        }
+      }
+
+      if (!selected) return;
+
+      const attached = registerNetworkPath(
+        tree,
+        selected.branchResult.points,
+        routingY
+      );
+      if (!attached) return;
+
+      const plan = makeNetworkCablePlan(
+        selected.entry,
+        group,
+        selected.branchResult.points,
+        tree,
+        attached.attachmentPoint,
+        panelDrop,
+        routeOptions.routingTrayWidthMm,
+        {
+          ...routeOptions,
+          fixedRoutingY:routingY,
+          panelStandoffDistanceMm:panelStandoff.distance_mm
+        }
+      );
+      if (!plan) return;
+
+      cablePlans.push(plan);
+
+      const removeIndex = pending.findIndex(function(entry){
+        return entry.equipment.id === selected.entry.equipment.id;
+      });
+      if (removeIndex < 0) return;
+      pending.splice(removeIndex, 1);
+    }
+
+    const totalLength = cablePlans.reduce(function(sum, plan){
+      return sum + routeLengthMeters(plan.points);
+    }, 0);
+    const totalTurns = cablePlans.reduce(function(sum, plan){
+      return sum + countPolylineTurns(plan.points);
+    }, 0);
+    const score =
+      totalLength +
+      totalTurns * Math.max(1, Number(options.gridStepMm) || 100) * 0.001;
+
+    if (
+      !best ||
+      score < best.score
+    ) {
+      best = {
+        routingY,
+        panelHighPoint:pointAtRoutingY(panelStandoff.point, routingY),
+        panelDrop,
+        cablePlans,
+        connectedCount:cablePlans.length,
+        unresolved:[],
+        networkNodes:Array.from(tree.nodes.values()).map(clonePoint),
+        score
+      };
+    }
+  });
+
+  return best;
+}
+
 function buildPanelMultiTerminalNetwork(group, prepared, panelStandoff, obstacles, routeOptions, options) {
   if (!prepared.length) return null;
 
@@ -2048,6 +2377,47 @@ function buildPanelMultiTerminalNetwork(group, prepared, panelStandoff, obstacle
   const attachLimit = Math.max(1, Number(options.networkAttachmentCandidateLimit) || 4);
 
   let bestPartial = null;
+
+  // When the equipment clearly forms parallel rows, try a dedicated shared
+  // Main Tray corridor between the rows before the generic seed-and-branch
+  // network. This prevents two parallel cable paths from becoming two
+  // independent Main Trays when the open space between them is usable.
+  for (let levelIndex = 0; levelIndex < levels.length; levelIndex++) {
+    const routingY = levels[levelIndex];
+    const panelHighPoint = pointAtRoutingY(panelStandoff.point, routingY);
+    const panelDrop = findGridPath3D(
+      panelStandoff.point,
+      panelHighPoint,
+      obstacles,
+      {
+        ...routeOptions,
+        fixedRoutingY:routingY,
+        preferredRoutingY:routingY,
+        routeTurnPenaltyRatio:Math.max(
+          Number(options.turnPenaltyRatio) || 20,
+          Number(options.mainCorridorTurnPenaltyRatio) || 100
+        )
+      },
+      new Set()
+    );
+
+    if (!panelDrop.points || panelDrop.points.length < 1) continue;
+
+    const parallelResult = buildParallelMainCorridorNetwork(
+      group,
+      prepared,
+      panelStandoff,
+      obstacles,
+      routeOptions,
+      options,
+      routingY,
+      panelDrop
+    );
+
+    if (parallelResult && parallelResult.unresolved.length === 0) {
+      return parallelResult;
+    }
+  }
 
   for (let levelIndex = 0; levelIndex < levels.length; levelIndex++) {
     const routingY = levels[levelIndex];
@@ -2298,6 +2668,7 @@ export function routeEngineeringNetwork(inputs) {
       : 0,
     networkSeedAttempts:Number(inputs && inputs.options && inputs.options.networkSeedAttempts) || 4,
     networkAttachmentCandidateLimit:Number(inputs && inputs.options && inputs.options.networkAttachmentCandidateLimit) || 4,
+    parallelMainCorridorCandidateLimit:Number(inputs && inputs.options && inputs.options.parallelMainCorridorCandidateLimit) || 6,
     trayStopBeforeEquipmentMm:Number.isFinite(Number(inputs && inputs.options && inputs.options.trayStopBeforeEquipmentMm))
       ? Number(inputs.options.trayStopBeforeEquipmentMm)
       : 1000,
