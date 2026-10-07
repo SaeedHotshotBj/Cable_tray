@@ -407,7 +407,8 @@ function resolveAnchorStandoff(anchor, obstacles, options) {
         z:base.z + normal.z * startDistance
       },
       warning:'Maximum tray distance from body is smaller than the required minimum clearance plus tray half-size.',
-      distance_mm:startDistance
+      distance_mm:startDistance,
+      valid:false
     };
   }
 
@@ -447,7 +448,7 @@ function resolveAnchorStandoff(anchor, obstacles, options) {
     }
   }
 
-  if (best) return {point:best.point, warning:null, distance_mm:best.distance};
+  if (best) return {point:best.point, warning:null, distance_mm:best.distance, valid:true};
 
   const fallbackDistance = Math.min(maxCenterlineDistance, Math.max(startDistance, minCenterlineDistance));
   return {
@@ -457,7 +458,8 @@ function resolveAnchorStandoff(anchor, obstacles, options) {
       z:base.z + normal.z * fallbackDistance
     },
     warning:'Could not find a valid tray standoff within the configured body-distance corridor.',
-    distance_mm:fallbackDistance
+    distance_mm:fallbackDistance,
+    valid:false
   };
 }
 // Tiny local vector helper keeps the routing module independent of the Three.js runtime.
@@ -508,12 +510,22 @@ function findGridPath3D(start, goal, obstacles, options, reuseCells) {
   );
 
   if (!startBridge || !goalBridge) {
+    const directClear = segmentClearForRouting(start, goal, obstacles, options);
+    if (directClear) {
+      return {
+        step,
+        points:[
+          {x:start.x,y:start.y,z:start.z},
+          {x:goal.x,y:goal.y,z:goal.z}
+        ],
+        fallback:true,
+        warning:'A routing-grid bridge was unavailable, but the validated direct route was used.'
+      };
+    }
+
     return {
       step,
-      points:[
-        {x:start.x,y:start.y,z:start.z},
-        {x:goal.x,y:goal.y,z:goal.z}
-      ],
+      points:[],
       fallback:true,
       warning:'A collision-free orthogonal bridge to the routing grid could not be found.'
     };
@@ -1245,6 +1257,7 @@ export function routeEngineeringNetwork(inputs) {
 
     const panelStandoff = resolveAnchorStandoff(group.panel.anchor, obstacles, routeOptions);
     if (panelStandoff.warning) warnings.push(group.panel.name + ': ' + panelStandoff.warning);
+    if (panelStandoff.valid === false) return;
 
     const prepared = group.equipment.map(function(item) {
       const equipmentStandoff = resolveAnchorStandoff(item.anchor, obstacles, routeOptions);
@@ -1252,9 +1265,10 @@ export function routeEngineeringNetwork(inputs) {
       return {
         equipment:item,
         start:equipmentStandoff.point,
-        startDistanceMm:equipmentStandoff.distance_mm
+        startDistanceMm:equipmentStandoff.distance_mm,
+        valid:equipmentStandoff.valid !== false
       };
-    });
+    }).filter(function(entry){ return entry.valid; });
 
     if (!prepared.length) return;
 
