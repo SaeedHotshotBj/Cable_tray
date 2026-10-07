@@ -3805,7 +3805,10 @@ $('saveProjectBtn').addEventListener('click', saveProjectFile);
 function loadProject(data) {
   if (!data || data.schema !== 'cable-tray-project') throw new Error('Not a Cable_tray project');
 
-  state.modelRoots.forEach(function(root){ scene.remove(root); });
+  state.modelRoots.forEach(function(root){
+    disposeEngineeringCollisionGeometry(root);
+    scene.remove(root);
+  });
   state.modelRoots.clear();
   state.routeRoots.forEach(function(root){ if (root.parent) root.parent.remove(root); });
   state.routeRoots.clear();
@@ -3843,6 +3846,7 @@ function loadProject(data) {
         n.userData = n.userData || {};
         n.userData.objectId = m.id;
       });
+      prepareEngineeringCollisionGeometry(root);
       scene.add(root);
       state.modelRoots.set(m.id, root);
       state.objects.push({
@@ -3911,7 +3915,11 @@ $('projectFile').addEventListener('change', async function(event){
 
 $('newProjectBtn').addEventListener('click', function(){
   if (!confirm('Clear the current design?')) return;
-  state.modelRoots.forEach(function(root){ scene.remove(root); }); state.modelRoots.clear();
+  state.modelRoots.forEach(function(root){
+    disposeEngineeringCollisionGeometry(root);
+    scene.remove(root);
+  });
+  state.modelRoots.clear();
   state.sourceModels = [];
   state.objects = [];
   state.equipment = [];
