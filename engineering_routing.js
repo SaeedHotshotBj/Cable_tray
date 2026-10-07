@@ -242,7 +242,7 @@ function bridgePath3D(from, to, obstacles, clearanceMm) {
   return best;
 }
 
-function findBridgeCell(point, blocked, bounds, step, obstacles, clearanceMm) {
+function findBridgeCell(point, otherPoint, blocked, bounds, step, obstacles, clearanceMm) {
   const center = {
     ix:Math.round(point.x / step),
     iy:Math.round(point.y / step),
@@ -273,7 +273,13 @@ function findBridgeCell(point, blocked, bounds, step, obstacles, clearanceMm) {
     }
   }
 
-  candidates.sort(function(a,b){ return a.length - b.length; });
+  candidates.forEach(function(candidate){
+    candidate.score = candidate.length +
+      manhattanDistance3D(candidate.target, otherPoint) * 0.25;
+  });
+  candidates.sort(function(a,b){
+    return a.score - b.score || a.length - b.length;
+  });
   return candidates[0] || null;
 }
 
@@ -401,10 +407,10 @@ function findGridPath3D(start, goal, obstacles, options, reuseCells) {
 
   const blocked = buildBlockedSet3D(obstacles, step, bounds, Number(options.clearanceMm) || 0);
   const startBridge = findBridgeCell(
-    start, blocked, bounds, step, obstacles, Number(options.clearanceMm) || 0
+    start, goal, blocked, bounds, step, obstacles, Number(options.clearanceMm) || 0
   );
   const goalBridge = findBridgeCell(
-    goal, blocked, bounds, step, obstacles, Number(options.clearanceMm) || 0
+    goal, start, blocked, bounds, step, obstacles, Number(options.clearanceMm) || 0
   );
 
   if (!startBridge || !goalBridge) {
