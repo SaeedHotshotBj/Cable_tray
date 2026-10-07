@@ -639,18 +639,8 @@ function buildEquipmentResults(cablePlans, trayRuns) {
     let mainLength = 0;
 
     trayRuns.forEach(function(run) {
-      const runStart = run.points[0];
-      const runEnd = run.points[1];
-      const sameEquipment = plan.points.some(function(point){
-        return Math.abs(point.x - runStart.x) < 0.1 &&
-          Math.abs(point.y - runStart.y) < 0.1 &&
-          Math.abs(point.z - runStart.z) < 0.1;
-      }) || plan.points.some(function(point){
-        return Math.abs(point.x - runEnd.x) < 0.1 &&
-          Math.abs(point.y - runEnd.y) < 0.1 &&
-          Math.abs(point.z - runEnd.z) < 0.1;
-      });
-      if (!sameEquipment) return;
+      const carriesEquipment = Array.isArray(run.cable_ids) && run.cable_ids.indexOf(equipmentId) >= 0;
+      if (!carriesEquipment) return;
 
       if (run.classification === 'branch') {
         branchWidth = Math.max(branchWidth, run.width_mm);
@@ -677,7 +667,9 @@ export function routeEngineeringNetwork(inputs) {
   const options = {
     routingElevationMm:Number(inputs && inputs.options && inputs.options.routingElevationMm) || 3000,
     gridStepMm:Number(inputs && inputs.options && inputs.options.gridStepMm) || 250,
-    clearanceMm:Number(inputs && inputs.options && inputs.options.clearanceMm) || 100,
+    clearanceMm:Number.isFinite(Number(inputs && inputs.options && inputs.options.clearanceMm))
+      ? Number(inputs.options.clearanceMm)
+      : 100,
     fillLimitPercent:Number(inputs && inputs.options && inputs.options.fillLimitPercent) || 80,
     trayHeightMm:Number(inputs && inputs.options && inputs.options.trayHeightMm) || 100,
     mainMinCables:Number(inputs && inputs.options && inputs.options.mainMinCables) || 2,
