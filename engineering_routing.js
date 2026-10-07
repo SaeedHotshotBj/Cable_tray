@@ -203,6 +203,7 @@ function segmentClear3D(a, b, obstacles, clearanceMm) {
 }
 
 function segmentClearForRouting(a, b, obstacles, options) {
+  if (!segmentWithinRoutingBounds(a, b, options)) return false;
   if (!segmentWithinBodyDistanceForRouting(a, b, options)) return false;
 
   if (typeof options.segmentClear === 'function') {
@@ -379,6 +380,66 @@ function pointInsideObstacle3D(point, obstacles, clearanceMm) {
   return false;
 }
 
+function normalizeRoutingBounds(bounds, options) {
+  if (!bounds) return null;
+
+  const trayWidth = Math.max(1, Number(options && options.routingTrayWidthMm) || Number(options && options.trayHeightMm) || 100);
+  const trayHeight = Math.max(1, Number(options && options.trayHeightMm) || 100);
+  const clearance = Math.max(0, Number(options && options.clearanceMm) || 0);
+  const inset = Math.max(trayWidth, trayHeight) / 2 + clearance;
+
+  const minX = Number(bounds.minX);
+  const maxX = Number(bounds.maxX);
+  const minY = Number(bounds.minY);
+  const maxY = Number(bounds.maxY);
+  const minZ = Number(bounds.minZ);
+  const maxZ = Number(bounds.maxZ);
+
+  if (![minX,maxX,minY,maxY,minZ,maxZ].every(Number.isFinite)) return null;
+
+  const normalized = {
+    minX:minX + inset,
+    maxX:maxX - inset,
+    minY:minY + inset,
+    maxY:maxY - inset,
+    minZ:minZ + inset,
+    maxZ:maxZ - inset
+  };
+
+  if (
+    normalized.minX > normalized.maxX ||
+    normalized.minY > normalized.maxY ||
+    normalized.minZ > normalized.maxZ
+  ) {
+    return null;
+  }
+
+  return normalized;
+}
+
+function pointWithinRoutingBounds(point, options) {
+  const bounds = normalizeRoutingBounds(options && options.routingBounds, options || {});
+  if (!bounds) return true;
+
+  const x = Number(point && point.x);
+  const y = Number(point && point.y);
+  const z = Number(point && point.z);
+  if (![x,y,z].every(Number.isFinite)) return false;
+
+  const eps = 0.001;
+  return (
+    x >= bounds.minX - eps && x <= bounds.maxX + eps &&
+    y >= bounds.minY - eps && y <= bounds.maxY + eps &&
+    z >= bounds.minZ - eps && z <= bounds.maxZ + eps
+  );
+}
+
+function segmentWithinRoutingBounds(a, b, options) {
+  if (!pointWithinRoutingBounds(a, options)) return false;
+  if (!pointWithinRoutingBounds(b, options)) return false;
+  return true;
+}
+
 function resolveAnchorStandoff(anchor, obstacles, options) {
   const base = clonePoint(anchor && anchor.point ? anchor.point : {});
   const sourceNormal = clonePoint(anchor && anchor.normal ? anchor.normal : {x:0,y:1,z:0});
@@ -424,6 +485,11 @@ function resolveAnchorStandoff(anchor, obstacles, options) {
         y:base.y + direction.y * clampedDistance,
         z:base.z + direction.z * clampedDistance
       };
+
+      // Prefer the interior of the CAD/model envelope. A surface normal may
+      // point outward, so standoff probing must never select an exterior point
+      // merely because it satisfies the body-distance corridor.
+      if (!pointWithinRoutingBounds(point, options)) continue;
 
       const pointClear = typeof options.standoffClear === 'function'
         ? options.standoffClear(
@@ -1188,7 +1254,13 @@ function resolveHighestValidRoutingY(points, options) {
   const trayHeight = Math.max(1, Number(options.trayHeightMm) || 100);
   const clearance = Math.max(0, Number(options.clearanceMm) || 0);
   const safetyGap = Math.max(0, Number(options.ceilingSafetyGapMm) || 0);
-  const desiredY = ceilingY - safetyGap - trayHeight / 2 - clearance;
+  const routingBounds = normalizeRoutingBounds(options.routingBounds, options);
+  const desiredY = routingBounds
+    ? Math.min(
+        ceilingY - safetyGap - trayHeight / 2 - clearance,
+        routingBounds.maxY
+      )
+    : ceilingY - safetyGap - trayHeight / 2 - clearance;
 
   const step = Math.max(10, Number(options.gridStepMm) || 100);
   const probeStep = Math.max(10, Math.min(step / 2, 50));
@@ -1247,6 +1319,9 @@ export function routeEngineeringNetwork(inputs) {
       ? Number(inputs.options.ceilingY)
       : null,
     ceilingSafetyGapMm:Number(inputs && inputs.options && inputs.options.ceilingSafetyGapMm) || 50,
+    routingBounds:inputs && inputs.options && inputs.options.routingBounds
+      ? { ...inputs.options.routingBounds }
+      : null,
     preferredYPenaltyRatio:Number(inputs && inputs.options && inputs.options.preferredYPenaltyRatio) || 1,
     mainCorridorBranchWeight:Number(inputs && inputs.options && inputs.options.mainCorridorBranchWeight) || 1.15,
     mainCorridorTurnPenaltyRatio:Number(inputs && inputs.options && inputs.options.mainCorridorTurnPenaltyRatio) || 0.75,
