@@ -23,7 +23,7 @@ const state = {
   equipment: [],
   panels: [],
   engineeringSettings: {
-    gridStepMm: 250,
+    gridStepMm: 100,
     clearanceMm: 100,
     mainMinCables: 2,
     traySideMarginMm: 25,
@@ -783,7 +783,7 @@ function runEngineeringAutoDesign() {
   }
 
   const settings = {
-    gridStepMm:Number($('routingGridStep').value) || 250,
+    gridStepMm:Number($('routingGridStep').value) || 100,
     clearanceMm:Number.isFinite(Number($('autoTrayClearance').value)) ? Number($('autoTrayClearance').value) : 100,
     fillLimitPercent:Number($('fillLimit').value) || 80,
     mainMinCables:Number($('mainTrayMinCables').value) || 2,
@@ -1031,7 +1031,7 @@ $('unitSystem').addEventListener('change', function(e){ state.project.units = e.
   field.addEventListener('change', function(){
     state.engineeringSettings = {
       ...state.engineeringSettings,
-      gridStepMm:Number($('routingGridStep').value) || 250,
+      gridStepMm:Number($('routingGridStep').value) || 100,
       clearanceMm:Number.isFinite(Number($('autoTrayClearance').value)) ? Number($('autoTrayClearance').value) : 100,
       mainMinCables:Number($('mainTrayMinCables').value) || 2,
       standardTrayWidthsMm:parseNumberList($('autoTrayStandards').value)
@@ -4017,7 +4017,7 @@ function exportEngineeringBoq() {
 
 function syncEngineeringSettingsInputs() {
   const settings = state.engineeringSettings || {};
-  if ($('routingGridStep')) $('routingGridStep').value = Number(settings.gridStepMm) || 250;
+  if ($('routingGridStep')) $('routingGridStep').value = Number(settings.gridStepMm) || 100;
   if ($('autoTrayClearance')) $('autoTrayClearance').value = Number(settings.clearanceMm) || 100;
   if ($('mainTrayMinCables')) $('mainTrayMinCables').value = Number(settings.mainMinCables) || 2;
   if ($('autoTrayStandards')) $('autoTrayStandards').value = (settings.standardTrayWidthsMm || []).join(',');
