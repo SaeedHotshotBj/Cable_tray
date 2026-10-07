@@ -1312,6 +1312,47 @@ function pointerRay(event) {
   raycaster.setFromCamera(mouse, camera);
 }
 
+function focusOrbitTargetOnPointer(event) {
+  const rect = renderer.domElement.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) return;
+
+  const cursor = new THREE.Vector2(
+    ((event.clientX - rect.left) / rect.width) * 2 - 1,
+    -((event.clientY - rect.top) / rect.height) * 2 + 1
+  );
+  const focusRaycaster = new THREE.Raycaster();
+  focusRaycaster.setFromCamera(cursor, camera);
+
+  const modelRoots = Array.from(state.modelRoots.values());
+  const routeRoots = Array.from(state.routeRoots.values());
+  const modelHits = modelRoots.length
+    ? focusRaycaster.intersectObjects(modelRoots, true)
+    : [];
+  const routeHits = routeRoots.length
+    ? focusRaycaster.intersectObjects(routeRoots, true)
+    : [];
+  const hit = modelHits.concat(routeHits).sort(function(a, b){
+    return a.distance - b.distance;
+  })[0];
+
+  if (hit && hit.point) {
+    controls.target.copy(hit.point);
+    controls.update();
+    return;
+  }
+
+  const groundHits = focusRaycaster.intersectObject(ground, false);
+  if (groundHits[0] && groundHits[0].point) {
+    controls.target.lerp(groundHits[0].point, 0.35);
+    controls.update();
+  }
+}
+
+renderer.domElement.addEventListener('wheel', focusOrbitTargetOnPointer, {
+  capture: true,
+  passive: true
+});
+
 function groundPoint(event) {
   pointerRay(event);
   const hit = raycaster.intersectObject(ground, false)[0];
@@ -1693,6 +1734,15 @@ function sweptRectGeometry(points, sideWidth, verticalHeight, sideOffset, vertic
   return geometry;
 }
 
+function straightRouteCurve(points) {
+  const path = new THREE.CurvePath();
+  if (!points || points.length < 2) return path;
+  for (let i = 1; i < points.length; i++) {
+    path.add(new THREE.LineCurve3(points[i - 1], points[i]));
+  }
+  return path;
+}
+
 function roundedRouteCurve(points, radius) {
   const path = new THREE.CurvePath();
   if (points.length < 2) return path;
@@ -1814,15 +1864,18 @@ function routeVisual(obj) {
   g.userData.baseColor = baseColor;
   g.userData.meshMaterial = mat;
 
+  const isEngineeringTray = obj.kind === 'tray' && obj.engineering_generated === true;
   const curveRadius = obj.kind === 'cable'
     ? Math.max(0.8, mmToScene(obj.diameter_mm * 3))
     : Math.max(1.0, mmToScene(Math.min(obj.width_mm, obj.height_mm) * 0.8));
-  const roundedCurve = roundedRouteCurve(localPoints, curveRadius);
+  const routeCurve = isEngineeringTray
+    ? straightRouteCurve(localPoints)
+    : roundedRouteCurve(localPoints, curveRadius);
 
   if (obj.kind === 'cable') {
     const tube = new THREE.Mesh(
       new THREE.TubeGeometry(
-        roundedCurve,
+        routeCurve,
         Math.max(24, localPoints.length * 20),
         Math.max(0.2, mmToScene(obj.diameter_mm) / 2),
         12,
@@ -1953,126 +2006,18 @@ function routeVisual(obj) {
       }
     }
 
-    const routeEntries = new Array(localPoints.length);
-    const routeExits = new Array(localPoints.length);
-    routeEntries[0] = localPoints[0].clone();
-    routeExits[0] = localPoints[0].clone();
-    routeEntries[localPoints.length - 1] = localPoints[localPoints.length - 1].clone();
-    routeExits[localPoints.length - 1] = localPoints[localPoints.length - 1].clone();
+    const routeEntries = localPoints.map(function(point){ return point.clone(); });
+    const routeExits = localPoints.map(function(point){ return point.clone(); });
 
-    for (let i = 1; i < localPoints.length - 1; i++) {
-      const bend = routeBendGeometry(localPoints, i, curveRadius);
-      if (!bend) {
-        routeEntries[i] = localPoints[i].clone();
-        routeExits[i] = localPoints[i].clone();
-      } else {
-        routeEntries[i] = bend.entry;
-        routeExits[i] = bend.exit;
-      }
-    }
-
-    // Straight runs stop cleanly at the tangent points of each bend.
+    // Engineering Auto Routing never uses physical elbow pieces.
+    // Each direction change is a direct corner between two straight tray runs.
     for (let i = 1; i < localPoints.length; i++) {
-      const start = routeExits[i - 1];
-      const end = routeEntries[i];
-      addTraySegment(start, end);
+      addTraySegment(routeExits[i - 1], routeEntries[i]);
     }
 
-    // Build each real bend as one continuous swept rectangular tray piece.
-    // This removes the faceted "stack of boxes" look while keeping the same
-    // industrial solid-bottom tray cross-section used by straight runs.
-    for (let i = 1; i < localPoints.length - 1; i++) {
-      const bend = routeBendGeometry(localPoints, i, curveRadius);
-      if (!bend || bend.radius <= 1e-6 || bend.angle <= 1e-6) continue;
-
-      const curve = new THREE.QuadraticBezierCurve3(
-        bend.entry,
-        localPoints[i],
-        bend.exit
-      );
-      const elbowPoints = curve.getPoints(20);
-      const bendHeight = height;
-      const bendSheet = sheet;
-      const bendLipWidth = lipWidth;
-
-      const incomingDirection = localPoints[i].clone().sub(localPoints[i - 1]).normalize();
-      const outgoingDirection = localPoints[i + 1].clone().sub(localPoints[i]).normalize();
-      const bendNormal = incomingDirection.clone().cross(outgoingDirection);
-      if (bendNormal.lengthSq() > 1e-12) {
-        bendNormal.normalize();
-
-        const preferredAxis = Math.abs(bendNormal.y) > 0.5
-          ? new THREE.Vector3(0, 1, 0)
-          : (Math.abs(bendNormal.z) > 0.5
-            ? new THREE.Vector3(0, 0, 1)
-            : new THREE.Vector3(1, 0, 0));
-        if (bendNormal.dot(preferredAxis) < 0) bendNormal.negate();
-      } else {
-        bendNormal.set(0, 1, 0);
-      }
-
-      const bendFloor = sweptRectGeometry(
-        elbowPoints,
-        width,
-        bendSheet,
-        0,
-        -bendHeight * 0.5 + bendSheet * 0.5,
-        bendNormal
-      );
-      if (bendFloor) {
-        const mesh = new THREE.Mesh(bendFloor, mat);
-        mesh.userData.objectId = obj.id;
-        g.add(mesh);
-      }
-
-      const halfWallOffset = width * 0.5 - bendSheet * 0.5;
-      [-1, 1].forEach(function(side){
-        const wall = sweptRectGeometry(
-          elbowPoints,
-          bendSheet,
-          Math.max(bendHeight, bendSheet),
-          side * halfWallOffset,
-          0,
-          bendNormal
-        );
-        if (wall) {
-          const mesh = new THREE.Mesh(wall, mat);
-          mesh.userData.objectId = obj.id;
-          g.add(mesh);
-        }
-
-        const lip = sweptRectGeometry(
-          elbowPoints,
-          bendLipWidth,
-          Math.max(bendSheet, bendLipWidth * 0.65),
-          side * (width * 0.5 + bendLipWidth * 0.5),
-          bendHeight * 0.5 - bendLipWidth * 0.35,
-          bendNormal
-        );
-        if (lip) {
-          const mesh = new THREE.Mesh(lip, mat);
-          mesh.userData.objectId = obj.id;
-          g.add(mesh);
-        }
-
-        const lowerFlange = sweptRectGeometry(
-          elbowPoints,
-          Math.max(bendSheet * 1.8, bendLipWidth * 0.9),
-          bendSheet,
-          side * (width * 0.5 - bendSheet * 0.5),
-          -bendHeight * 0.5 + bendSheet * 1.45,
-          bendNormal
-        );
-        if (lowerFlange) {
-          const mesh = new THREE.Mesh(lowerFlange, mat);
-          mesh.userData.objectId = obj.id;
-          g.add(mesh);
-        }
-      });
-    }
-  }
-
-  const linePoints = roundedCurve.getPoints(Math.max(16, localPoints.length * 16));
+  const linePoints = routeCurve.getPoints(
+    Math.max(isEngineeringTray ? 2 : 16, localPoints.length * (isEngineeringTray ? 2 : 16))
+  );
   const lineMaterial = new THREE.LineBasicMaterial({
     color: 0xdceeff,
     transparent: true,
