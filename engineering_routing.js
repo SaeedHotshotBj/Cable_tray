@@ -851,11 +851,13 @@ function chooseTrayWidth(requiredWidthMm, standardWidths) {
   return Math.ceil(requiredWidthMm / 100) * 100;
 }
 
-function buildTrayRuns(cablePlans, options) {
+function buildTrayRuns(cablePlans, options, mainCorridors) {
   const segments = new Map();
 
   cablePlans.forEach(function(plan) {
-    const points = plan.points;
+    const points = Array.isArray(plan.branch_points)
+      ? plan.branch_points
+      : plan.points;
     for (let i = 1; i < points.length; i++) {
       const segment = segmentRecord(
         points[i - 1],
@@ -971,7 +973,19 @@ function buildTrayRuns(cablePlans, options) {
     if (current) runs.push(makeTrayRun(group, current));
   });
 
-  return runs;
+  const sharedMainRuns = (mainCorridors || []).map(function(corridor){
+    const points = (corridor.points || []).map(clonePoint);
+    return {
+      classification:'main',
+      width_mm:Number(corridor.width_mm) || Number(options.trayHeightMm) || 100,
+      height_mm:Number(corridor.height_mm) || Number(options.trayHeightMm) || 100,
+      cable_ids:Array.isArray(corridor.cable_ids) ? corridor.cable_ids.slice() : [],
+      points,
+      length_m:routeLengthMeters(points)
+    };
+  }).filter(function(run){ return run.points.length > 1; });
+
+  return runs.concat(sharedMainRuns);
 }
 
 function makeTrayRun(group, range) {
@@ -1170,7 +1184,7 @@ export function routeEngineeringNetwork(inputs) {
       ? Number(inputs.options.maxBodyDistanceMm)
       : 1500,
     mainCorridorBranchWeight:Number(inputs && inputs.options && inputs.options.mainCorridorBranchWeight) || 1.15,
-    mainCorridorTurnPenaltyRatio:Number(inputs && inputs.options && inputs.options.mainCorridorTurnPenaltyRatio) || 0.14,
+    mainCorridorTurnPenaltyRatio:Number(inputs && inputs.options && inputs.options.mainCorridorTurnPenaltyRatio) || 0.75,
     mainCorridorCandidateLimit:Number(inputs && inputs.options && inputs.options.mainCorridorCandidateLimit) || 8,
     pointBodyDistanceClear:inputs && inputs.options && typeof inputs.options.pointBodyDistanceClear === 'function'
       ? inputs.options.pointBodyDistanceClear
@@ -1210,6 +1224,7 @@ export function routeEngineeringNetwork(inputs) {
   });
 
   const cablePlans = [];
+  const mainCorridors = [];
 
   groups.forEach(function(group) {
     let planningCableDiameterSum = 0;
@@ -1315,6 +1330,14 @@ export function routeEngineeringNetwork(inputs) {
     );
 
     const corridorPoints = bestCorridor.points;
+    mainCorridors.push({
+      panel_id:group.panel.id,
+      width_mm:planningTrayWidth,
+      height_mm:Number(options.trayHeightMm) || 100,
+      cable_ids:prepared.map(function(entry){ return entry.equipment.id; }),
+      points:corridorPoints.map(clonePoint)
+    });
+
     const reuseCells = new Set();
     corridorPoints.forEach(function(point){
       const adaptedStep = Math.max(50, Number(routeOptions.gridStepMm) || 250);
@@ -1423,6 +1446,7 @@ export function routeEngineeringNetwork(inputs) {
         main_corridor_equipment_id:bestCorridor.endpoint.equipment.id,
         standoff_distance_mm:Math.max(entry.startDistanceMm, panelStandoff.distance_mm),
         planning_tray_width_mm:planningTrayWidth,
+        branch_points:(branchResult.points || []).map(clonePoint),
         points:compressed,
         warning:branchResult.warning || null,
         fallback:!!branchResult.fallback
@@ -1430,7 +1454,7 @@ export function routeEngineeringNetwork(inputs) {
     });
   });
 
-  const trayRuns = buildTrayRuns(cablePlans, options);
+  const trayRuns = buildTrayRuns(cablePlans, options, mainCorridors);
   const traySummary = buildTraySummary(trayRuns);
   const equipmentResults = buildEquipmentResults(cablePlans, trayRuns);
 
@@ -1443,6 +1467,7 @@ export function routeEngineeringNetwork(inputs) {
   return {
     cable_plans:cablePlans,
     tray_runs:trayRuns,
+    main_corridors:mainCorridors,
     tray_summary:traySummary,
     equipment_results:equipmentResults,
     warnings,
