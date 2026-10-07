@@ -86,9 +86,10 @@
         <label class="field"><span>Fill Limit (%)</span><input id="fillLimit" type="number" min="1" max="100" step="1" value="80" /></label>
         <label class="field"><span>Routing Grid Step (mm)</span><input id="routingGridStep" type="number" min="50" step="50" value="100" /></label>
         <label class="field"><span>Minimum Body Clearance (mm)</span><input id="autoTrayClearance" type="number" min="0" step="10" value="100" /></label>
+        <label class="field"><span>Maximum Tray Distance from Body (mm)</span><input id="autoTrayMaxDistance" type="number" min="0" step="50" value="1500" /></label>
         <label class="field"><span>Main Tray Minimum Cables</span><input id="mainTrayMinCables" type="number" min="2" step="1" value="2" /></label>
         <label class="field"><span>Available Tray Widths (mm)</span><input id="autoTrayStandards" type="text" value="100,150,200,300,400,500,600,800,1000,1200" /></label>
-        <div class="hint">Auto Design calculates the required width from the sum of cable diameters and automatically selects the smallest available tray size that satisfies the fill limit.</div>
+        <div class="hint">Auto Design calculates tray width from the sum of cable diameters on each shared path and selects the smallest available standard size. Minimum Body Clearance is a hard safety limit; Maximum Tray Distance is the search boundary, not a fixed elevation. The main corridor is optimized toward equipment-dense areas while favoring long straight runs and fewer obstacle detours.</div>
       </section>
       <section>
         <div class="section-title">Model Import</div>
