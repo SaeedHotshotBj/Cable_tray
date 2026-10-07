@@ -504,8 +504,13 @@ function buildTrayRuns(cablePlans, options) {
       classification:segment.classification,
       width_mm:segment.width_mm,
       height_mm:segment.height_mm,
+      cable_ids:[],
       ranges:[]
     };
+
+    segment.cableIds.forEach(function(id){
+      if (entry.cable_ids.indexOf(id) < 0) entry.cable_ids.push(id);
+    });
 
     let low;
     let high;
