@@ -2295,25 +2295,68 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
 
         for (let targetIndex = 0; targetIndex < branchTargets.length; targetIndex++) {
           const target = branchTargets[targetIndex].point;
-          const branchResult = findGridPath3D(
-            entry.start,
-            target,
-            obstacles,
-            {
-              ...routeOptions,
-              fixedRoutingY:routingY,
-              preferredRoutingY:routingY,
-              routeTurnPenaltyRatio:Math.max(
-                Number(options.turnPenaltyRatio) || 20,
-                Number(options.mainCorridorTurnPenaltyRatio) || 100
-              )
-            },
-            new Set()
-          );
+          let branchResult = null;
 
-          if (!branchResult.points || branchResult.points.length < 1) {
-            continue;
+          const samePrimary = Math.abs(
+            Number(entry.start[candidate.primaryAxis]) -
+            Number(target[candidate.primaryAxis])
+          ) < Math.max(0.001, (Number(options.gridStepMm) || 100) * 0.5);
+
+          if (samePrimary) {
+            const risePoint = {
+              x:Number(entry.start.x),
+              y:routingY,
+              z:Number(entry.start.z)
+            };
+            const directPath = [
+              clonePoint(entry.start),
+              clonePoint(risePoint),
+              clonePoint(target)
+            ].filter(function(point, index, points){
+              if (!index) return true;
+              const previous = points[index - 1];
+              return Math.abs(previous.x - point.x) > 0.001 ||
+                Math.abs(previous.y - point.y) > 0.001 ||
+                Math.abs(previous.z - point.z) > 0.001;
+            });
+
+            let directClear = true;
+            for (let i = 1; i < directPath.length; i++) {
+              if (!segmentClearForRouting(directPath[i - 1], directPath[i], obstacles, routeOptions)) {
+                directClear = false;
+                break;
+              }
+            }
+
+            if (directClear && directPath.length >= 2) {
+              branchResult = {
+                points:directPath,
+                attachment_point:clonePoint(target),
+                fallback:false,
+                warning:null
+              };
+            }
           }
+
+          if (!branchResult) {
+            branchResult = findGridPath3D(
+              entry.start,
+              target,
+              obstacles,
+              {
+                ...routeOptions,
+                fixedRoutingY:routingY,
+                preferredRoutingY:routingY,
+                routeTurnPenaltyRatio:Math.max(
+                  Number(options.turnPenaltyRatio) || 20,
+                  Number(options.mainCorridorTurnPenaltyRatio) || 100
+                )
+              },
+              new Set()
+            );
+          }
+
+          if (!branchResult.points || branchResult.points.length < 1) continue;
 
           const score =
             polylineLengthMm(branchResult.points) +
@@ -2323,12 +2366,10 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
             manhattanDistance3D(target, desiredPoint) * 0.1;
 
           if (!selected || score < selected.score) {
-            selected = {
-              entry,
-              branchResult,
-              score
-            };
+            selected = {entry, branchResult, score};
           }
+
+          if (samePrimary && manhattanDistance3D(target, desiredPoint) < 0.001 && branchResult.fallback !== true) break;
         }
       }
 
