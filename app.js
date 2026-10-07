@@ -625,6 +625,7 @@ function runEngineeringAutoDesign() {
     standardTrayWidthsMm:parseNumberList($('autoTrayStandards').value),
     turnPenaltyRatio:0.04,
     verticalPenaltyRatio:0.02,
+    verticalRangePenaltyRatio:0.25,
     reuseBonus:0.45,
     maxGridCells:120000,
     routingPaddingMm:1000
