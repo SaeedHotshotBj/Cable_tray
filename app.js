@@ -4010,6 +4010,7 @@ function loadProject(data) {
   $('projectName').value = state.project.name || 'Factory Cable Routing';
   $('unitSystem').value = state.project.units || 'mm';
   syncEngineeringSettingsInputs();
+  renderEngineeringNamesToggle();
   rebuildEngineeringMarkers();
   state.selected = null;
   state.measureStart = null;
