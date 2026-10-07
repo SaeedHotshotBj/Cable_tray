@@ -55,66 +55,88 @@ class MinHeap {
   }
 }
 
-function normalizeBounds(start, goal, obstacles, step, paddingMm) {
+
+function manhattanDistance3D(a, b) {
+  return Math.abs(a.x - b.x) + Math.abs(a.y - b.y) + Math.abs(a.z - b.z);
+}
+
+function pointKey3D(ix, iy, iz) {
+  return ix + ',' + iy + ',' + iz;
+}
+
+function normalizeBounds3D(start, goal, obstacles, step, paddingMm) {
   const xs = [start.x, goal.x];
+  const ys = [start.y, goal.y];
   const zs = [start.z, goal.z];
 
   obstacles.forEach(function(rect) {
     xs.push(rect.minX, rect.maxX);
+    ys.push(rect.minY, rect.maxY);
     zs.push(rect.minZ, rect.maxZ);
   });
 
-  let minX = Math.min.apply(Math, xs) - paddingMm;
-  let maxX = Math.max.apply(Math, xs) + paddingMm;
-  let minZ = Math.min.apply(Math, zs) - paddingMm;
-  let maxZ = Math.max.apply(Math, zs) + paddingMm;
+  const minX = Math.min.apply(Math, xs) - paddingMm;
+  const maxX = Math.max.apply(Math, xs) + paddingMm;
+  const minY = Math.min.apply(Math, ys) - paddingMm;
+  const maxY = Math.max.apply(Math, ys) + paddingMm;
+  const minZ = Math.min.apply(Math, zs) - paddingMm;
+  const maxZ = Math.max.apply(Math, zs) + paddingMm;
 
-  let minIx = Math.floor(minX / step);
-  let maxIx = Math.ceil(maxX / step);
-  let minIz = Math.floor(minZ / step);
-  let maxIz = Math.ceil(maxZ / step);
-
-  return { minIx, maxIx, minIz, maxIz };
+  return {
+    minIx: Math.floor(minX / step),
+    maxIx: Math.ceil(maxX / step),
+    minIy: Math.floor(minY / step),
+    maxIy: Math.ceil(maxY / step),
+    minIz: Math.floor(minZ / step),
+    maxIz: Math.ceil(maxZ / step)
+  };
 }
 
-function adaptGridStep(start, goal, obstacles, baseStep, maxCells, paddingMm) {
+function adaptGridStep3D(start, goal, obstacles, baseStep, maxCells, paddingMm) {
   let step = Math.max(50, Number(baseStep) || 250);
 
   for (let attempt = 0; attempt < 8; attempt++) {
-    const bounds = normalizeBounds(start, goal, obstacles, step, paddingMm);
+    const bounds = normalizeBounds3D(start, goal, obstacles, step, paddingMm);
     const width = bounds.maxIx - bounds.minIx + 1;
+    const height = bounds.maxIy - bounds.minIy + 1;
     const depth = bounds.maxIz - bounds.minIz + 1;
-    if (width * depth <= maxCells) return { step, bounds };
+    if (width * height * depth <= maxCells) return { step, bounds };
 
-    const scale = Math.sqrt((width * depth) / maxCells);
+    const scale = Math.cbrt((width * height * depth) / maxCells);
     step = Math.max(step + 50, Math.ceil(step * scale / 50) * 50);
   }
 
-  return { step, bounds: normalizeBounds(start, goal, obstacles, step, paddingMm) };
+  return {
+    step,
+    bounds: normalizeBounds3D(start, goal, obstacles, step, paddingMm)
+  };
 }
 
-function buildBlockedSet(obstacles, step, bounds, clearanceMm) {
+function buildBlockedSet3D(obstacles, step, bounds, clearanceMm) {
   const blocked = new Set();
-  const minIx = bounds.minIx;
-  const maxIx = bounds.maxIx;
-  const minIz = bounds.minIz;
-  const maxIz = bounds.maxIz;
   const clearance = Math.max(0, Number(clearanceMm) || 0);
+  const effectiveClearance = clearance + step * 0.55;
 
   obstacles.forEach(function(rect) {
-    const minX = rect.minX - clearance;
-    const maxX = rect.maxX + clearance;
-    const minZ = rect.minZ - clearance;
-    const maxZ = rect.maxZ + clearance;
+    const minX = rect.minX - effectiveClearance;
+    const maxX = rect.maxX + effectiveClearance;
+    const minY = rect.minY - effectiveClearance;
+    const maxY = rect.maxY + effectiveClearance;
+    const minZ = rect.minZ - effectiveClearance;
+    const maxZ = rect.maxZ + effectiveClearance;
 
-    const ix0 = Math.max(minIx, Math.ceil(minX / step));
-    const ix1 = Math.min(maxIx, Math.floor(maxX / step));
-    const iz0 = Math.max(minIz, Math.ceil(minZ / step));
-    const iz1 = Math.min(maxIz, Math.floor(maxZ / step));
+    const ix0 = Math.max(bounds.minIx, Math.ceil(minX / step));
+    const ix1 = Math.min(bounds.maxIx, Math.floor(maxX / step));
+    const iy0 = Math.max(bounds.minIy, Math.ceil(minY / step));
+    const iy1 = Math.min(bounds.maxIy, Math.floor(maxY / step));
+    const iz0 = Math.max(bounds.minIz, Math.ceil(minZ / step));
+    const iz1 = Math.min(bounds.maxIz, Math.floor(maxZ / step));
 
     for (let ix = ix0; ix <= ix1; ix++) {
-      for (let iz = iz0; iz <= iz1; iz++) {
-        blocked.add(pointKey(ix, iz));
+      for (let iy = iy0; iy <= iy1; iy++) {
+        for (let iz = iz0; iz <= iz1; iz++) {
+          blocked.add(pointKey3D(ix, iy, iz));
+        }
       }
     }
   });
@@ -122,127 +144,230 @@ function buildBlockedSet(obstacles, step, bounds, clearanceMm) {
   return blocked;
 }
 
-function removeEndpointBlocks(blocked, startCell, goalCell) {
-  blocked.delete(pointKey(startCell.ix, startCell.iz));
-  blocked.delete(pointKey(goalCell.ix, goalCell.iz));
+function removeEndpointBlocks3D(blocked, startCell, goalCell) {
+  blocked.delete(pointKey3D(startCell.ix, startCell.iy, startCell.iz));
+  blocked.delete(pointKey3D(goalCell.ix, goalCell.iy, goalCell.iz));
 }
 
-function cellInsideBounds(ix, iz, bounds) {
-  return ix >= bounds.minIx && ix <= bounds.maxIx && iz >= bounds.minIz && iz <= bounds.maxIz;
+function cellInsideBounds3D(ix, iy, iz, bounds) {
+  return ix >= bounds.minIx && ix <= bounds.maxIx &&
+    iy >= bounds.minIy && iy <= bounds.maxIy &&
+    iz >= bounds.minIz && iz <= bounds.maxIz;
 }
 
-function makeCell(ix, iz, dir) {
-  return { ix, iz, dir };
+function makeCell3D(ix, iy, iz, dir) {
+  return { ix, iy, iz, dir };
 }
 
-function cellKey(cell) {
-  return cell.ix + ',' + cell.iz + ',' + cell.dir;
+function cellKey3D(cell) {
+  return cell.ix + ',' + cell.iy + ',' + cell.iz + ',' + cell.dir;
 }
 
-function reconstructPath(cameFrom, current) {
+function reconstructPath3D(cameFrom, current) {
   const result = [current];
-  let key = cellKey(current);
+  let key = cellKey3D(current);
 
   while (cameFrom.has(key)) {
     const previous = cameFrom.get(key);
     result.push(previous);
-    key = cellKey(previous);
+    key = cellKey3D(previous);
   }
 
   result.reverse();
   return result;
 }
 
-function findHorizontalGridPath(start, goal, obstacles, options, reuseCells) {
+function pointInsideObstacle3D(point, obstacles, clearanceMm) {
+  const clearance = Math.max(0, Number(clearanceMm) || 0);
+  for (let i = 0; i < obstacles.length; i++) {
+    const rect = obstacles[i];
+    if (
+      point.x >= rect.minX - clearance && point.x <= rect.maxX + clearance &&
+      point.y >= rect.minY - clearance && point.y <= rect.maxY + clearance &&
+      point.z >= rect.minZ - clearance && point.z <= rect.maxZ + clearance
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function resolveAnchorStandoff(anchor, obstacles, options) {
+  const base = clonePoint(anchor && anchor.point ? anchor.point : {});
+  const sourceNormal = clonePoint(anchor && anchor.normal ? anchor.normal : {x:0,y:1,z:0});
+  const normal = new THREEVector3Shim(sourceNormal.x, sourceNormal.y, sourceNormal.z);
+  if (normal.lengthSq() < 1e-12) normal.set(0, 1, 0);
+  normal.normalize();
+
+  const clearance = Math.max(0, Number(options.clearanceMm) || 0);
+  const step = Math.max(10, Number(options.gridStepMm) || 250);
+  const probeStep = Math.max(10, Math.min(step / 4, 50));
+  const startDistance = Math.max(25, clearance);
+  const maxDistance = Math.max(2500, startDistance + step * 10);
+
+  const directions = [normal, normal.clone().multiplyScalar(-1)];
+  let best = null;
+
+  for (let directionIndex = 0; directionIndex < directions.length; directionIndex++) {
+    const direction = directions[directionIndex];
+    for (let distance = startDistance; distance <= maxDistance; distance += probeStep) {
+      const point = {
+        x: base.x + direction.x * distance,
+        y: base.y + direction.y * distance,
+        z: base.z + direction.z * distance
+      };
+      if (!pointInsideObstacle3D(point, obstacles, clearance)) {
+        if (!best || distance < best.distance || (distance === best.distance && directionIndex === 0)) {
+          best = { point, distance, directionIndex };
+        }
+        break;
+      }
+    }
+  }
+
+  if (best) return { point:best.point, warning:null, distance_mm:best.distance };
+
+  const fallbackDistance = maxDistance;
+  return {
+    point:{
+      x:base.x + normal.x * fallbackDistance,
+      y:base.y + normal.y * fallbackDistance,
+      z:base.z + normal.z * fallbackDistance
+    },
+    warning:'Could not find a full clearance standoff from the selected surface; maximum standoff distance was used.',
+    distance_mm:fallbackDistance
+  };
+}
+
+// Tiny local vector helper keeps the routing module independent of the Three.js runtime.
+function THREEVector3Shim(x, y, z) {
+  this.x = Number(x) || 0;
+  this.y = Number(y) || 0;
+  this.z = Number(z) || 0;
+}
+THREEVector3Shim.prototype.lengthSq = function() {
+  return this.x*this.x + this.y*this.y + this.z*this.z;
+};
+THREEVector3Shim.prototype.set = function(x,y,z) {
+  this.x=x; this.y=y; this.z=z; return this;
+};
+THREEVector3Shim.prototype.normalize = function() {
+  const len = Math.sqrt(this.lengthSq());
+  if (len > 1e-12) { this.x/=len; this.y/=len; this.z/=len; }
+  return this;
+};
+THREEVector3Shim.prototype.clone = function() {
+  return new THREEVector3Shim(this.x,this.y,this.z);
+};
+THREEVector3Shim.prototype.multiplyScalar = function(v) {
+  this.x*=v; this.y*=v; this.z*=v; return this;
+};
+
+function findGridPath3D(start, goal, obstacles, options, reuseCells) {
   const baseStep = Math.max(50, Number(options.gridStepMm) || 250);
-  const paddingMm = Math.max(baseStep * 4, Number(options.routingPaddingMm) || 1500);
-  const maxCells = Math.max(2500, Number(options.maxGridCells) || 40000);
-  const adapted = adaptGridStep(start, goal, obstacles, baseStep, maxCells, paddingMm);
+  const paddingMm = Math.max(baseStep * 4, Number(options.routingPaddingMm) || 1000);
+  const maxCells = Math.max(10000, Number(options.maxGridCells) || 120000);
+  const adapted = adaptGridStep3D(start, goal, obstacles, baseStep, maxCells, paddingMm);
   const step = adapted.step;
   const bounds = adapted.bounds;
 
   const startCell = {
     ix: Math.round(start.x / step),
+    iy: Math.round(start.y / step),
     iz: Math.round(start.z / step)
   };
   const goalCell = {
     ix: Math.round(goal.x / step),
+    iy: Math.round(goal.y / step),
     iz: Math.round(goal.z / step)
   };
 
-  const blocked = buildBlockedSet(obstacles, step, bounds, Number(options.clearanceMm) || 0);
-  removeEndpointBlocks(blocked, startCell, goalCell);
+  const blocked = buildBlockedSet3D(obstacles, step, bounds, Number(options.clearanceMm) || 0);
+  removeEndpointBlocks3D(blocked, startCell, goalCell);
 
   const turnPenalty = step * Math.max(0, Number(options.turnPenaltyRatio) || 0.04);
+  const verticalPenalty = step * Math.max(0, Number(options.verticalPenaltyRatio) || 0.02);
   const reuseBonus = Math.min(0.8, Math.max(0, Number(options.reuseBonus) || 0.45));
 
   const open = new MinHeap();
   const cameFrom = new Map();
   const gScore = new Map();
-  const startCellState = makeCell(startCell.ix, startCell.iz, -1);
-  const startKey = cellKey(startCellState);
+  const startState = makeCell3D(startCell.ix, startCell.iy, startCell.iz, -1);
+  const startKey = cellKey3D(startState);
   gScore.set(startKey, 0);
-  open.push({ ix:startCellState.ix, iz:startCellState.iz, dir:-1, g:0, f:distanceXZ(
-    {x:start.ix * step, z:start.iz * step},
-    {x:goalCell.ix * step, z:goalCell.iz * step}
-  ) });
+  open.push({
+    ix:startState.ix, iy:startState.iy, iz:startState.iz, dir:-1, g:0,
+    f:manhattanDistance3D(
+      {x:startCell.ix*step,y:startCell.iy*step,z:startCell.iz*step},
+      {x:goalCell.ix*step,y:goalCell.iy*step,z:goalCell.iz*step}
+    )
+  });
 
   const directions = [
-    { x: 1, z: 0, dir: 0 },
-    { x: 0, z: 1, dir: 1 },
-    { x: -1, z: 0, dir: 2 },
-    { x: 0, z: -1, dir: 3 }
+    {x:1,y:0,z:0,dir:0},
+    {x:0,y:1,z:0,dir:1},
+    {x:0,y:0,z:1,dir:2},
+    {x:-1,y:0,z:0,dir:3},
+    {x:0,y:-1,z:0,dir:4},
+    {x:0,y:0,z:-1,dir:5}
   ];
 
   const closed = new Set();
   let goalState = null;
   let iterations = 0;
-  const maxIterations = maxCells * 8;
+  const maxIterations = Math.max(20000, maxCells * 12);
 
   while (open.length && iterations++ < maxIterations) {
     const current = open.pop();
-    const currentCellKey = cellKey(current);
-    if (closed.has(currentCellKey)) continue;
+    const currentKey = cellKey3D(current);
+    if (closed.has(currentKey)) continue;
 
-    if (current.ix === goalCell.ix && current.iz === goalCell.iz) {
+    if (
+      current.ix === goalCell.ix &&
+      current.iy === goalCell.iy &&
+      current.iz === goalCell.iz
+    ) {
       goalState = current;
       break;
     }
 
-    closed.add(currentCellKey);
+    closed.add(currentKey);
 
     for (let i = 0; i < directions.length; i++) {
       const stepDir = directions[i];
       const nx = current.ix + stepDir.x;
+      const ny = current.iy + stepDir.y;
       const nz = current.iz + stepDir.z;
-      if (!cellInsideBounds(nx, nz, bounds)) continue;
+      if (!cellInsideBounds3D(nx, ny, nz, bounds)) continue;
 
-      const nextKey2d = pointKey(nx, nz);
-      if (blocked.has(nextKey2d)) continue;
+      const nextKey3d = pointKey3D(nx, ny, nz);
+      if (blocked.has(nextKey3d)) continue;
 
-      const next = makeCell(nx, nz, stepDir.dir);
-      const nextKey = cellKey(next);
+      const next = makeCell3D(nx, ny, nz, stepDir.dir);
+      const nextKey = cellKey3D(next);
       if (closed.has(nextKey)) continue;
 
       let moveCost = step;
+      if (stepDir.dir === 1 || stepDir.dir === 4) moveCost += verticalPenalty;
       if (current.dir >= 0 && current.dir !== stepDir.dir) moveCost += turnPenalty;
-      if (reuseCells && reuseCells.has(nextKey2d)) moveCost *= (1 - reuseBonus);
+      if (reuseCells && reuseCells.has(nextKey3d)) moveCost *= (1 - reuseBonus);
 
       const tentative = current.g + moveCost;
       const previousBest = gScore.get(nextKey);
       if (previousBest != null && tentative >= previousBest) continue;
 
       gScore.set(nextKey, tentative);
-      cameFrom.set(nextKey, makeCell(current.ix, current.iz, current.dir));
+      cameFrom.set(
+        nextKey,
+        makeCell3D(current.ix, current.iy, current.iz, current.dir)
+      );
 
-      const heuristic = distanceXZ(
-        {x:nx * step, z:nz * step},
-        {x:goalCell.ix * step, z:goalCell.iz * step}
+      const heuristic = manhattanDistance3D(
+        {x:nx*step,y:ny*step,z:nz*step},
+        {x:goalCell.ix*step,y:goalCell.iy*step,z:goalCell.iz*step}
       );
       open.push({
-        ix:nx,
-        iz:nz,
-        dir:stepDir.dir,
+        ix:nx, iy:ny, iz:nz, dir:stepDir.dir,
         g:tentative,
         f:tentative + heuristic
       });
@@ -250,38 +375,28 @@ function findHorizontalGridPath(start, goal, obstacles, options, reuseCells) {
   }
 
   if (!goalState) {
-    const directA = [
-      {x:start.x, z:start.z},
-      {x:goal.x, z:start.z},
-      {x:goal.x, z:goal.z}
-    ];
-    const directB = [
-      {x:start.x, z:start.z},
-      {x:start.x, z:goal.z},
-      {x:goal.x, z:goal.z}
-    ];
-    const lenA = distanceXZ(directA[0], directA[1]) + distanceXZ(directA[1], directA[2]);
-    const lenB = distanceXZ(directB[0], directB[1]) + distanceXZ(directB[1], directB[2]);
-    const fallback = lenA <= lenB ? directA : directB;
     return {
       step,
-      points: fallback.map(function(p){ return {x:p.x, y:start.y, z:p.z}; }),
-      fallback: true,
-      warning: 'No obstacle-free routing-grid path was found; direct rectilinear fallback was used.'
+      points:[
+        {x:start.x,y:start.y,z:start.z},
+        {x:goal.x,y:goal.y,z:goal.z}
+      ],
+      fallback:true,
+      warning:'No obstacle-free 3D routing-grid path was found; a direct fallback was returned.'
     };
   }
 
-  const cells = reconstructPath(cameFrom, goalState);
+  const cells = reconstructPath3D(cameFrom, goalState);
   const points = cells.map(function(cell) {
     return {
-      x: cell.ix * step,
-      y: start.y,
-      z: cell.iz * step
+      x:cell.ix * step,
+      y:cell.iy * step,
+      z:cell.iz * step
     };
   });
 
-  points[0] = { x:start.x, y:start.y, z:start.z };
-  points[points.length - 1] = { x:goal.x, y:goal.y, z:goal.z };
+  points[0] = {x:start.x,y:start.y,z:start.z};
+  points[points.length - 1] = {x:goal.x,y:goal.y,z:goal.z};
 
   const compressed = [];
   points.forEach(function(point) {
@@ -289,8 +404,13 @@ function findHorizontalGridPath(start, goal, obstacles, options, reuseCells) {
       compressed.push(point);
       return;
     }
+
     const previous = compressed[compressed.length - 1];
-    if (Math.abs(point.x - previous.x) < 0.001 && Math.abs(point.z - previous.z) < 0.001) return;
+    if (
+      Math.abs(point.x - previous.x) < 0.001 &&
+      Math.abs(point.y - previous.y) < 0.001 &&
+      Math.abs(point.z - previous.z) < 0.001
+    ) return;
 
     if (compressed.length >= 2) {
       const before = compressed[compressed.length - 2];
@@ -299,31 +419,33 @@ function findHorizontalGridPath(start, goal, obstacles, options, reuseCells) {
         return;
       }
     }
+
     compressed.push(point);
   });
 
-  return { step, points:compressed, fallback:false, warning:null };
+  return {step, points:compressed, fallback:false, warning:null};
 }
 
-function buildCablePoints(equipment, panel, horizontalPoints, trayElevationMm) {
+function buildCablePoints(equipment, panel, routingStart, routingGoal, routedPoints) {
   const source = clonePoint(equipment.anchor.point);
   const target = clonePoint(panel.anchor.point);
-  const sourceTray = { x:source.x, y:trayElevationMm, z:source.z };
-  const targetTray = { x:target.x, y:trayElevationMm, z:target.z };
+  const points = [source];
 
-  const points = [];
-  points.push(source);
-  if (Math.abs(source.y - trayElevationMm) > 0.01) points.push(sourceTray);
+  function pushDistinct(point) {
+    const candidate = clonePoint(point);
+    const previous = points[points.length - 1];
+    if (
+      Math.abs(candidate.x - previous.x) < 0.001 &&
+      Math.abs(candidate.y - previous.y) < 0.001 &&
+      Math.abs(candidate.z - previous.z) < 0.001
+    ) return;
+    points.push(candidate);
+  }
 
-  horizontalPoints.forEach(function(point, index) {
-    if (!index && points.length && Math.abs(points[points.length - 1].x - point.x) < 0.001 && Math.abs(points[points.length - 1].z - point.z) < 0.001) {
-      return;
-    }
-    points.push({x:point.x, y:trayElevationMm, z:point.z});
-  });
-
-  if (Math.abs(target.y - trayElevationMm) > 0.01) points.push(targetTray);
-  points.push(target);
+  pushDistinct(routingStart);
+  (routedPoints || []).forEach(pushDistinct);
+  pushDistinct(routingGoal);
+  pushDistinct(target);
 
   const compressed = [];
   points.forEach(function(point) {
@@ -331,11 +453,14 @@ function buildCablePoints(equipment, panel, horizontalPoints, trayElevationMm) {
       compressed.push(point);
       return;
     }
+
     const previous = compressed[compressed.length - 1];
-    const dx = Math.abs(point.x - previous.x);
-    const dy = Math.abs(point.y - previous.y);
-    const dz = Math.abs(point.z - previous.z);
-    if (dx < 0.001 && dy < 0.001 && dz < 0.001) return;
+    if (
+      Math.abs(point.x - previous.x) < 0.001 &&
+      Math.abs(point.y - previous.y) < 0.001 &&
+      Math.abs(point.z - previous.z) < 0.001
+    ) return;
+
     if (compressed.length >= 2) {
       const before = compressed[compressed.length - 2];
       if (areCollinearForward(before, previous, point)) {
@@ -343,24 +468,11 @@ function buildCablePoints(equipment, panel, horizontalPoints, trayElevationMm) {
         return;
       }
     }
+
     compressed.push(point);
   });
-  return compressed;
-}
 
-function areCollinearForward(a, b, c) {
-  const abx = b.x - a.x;
-  const aby = b.y - a.y;
-  const abz = b.z - a.z;
-  const bcx = c.x - b.x;
-  const bcy = c.y - b.y;
-  const bcz = c.z - b.z;
-  const crossX = aby * bcz - abz * bcy;
-  const crossY = abz * bcx - abx * bcz;
-  const crossZ = abx * bcy - aby * bcx;
-  const crossSq = crossX * crossX + crossY * crossY + crossZ * crossZ;
-  const dot = abx * bcx + aby * bcy + abz * bcz;
-  return crossSq < 1e-6 && dot >= -1e-6;
+  return compressed;
 }
 
 function segmentAxis(a, b) {
@@ -663,11 +775,11 @@ function buildEquipmentResults(cablePlans, trayRuns) {
   });
 }
 
+
 export function routeEngineeringNetwork(inputs) {
   const equipment = Array.isArray(inputs && inputs.equipment) ? inputs.equipment : [];
   const panels = Array.isArray(inputs && inputs.panels) ? inputs.panels : [];
   const options = {
-    routingElevationMm:Number(inputs && inputs.options && inputs.options.routingElevationMm) || 3000,
     gridStepMm:Number(inputs && inputs.options && inputs.options.gridStepMm) || 250,
     clearanceMm:Number.isFinite(Number(inputs && inputs.options && inputs.options.clearanceMm))
       ? Number(inputs.options.clearanceMm)
@@ -676,13 +788,14 @@ export function routeEngineeringNetwork(inputs) {
     trayHeightMm:Number(inputs && inputs.options && inputs.options.trayHeightMm) || 100,
     mainMinCables:Number(inputs && inputs.options && inputs.options.mainMinCables) || 2,
     turnPenaltyRatio:Number(inputs && inputs.options && inputs.options.turnPenaltyRatio) || 0.04,
+    verticalPenaltyRatio:Number(inputs && inputs.options && inputs.options.verticalPenaltyRatio) || 0.02,
     reuseBonus:Number(inputs && inputs.options && inputs.options.reuseBonus) || 0.45,
     traySideMarginMm:Number(inputs && inputs.options && inputs.options.traySideMarginMm) || 25,
     standardTrayWidthsMm:inputs && inputs.options && Array.isArray(inputs.options.standardTrayWidthsMm)
       ? inputs.options.standardTrayWidthsMm
       : [100,150,200,300,400,500,600,800,1000,1200],
-    maxGridCells:Number(inputs && inputs.options && inputs.options.maxGridCells) || 40000,
-    routingPaddingMm:Number(inputs && inputs.options && inputs.options.routingPaddingMm) || 1500
+    maxGridCells:Number(inputs && inputs.options && inputs.options.maxGridCells) || 120000,
+    routingPaddingMm:Number(inputs && inputs.options && inputs.options.routingPaddingMm) || 1000
   };
 
   const obstacles = Array.isArray(inputs && inputs.obstacles) ? inputs.obstacles : [];
@@ -691,49 +804,83 @@ export function routeEngineeringNetwork(inputs) {
 
   const groups = new Map();
   const warnings = [];
+
   equipment.forEach(function(item) {
     const panel = validPanels.get(item.destination_panel_id);
     if (!panel) {
       warnings.push(item.name + ': no valid destination panel selected.');
       return;
     }
-    const group = groups.get(panel.id) || { panel, equipment:[] };
+
+    const group = groups.get(panel.id) || {panel, equipment:[]};
     group.equipment.push(item);
-    groups.set(panel.id,group);
+    groups.set(panel.id, group);
   });
 
   const cablePlans = [];
+
   groups.forEach(function(group) {
-    const ordered = group.equipment.slice().sort(function(a,b) {
-      return distanceXZ(b.anchor.point, group.panel.anchor.point) -
-        distanceXZ(a.anchor.point, group.panel.anchor.point);
+    const panelStandoff = resolveAnchorStandoff(group.panel.anchor, obstacles, options);
+    if (panelStandoff.warning) warnings.push(group.panel.name + ': ' + panelStandoff.warning);
+
+    const prepared = group.equipment.map(function(item) {
+      const equipmentStandoff = resolveAnchorStandoff(item.anchor, obstacles, options);
+      if (equipmentStandoff.warning) warnings.push(item.name + ': ' + equipmentStandoff.warning);
+
+      return {
+        equipment:item,
+        start:equipmentStandoff.point,
+        startDistanceMm:equipmentStandoff.distance_mm
+      };
+    });
+
+    prepared.sort(function(a,b){
+      return manhattanDistance3D(b.start, panelStandoff.point) -
+        manhattanDistance3D(a.start, panelStandoff.point);
     });
 
     const reuseCells = new Set();
 
-    ordered.forEach(function(item) {
-      const horizontalStart = {x:item.anchor.point.x,y:options.routingElevationMm,z:item.anchor.point.z};
-      const horizontalGoal = {x:group.panel.anchor.point.x,y:options.routingElevationMm,z:group.panel.anchor.point.z};
-      const horizontal = findHorizontalGridPath(
-        horizontalStart,
-        horizontalGoal,
+    prepared.forEach(function(entry) {
+      const horizontal = findGridPath3D(
+        entry.start,
+        panelStandoff.point,
         obstacles,
         options,
         reuseCells
       );
 
-      horizontal.points.forEach(function(point) {
-        reuseCells.add(pointKey(Math.round(point.x / horizontal.step), Math.round(point.z / horizontal.step)));
+      horizontal.points.forEach(function(point){
+        const adaptedStep = horizontal.step || options.gridStepMm;
+        reuseCells.add(pointKey3D(
+          Math.round(point.x / adaptedStep),
+          Math.round(point.y / adaptedStep),
+          Math.round(point.z / adaptedStep)
+        ));
       });
 
-      const points = buildCablePoints(item, group.panel, horizontal.points, options.routingElevationMm);
+      const points = buildCablePoints(
+        entry.equipment,
+        group.panel,
+        entry.start,
+        panelStandoff.point,
+        horizontal.points
+      );
+
+      if (horizontal.warning) warnings.push(
+        entry.equipment.name + ' → ' + group.panel.name + ': ' + horizontal.warning
+      );
+
       cablePlans.push({
-        equipment:item,
+        equipment:entry.equipment,
         panel:group.panel,
         cable:{
-          name:item.cable_name || 'Power Cable',
-          diameter_mm:Number(item.cable_diameter_mm) || 0
+          name:entry.equipment.cable_name || 'Power Cable',
+          diameter_mm:Number(entry.equipment.cable_diameter_mm) || 0
         },
+        routing_start:entry.start,
+        routing_goal:panelStandoff.point,
+        standoff_distance_mm:Math.max(entry.startDistanceMm, panelStandoff.distance_mm),
         points,
         warning:horizontal.warning || null,
         fallback:!!horizontal.fallback
@@ -747,6 +894,7 @@ export function routeEngineeringNetwork(inputs) {
 
   let totalCableLengthM = 0;
   cablePlans.forEach(function(plan){ totalCableLengthM += routeLengthMeters(plan.points); });
+
   let totalTrayLengthM = 0;
   trayRuns.forEach(function(run){ totalTrayLengthM += run.length_m; });
 
@@ -758,6 +906,9 @@ export function routeEngineeringNetwork(inputs) {
     warnings,
     total_cable_length_m:totalCableLengthM,
     total_tray_length_m:totalTrayLengthM,
-    options
+    options:{
+      ...options,
+      routing_method:'3d_clearance_astar'
+    }
   };
 }
