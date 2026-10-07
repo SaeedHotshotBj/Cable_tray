@@ -1778,7 +1778,16 @@ function resolveNetworkRoutingLevels(panelPoint, options, levelLimit) {
         alignedStart - Math.max(1000, Number(options.maxBodyDistanceMm) || 1500),
         Number(panelPoint.y) || alignedStart
       );
-  const limit = Math.max(1, Number(levelLimit) || 4);
+
+  // A non-positive limit means "search every usable horizontal level".
+  // The previous fixed three-level search could reject a perfectly valid
+  // internal tray corridor simply because the upper structural braces occupied
+  // the first three candidate elevations.
+  const requestedLimit = Number(levelLimit);
+  const limit = requestedLimit > 0
+    ? Math.max(1, Math.floor(requestedLimit))
+    : Infinity;
+
   const levels = [];
 
   for (let y = alignedStart; y >= lowerY - 0.001 && levels.length < limit; y -= step) {
@@ -1920,7 +1929,14 @@ function buildPanelMultiTerminalNetwork(group, prepared, panelStandoff, obstacle
       manhattanDistance3D(b.start, panelStandoff.point);
   });
 
-  const levelLimit = Math.max(1, Number(options.networkLevelAttempts) || 3);
+  const requestedLevelAttempts = Number(options.networkLevelAttempts);
+  const levels = resolveNetworkRoutingLevels(
+    panelStandoff.point,
+    routeOptions,
+    Number.isFinite(requestedLevelAttempts) && requestedLevelAttempts > 0
+      ? requestedLevelAttempts
+      : 0
+  );
   const seedLimit = Math.min(
     seedCandidates.length,
     Math.max(1, Number(options.networkSeedAttempts) || 4)
@@ -1929,13 +1945,7 @@ function buildPanelMultiTerminalNetwork(group, prepared, panelStandoff, obstacle
 
   let bestPartial = null;
 
-  for (let levelIndex = 0; levelIndex < levelLimit; levelIndex++) {
-    const levels = resolveNetworkRoutingLevels(
-      panelStandoff.point,
-      routeOptions,
-      levelLimit
-    );
-    if (levelIndex >= levels.length) break;
+  for (let levelIndex = 0; levelIndex < levels.length; levelIndex++) {
     const routingY = levels[levelIndex];
     const panelHighPoint = pointAtRoutingY(panelStandoff.point, routingY);
 
@@ -2179,7 +2189,9 @@ export function routeEngineeringNetwork(inputs) {
       : [100,150,200,300,400,500,600,800,1000,1200],
     maxGridCells:Number(inputs && inputs.options && inputs.options.maxGridCells) || 120000,
     routingPaddingMm:Number(inputs && inputs.options && inputs.options.routingPaddingMm) || 1000,
-    networkLevelAttempts:Number(inputs && inputs.options && inputs.options.networkLevelAttempts) || 3,
+    networkLevelAttempts:Number.isFinite(Number(inputs && inputs.options && inputs.options.networkLevelAttempts))
+      ? Number(inputs.options.networkLevelAttempts)
+      : 0,
     networkSeedAttempts:Number(inputs && inputs.options && inputs.options.networkSeedAttempts) || 4,
     networkAttachmentCandidateLimit:Number(inputs && inputs.options && inputs.options.networkAttachmentCandidateLimit) || 4,
     exactCollisionRouting:inputs && inputs.options && inputs.options.exactCollisionRouting === true,
