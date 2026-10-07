@@ -498,13 +498,15 @@ function buildTrayRuns(cablePlans, options) {
       fixed2 = rounded(segment.start.y);
     }
 
+    const cableSetKey = Array.from(segment.cableIds).sort().join(',');
     const lineKey = [
       segment.axis,
       fixed1,
       fixed2,
       segment.classification,
       segment.width_mm,
-      segment.height_mm
+      segment.height_mm,
+      cableSetKey
     ].join('|');
 
     const entry = grouped.get(lineKey) || {
