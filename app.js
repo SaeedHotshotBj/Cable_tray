@@ -99,6 +99,10 @@ const engineeringMarkerRoot = new THREE.Group();
 engineeringMarkerRoot.name = 'EngineeringAnnotations';
 scene.add(engineeringMarkerRoot);
 state.engineeringMarkerRoot = engineeringMarkerRoot;
+const engineeringAccessoryRoot = new THREE.Group();
+engineeringAccessoryRoot.name = 'EngineeringTrayAccessories';
+scene.add(engineeringAccessoryRoot);
+state.engineeringAccessoryRoot = engineeringAccessoryRoot;
 const raycaster = new THREE.Raycaster();
 const engineeringCollisionRaycaster = new THREE.Raycaster();
 engineeringCollisionRaycaster.firstHitOnly = true;
@@ -910,6 +914,10 @@ function runEngineeringAutoDesign() {
     mainCorridorTurnPenaltyRatio:100,
     turnPenaltyRatio:20,
     preferredYPenaltyRatio:3,
+    structurePrimaryAxis:routingBounds
+      ? (Math.abs(routingBounds.maxX - routingBounds.minX) >= Math.abs(routingBounds.maxZ - routingBounds.minZ) ? 'x' : 'z')
+      : null,
+    structureAxisPenaltyRatio:0.35,
     routingPaddingMm:Math.max(
       1000,
       (Number.isFinite(Number($('autoTrayMaxDistance').value)) ? Number($('autoTrayMaxDistance').value) : 1500) +
@@ -928,20 +936,57 @@ function runEngineeringAutoDesign() {
   state.modelRoots.forEach(function(root){ root.updateMatrixWorld(true); });
 
   const obstacles = collectRoutingObstacles(settings.clearanceMm);
-  const routingOptions = {
+  let routingOptions = {
     ...settings,
     exactCollisionRouting:true,
     segmentClear:engineeringSegmentClear,
     standoffClear:engineeringStandoffClear,
-    pointBodyDistanceClear:engineeringPointBodyDistanceClear
+    pointBodyDistanceClear:engineeringPointBodyDistanceClear,
+    allowOutsideRouting:false
   };
 
-  const report = routeEngineeringNetwork({
+  let report=routeEngineeringNetwork({
     equipment:state.equipment,
     panels:state.panels,
     obstacles:obstacles,
     options:routingOptions
   });
+
+  const routedEquipmentIds=new Set(report.cable_plans.map(function(plan){ return plan.equipment.id; }));
+  const missingInternalRoutes=state.equipment.filter(function(item){ return !routedEquipmentIds.has(item.id); });
+
+  if(missingInternalRoutes.length){
+    const names=missingInternalRoutes.slice(0,3).map(function(item){ return item.name; }).join(', ');
+    const more=missingInternalRoutes.length>3?' ...':'';
+    const allowOutside=confirm(
+      'No completely internal tray route could be found for: '+names+more+
+      '.\\n\\nDo you want to allow the tray route to leave the model envelope?'
+    );
+
+    if(!allowOutside){
+      state.lastEngineeringReport=report;
+      status('Engineering routing stopped: internal route required');
+      toast('No internal route was found. No outside route was created.');
+      return;
+    }
+
+    routingOptions={...routingOptions,routingBounds:null,allowOutsideRouting:true};
+    report=routeEngineeringNetwork({
+      equipment:state.equipment,
+      panels:state.panels,
+      obstacles:obstacles,
+      options:routingOptions
+    });
+
+    const reroutedIds=new Set(report.cable_plans.map(function(plan){ return plan.equipment.id; }));
+    const stillMissing=state.equipment.filter(function(item){ return !reroutedIds.has(item.id); });
+    if(stillMissing.length){
+      state.lastEngineeringReport=report;
+      status('Engineering routing completed with unresolved routes');
+      toast('No valid route was found for all equipment, even with outside routing allowed.');
+      return;
+    }
+  }
 
   const beforeHistory = captureDesignState();
   removeEngineeringGeneratedRoutes();
@@ -968,6 +1013,11 @@ function runEngineeringAutoDesign() {
 
   report.tray_runs.forEach(function(run, index){
     const label = run.classification === 'main' ? 'Main Tray' : 'Branch Tray';
+    const matchingPlan = report.cable_plans.find(function(plan){
+      return run.cable_ids && run.cable_ids.indexOf(plan.equipment.id) >= 0;
+    });
+    const matchingPanel = matchingPlan ? panelById.get(matchingPlan.panel.id) : null;
+
     createRoute('tray', run.points, {
       pointsAreMm:true,
       name:label + ' ' + run.width_mm + 'x' + run.height_mm + ' #' + (index + 1),
@@ -978,8 +1028,19 @@ function runEngineeringAutoDesign() {
       engineering_generated:true,
       engineering_classification:run.classification,
       engineering_cable_ids:run.cable_ids || [],
-      engineering_network_id:run.cable_ids && run.cable_ids.length
-        ? 'network-' + (report.cable_plans.find(function(plan){ return run.cable_ids.indexOf(plan.equipment.id) >= 0; }) || {}).panel?.id
+      engineering_network_id:matchingPlan ? 'network-' + matchingPlan.panel.id : null,
+      engineering_panel_id:matchingPanel ? matchingPanel.id : null,
+      engineering_panel_standoff_mm:matchingPlan ? {
+        x:matchingPlan.routing_goal.x,
+        y:matchingPlan.routing_goal.y,
+        z:matchingPlan.routing_goal.z
+      } : null,
+      engineering_panel_anchor_mm:matchingPanel && matchingPanel.anchor && matchingPanel.anchor.point
+        ? {
+            x:matchingPanel.anchor.point.x,
+            y:matchingPanel.anchor.point.y,
+            z:matchingPanel.anchor.point.z
+          }
         : null
     });
   });
@@ -1921,19 +1982,178 @@ function updateRouteSelectionVisuals() {
   });
 }
 
+function disposeEngineeringAccessoryRoot() {
+  const root = state.engineeringAccessoryRoot;
+  if (!root) return;
+  root.traverse(function(node){
+    if (node.geometry && typeof node.geometry.dispose === 'function') node.geometry.dispose();
+    const materials = Array.isArray(node.material) ? node.material : (node.material ? [node.material] : []);
+    materials.forEach(function(material){
+      if (material.map && typeof material.map.dispose === 'function') material.map.dispose();
+      if (typeof material.dispose === 'function') material.dispose();
+    });
+  });
+  root.clear();
+}
+
+function taperedTrayPartGeometry(start, end, startWidthMm, endWidthMm, startHeightMm, endHeightMm, startSideOffsetMm, endSideOffsetMm, startVerticalOffsetMm, endVerticalOffsetMm, referenceUp) {
+  const direction = end.clone().sub(start);
+  if (direction.lengthSq() < 1e-10) return null;
+  direction.normalize();
+
+  let up = (referenceUp || new THREE.Vector3(0,1,0)).clone().normalize();
+  if (Math.abs(up.dot(direction)) > 0.999) {
+    up = Math.abs(direction.z) < 0.999 ? new THREE.Vector3(0,0,1) : new THREE.Vector3(1,0,0);
+  }
+
+  let side = up.clone().cross(direction);
+  if (side.lengthSq() < 1e-12) return null;
+  side.normalize();
+  up = direction.clone().cross(side).normalize();
+
+  function ring(center, widthMm, heightMm, sideOffsetMm, verticalOffsetMm) {
+    const halfWidth = mmToScene(widthMm) * 0.5;
+    const halfHeight = mmToScene(heightMm) * 0.5;
+    const centerOffset = center.clone()
+      .add(side.clone().multiplyScalar(mmToScene(sideOffsetMm || 0)))
+      .add(up.clone().multiplyScalar(mmToScene(verticalOffsetMm || 0)));
+    const sideVector = side.clone().multiplyScalar(halfWidth);
+    const upVector = up.clone().multiplyScalar(halfHeight);
+    return [
+      centerOffset.clone().sub(sideVector).sub(upVector),
+      centerOffset.clone().add(sideVector).sub(upVector),
+      centerOffset.clone().add(sideVector).add(upVector),
+      centerOffset.clone().sub(sideVector).add(upVector)
+    ];
+  }
+
+  const startRing = ring(start,startWidthMm,startHeightMm,startSideOffsetMm,startVerticalOffsetMm);
+  const endRing = ring(end,endWidthMm,endHeightMm,endSideOffsetMm,endVerticalOffsetMm);
+  const positions = [];
+  startRing.concat(endRing).forEach(function(point){ positions.push(point.x,point.y,point.z); });
+  const indices = [0,1,2,0,2,3,4,6,5,4,7,6];
+  for (let i=0;i<4;i++) {
+    const j=(i+1)%4;
+    indices.push(i,j,4+j,i,4+j,4+i);
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position',new THREE.Float32BufferAttribute(positions,3));
+  geometry.setIndex(indices);
+  geometry.computeVertexNormals();
+  return geometry;
+}
+
+function addTaperedTrayTransition(root,start,end,startWidth,endWidth,height,objectId) {
+  const direction=end.clone().sub(start).normalize();
+  const referenceUp=Math.abs(direction.y)>0.999?new THREE.Vector3(0,0,1):new THREE.Vector3(0,1,0);
+  const material=new THREE.MeshStandardMaterial({color:0xb6bec7,roughness:0.28,metalness:0.78});
+  const sheet=Math.max(2,Math.min(startWidth,endWidth,height)*0.035);
+  const lipWidth=Math.max(sheet*1.5,Math.min(Math.min(startWidth,endWidth),80)*0.045);
+
+  function addPart(geometry) {
+    if(!geometry) return;
+    const mesh=new THREE.Mesh(geometry,material);
+    mesh.userData.objectId=objectId||null;
+    root.add(mesh);
+  }
+
+  addPart(taperedTrayPartGeometry(start,end,startWidth,endWidth,sheet,sheet,0,0,
+    -height*0.5+sheet*0.5,-height*0.5+sheet*0.5,referenceUp));
+
+  [-1,1].forEach(function(sign){
+    addPart(taperedTrayPartGeometry(start,end,sheet,sheet,height,height,
+      sign*(startWidth*0.5-sheet*0.5),sign*(endWidth*0.5-sheet*0.5),0,0,referenceUp));
+    addPart(taperedTrayPartGeometry(start,end,lipWidth,lipWidth,Math.max(sheet,lipWidth*0.65),Math.max(sheet,lipWidth*0.65),
+      sign*(startWidth*0.5+lipWidth*0.5),sign*(endWidth*0.5+lipWidth*0.5),
+      height*0.5-lipWidth*0.35,height*0.5-lipWidth*0.35,referenceUp));
+    addPart(taperedTrayPartGeometry(start,end,Math.max(sheet*1.8,lipWidth*0.9),Math.max(sheet*1.8,lipWidth*0.9),sheet,sheet,
+      sign*(startWidth*0.5-sheet*0.5),sign*(endWidth*0.5-sheet*0.5),
+      -height*0.5+sheet*1.45,-height*0.5+sheet*1.45,referenceUp));
+  });
+}
+
+function endpointData(route) {
+  if (!route || !Array.isArray(route.points) || route.points.length < 2) return [];
+  return [
+    {point:route.points[0],inward:route.points[1].clone().sub(route.points[0]).normalize()},
+    {point:route.points[route.points.length-1],inward:route.points[route.points.length-2].clone().sub(route.points[route.points.length-1]).normalize()}
+  ];
+}
+
+function rebuildEngineeringAccessories() {
+  disposeEngineeringAccessoryRoot();
+  const root=state.engineeringAccessoryRoot;
+  if(!root) return;
+
+  const trays=state.objects.filter(function(o){ return o.kind==='tray' && o.engineering_generated; });
+  const networkTrays=new Map();
+
+  trays.forEach(function(route){
+    const key=route.engineering_network_id;
+    if(!key || !route.engineering_panel_anchor_mm || !route.engineering_panel_standoff_mm) return;
+    const current=networkTrays.get(key);
+    if(!current || route.engineering_classification==='main') networkTrays.set(key,route);
+  });
+
+  networkTrays.forEach(function(route){
+    const a=route.engineering_panel_anchor_mm;
+    const s=route.engineering_panel_standoff_mm;
+    const anchor=new THREE.Vector3(mmToScene(a.x),mmToScene(a.y),mmToScene(a.z));
+    const standoff=new THREE.Vector3(mmToScene(s.x),mmToScene(s.y),mmToScene(s.z));
+    if(anchor.distanceTo(standoff)>=0.01) {
+      addTaperedTrayTransition(root,standoff,anchor,Number(route.width_mm)||100,Number(route.width_mm)||100,Number(route.height_mm)||100,route.id);
+    }
+  });
+
+  const seen=new Set();
+  for(let i=0;i<trays.length;i++){
+    for(let j=i+1;j<trays.length;j++){
+      const a=trays[i], b=trays[j];
+      if(!a.engineering_network_id || a.engineering_network_id!==b.engineering_network_id) continue;
+      if(Math.abs(Number(a.width_mm)-Number(b.width_mm))<0.001) continue;
+
+      const endsA=endpointData(a), endsB=endpointData(b);
+      let match=null;
+      endsA.forEach(function(ea){
+        endsB.forEach(function(eb){
+          const d=ea.point.distanceTo(eb.point);
+          if(d<0.05 && (!match || d<match.distance)) match={a:ea,b:eb,distance:d};
+        });
+      });
+      if(!match || match.a.inward.dot(match.b.inward)>-0.95) continue;
+
+      const pairKey=[a.id,b.id].sort().join('|');
+      if(seen.has(pairKey)) continue;
+      seen.add(pairKey);
+
+      const aSegment=a.points[a.points.length-1].distanceTo(a.points[a.points.length-2]);
+      const bSegment=b.points[b.points.length-1].distanceTo(b.points[b.points.length-2]);
+      const aLen=Math.min(mmToScene(200),aSegment*0.35);
+      const bLen=Math.min(mmToScene(200),bSegment*0.35);
+      if(aLen<0.05 || bLen<0.05) continue;
+
+      const start=match.a.point.clone().add(match.a.inward.clone().multiplyScalar(aLen));
+      const end=match.b.point.clone().add(match.b.inward.clone().multiplyScalar(bLen));
+      addTaperedTrayTransition(root,start,end,Number(a.width_mm)||100,Number(b.width_mm)||100,
+        Math.min(Number(a.height_mm)||100,Number(b.height_mm)||100),a.id);
+    }
+  }
+}
+
 function rebuildRoutes() {
   state.routeRoots.forEach(function(root){
-    if (root.parent) root.parent.remove(root);
+    if(root.parent) root.parent.remove(root);
   });
   state.routeRoots.clear();
 
-  state.objects
-    .filter(function(o){ return o.kind === 'cable' || o.kind === 'tray'; })
-    .forEach(function(o){
-      const g = routeVisual(o);
-      scene.add(g);
-      state.routeRoots.set(o.id, g);
-    });
+  state.objects.filter(function(o){ return o.kind==='cable' || o.kind==='tray'; }).forEach(function(o){
+    const g=routeVisual(o);
+    scene.add(g);
+    state.routeRoots.set(o.id,g);
+  });
+
+  rebuildEngineeringAccessories();
 }
 function finishRoute() {
   if (!state.drawing) return;
