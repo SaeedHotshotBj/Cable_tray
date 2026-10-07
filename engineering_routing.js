@@ -526,7 +526,6 @@ function resolveAnchorStandoff(anchor, obstacles, options) {
 
   for (let directionIndex = 0; directionIndex < uniqueDirections.length; directionIndex++) {
     const direction = uniqueDirections[directionIndex];
-    const direction = directions[directionIndex];
     for (let distance = startDistance; distance <= maxCenterlineDistance + 0.001; distance += probeStep) {
       const clampedDistance = Math.min(distance, maxCenterlineDistance);
       const point = {
