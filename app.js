@@ -1135,7 +1135,20 @@ async function runEngineeringAutoDesign() {
 
     const keys = [];
     for (let i = 1; i < run.points.length; i++) {
-      keys.push(routeSegmentKey(run.points[i - 1], run.points[i]));
+      const start = run.points[i - 1];
+      const end = run.points[i];
+      keys.push(routeSegmentKey(
+        {
+          x:mmToScene(start.x),
+          y:mmToScene(start.y),
+          z:mmToScene(start.z)
+        },
+        {
+          x:mmToScene(end.x),
+          y:mmToScene(end.y),
+          z:mmToScene(end.z)
+        }
+      ));
     }
 
     run.cable_ids.forEach(function(cableId){
