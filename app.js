@@ -3370,7 +3370,7 @@ async function importModelFile(fileUrl, displayName, format, nativeFormat, sourc
 function projectData() {
   return {
     schema: 'cable-tray-project',
-    schema_version: 2,
+    schema_version: 3,
     project: state.project,
     model_sources: state.sourceModels.map(function(m){
       const root = state.modelRoots.get(m.id);
