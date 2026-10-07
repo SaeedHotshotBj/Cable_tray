@@ -10,7 +10,7 @@ import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.j
 import { routeEngineeringNetwork } from './engineering_routing.js';
 
 const state = {
-  project: { name: 'Factory Cable Routing', units: 'mm', schema_version: 1 },
+  project: { name: 'Factory Cable Routing', units: 'mm', schema_version: 3 },
   objects: [], selected: null, tool: 'select', drawing: null,
   modelRoots: new Map(), routeRoots: new Map(), measureStart: null,
   sourceModels: [], dragging: null, skipClick: false,
@@ -377,9 +377,22 @@ function syncEngineeringAnchors() {
   state.panels.forEach(resolveEngineeringAnchor);
 }
 
+function disposeEngineeringMarkers() {
+  if (!state.engineeringMarkerRoot) return;
+  state.engineeringMarkerRoot.traverse(function(node){
+    if (node.geometry && typeof node.geometry.dispose === 'function') node.geometry.dispose();
+    const materials = Array.isArray(node.material) ? node.material : (node.material ? [node.material] : []);
+    materials.forEach(function(material){
+      if (material.map && typeof material.map.dispose === 'function') material.map.dispose();
+      if (typeof material.dispose === 'function') material.dispose();
+    });
+  });
+  state.engineeringMarkerRoot.clear();
+}
+
 function rebuildEngineeringMarkers() {
   if (!state.engineeringMarkerRoot) return;
-  state.engineeringMarkerRoot.clear();
+  disposeEngineeringMarkers();
   syncEngineeringAnchors();
 
   state.panels.forEach(function(panel){
@@ -589,7 +602,7 @@ function runEngineeringAutoDesign() {
   const settings = {
     routingElevationMm:Number($('defaultElevation').value) || 3000,
     gridStepMm:Number($('routingGridStep').value) || 250,
-    clearanceMm:Number($('autoTrayClearance').value) || 100,
+    clearanceMm:Number.isFinite(Number($('autoTrayClearance').value)) ? Number($('autoTrayClearance').value) : 100,
     fillLimitPercent:Number($('fillLimit').value) || 80,
     mainMinCables:Number($('mainTrayMinCables').value) || 2,
     trayHeightMm:Number($('defaultTrayHeight').value) || 100,
@@ -826,13 +839,14 @@ $('unitSystem').addEventListener('change', function(e){ state.project.units = e.
     state.engineeringSettings = {
       ...state.engineeringSettings,
       gridStepMm:Number($('routingGridStep').value) || 250,
-      clearanceMm:Number($('autoTrayClearance').value) || 100,
+      clearanceMm:Number.isFinite(Number($('autoTrayClearance').value)) ? Number($('autoTrayClearance').value) : 100,
       mainMinCables:Number($('mainTrayMinCables').value) || 2,
       standardTrayWidthsMm:parseNumberList($('autoTrayStandards').value)
     };
   });
 });
 $('autoDesignBtn').addEventListener('click', runEngineeringAutoDesign);
+$('exportEngineeringBoqBtn').addEventListener('click', exportEngineeringBoq);
 
 function pointerRay(event) {
   const r = renderer.domElement.getBoundingClientRect();
@@ -3719,6 +3733,78 @@ $('exportBoqBtn').addEventListener('click', function(){
   const csv = rows.map(function(r){ return r.map(function(v){ return '"' + String(v).replace(/"/g,'""') + '"'; }).join(','); }).join('\\n');
   const blob = new Blob([csv], { type:'text/csv;charset=utf-8' }); const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = slug(state.project.name) + '_BOQ.csv'; a.click(); URL.revokeObjectURL(a.href);
 });
+
+
+function exportEngineeringBoq() {
+  const panelMap = new Map(state.panels.map(function(panel){ return [panel.id, panel]; }));
+  const rows = [
+    ['Cable Schedule'],
+    ['Load','Cable','Destination Panel','Length (m)']
+  ];
+
+  state.objects
+    .filter(function(o){ return o.kind === 'cable' && o.engineering_generated; })
+    .map(function(route){
+      const item = state.equipment.find(function(eq){ return eq.id === route.engineering_equipment_id; });
+      const panel = route.engineering_panel_id ? panelMap.get(route.engineering_panel_id) : null;
+      return {
+        load:item ? item.name : route.name,
+        cable:item ? item.cable_name : route.specification,
+        panel:panel ? panel.name : '',
+        length:lengthOf(route.points)
+      };
+    })
+    .sort(function(a,b){ return a.load.localeCompare(b.load); })
+    .forEach(function(row){
+      rows.push([row.load,row.cable,row.panel,row.length.toFixed(3)]);
+    });
+
+  rows.push([]);
+  rows.push(['Tray Schedule']);
+  rows.push(['Class','Size (W×H mm)','Length (m)']);
+
+  const trayGrouped = new Map();
+  state.objects
+    .filter(function(o){ return o.kind === 'tray' && o.engineering_generated; })
+    .forEach(function(route){
+      const classification = route.engineering_classification || 'branch';
+      const key = classification + '|' + route.width_mm + '|' + route.height_mm;
+      const entry = trayGrouped.get(key) || {
+        classification,
+        width_mm:Number(route.width_mm) || 0,
+        height_mm:Number(route.height_mm) || 0,
+        length_m:0
+      };
+      entry.length_m += lengthOf(route.points);
+      trayGrouped.set(key, entry);
+    });
+
+  Array.from(trayGrouped.values())
+    .sort(function(a,b){
+      return a.classification.localeCompare(b.classification) ||
+        a.width_mm - b.width_mm ||
+        a.height_mm - b.height_mm;
+    })
+    .forEach(function(row){
+      rows.push([
+        row.classification === 'main' ? 'Main' : 'Branch',
+        row.width_mm + ' × ' + row.height_mm,
+        row.length_m.toFixed(3)
+      ]);
+    });
+
+  const csv = rows.map(function(row){
+    return row.map(function(value){
+      return '"' + String(value == null ? '' : value).replace(/"/g,'""') + '"';
+    }).join(',');
+  }).join('\n');
+
+  downloadBlob(
+    new Blob([csv], { type:'text/csv;charset=utf-8' }),
+    slug(state.project.name) + '_Engineering_BOQ.csv'
+  );
+  toast('Engineering BOQ exported');
+}
 
 function syncEngineeringSettingsInputs() {
   const settings = state.engineeringSettings || {};
