@@ -112,8 +112,9 @@ function adaptGridStep3D(start, goal, obstacles, baseStep, maxCells, paddingMm) 
   };
 }
 
-function buildBlockedSet3D(obstacles, step, bounds, clearanceMm) {
+function buildBlockedSet3D(obstacles, step, bounds, clearanceMm, useAabbObstacles) {
   const blocked = new Set();
+  if (useAabbObstacles === false) return blocked;
   const clearance = Math.max(0, Number(clearanceMm) || 0);
   const effectiveClearance = clearance + step * 0.55;
 
@@ -201,7 +202,28 @@ function segmentClear3D(a, b, obstacles, clearanceMm) {
   return true;
 }
 
-function bridgePath3D(from, to, obstacles, clearanceMm) {
+function segmentClearForRouting(a, b, obstacles, options) {
+  if (typeof options.segmentClear === 'function') {
+    return options.segmentClear(
+      a,
+      b,
+      {
+        trayWidthMm:Number(options.routingTrayWidthMm) || Number(options.trayHeightMm) || 100,
+        trayHeightMm:Number(options.trayHeightMm) || 100,
+        bodyClearanceMm:Number(options.clearanceMm) || 0
+      }
+    );
+  }
+
+  return segmentClear3D(
+    a,
+    b,
+    obstacles,
+    Number(options.centerlineClearanceMm) || Number(options.clearanceMm) || 0
+  );
+}
+
+function bridgePath3D(from, to, obstacles, options) {
   const axes = ['x','y','z'];
   const permutations = [
     ['x','y','z'], ['x','z','y'],
@@ -225,7 +247,7 @@ function bridgePath3D(from, to, obstacles, clearanceMm) {
         Math.abs(target.z - cursor.z) < 0.001
       ) return;
 
-      if (!segmentClear3D(cursor, target, obstacles, clearanceMm)) {
+      if (!segmentClearForRouting(cursor, target, obstacles, options)) {
         valid = false;
         return;
       }
@@ -242,7 +264,7 @@ function bridgePath3D(from, to, obstacles, clearanceMm) {
   return best;
 }
 
-function findBridgeCell(point, otherPoint, blocked, bounds, step, obstacles, clearanceMm) {
+function findBridgeCell(point, otherPoint, blocked, bounds, step, obstacles, options) {
   const center = {
     ix:Math.round(point.x / step),
     iy:Math.round(point.y / step),
@@ -260,7 +282,7 @@ function findBridgeCell(point, otherPoint, blocked, bounds, step, obstacles, cle
         if (blocked.has(pointKey3D(ix, iy, iz))) continue;
 
         const target = {x:ix*step,y:iy*step,z:iz*step};
-        const bridge = bridgePath3D(point, target, obstacles, clearanceMm);
+        const bridge = bridgePath3D(point, target, obstacles, options);
         if (!bridge) continue;
 
         let length = 0;
@@ -333,7 +355,7 @@ function resolveAnchorStandoff(anchor, obstacles, options) {
   if (normal.lengthSq() < 1e-12) normal.set(0, 1, 0);
   normal.normalize();
 
-  const clearance = Math.max(0, Number(options.clearanceMm) || 0);
+  const clearance = Math.max(0, Number(options.centerlineClearanceMm) || Number(options.clearanceMm) || 0);
   const step = Math.max(10, Number(options.gridStepMm) || 250);
   const probeStep = Math.max(10, Math.min(step / 4, 50));
   const startDistance = Math.max(25, clearance);
@@ -350,7 +372,19 @@ function resolveAnchorStandoff(anchor, obstacles, options) {
         y: base.y + direction.y * distance,
         z: base.z + direction.z * distance
       };
-      if (!pointInsideObstacle3D(point, obstacles, clearance)) {
+      const pointClear = typeof options.standoffClear === 'function'
+        ? options.standoffClear(
+          base,
+          point,
+          {
+            trayWidthMm:Number(options.routingTrayWidthMm) || Number(options.trayHeightMm) || 100,
+            trayHeightMm:Number(options.trayHeightMm) || 100,
+            bodyClearanceMm:Number(options.clearanceMm) || 0
+          }
+        )
+        : !pointInsideObstacle3D(point, obstacles, Number(options.centerlineClearanceMm) || clearance);
+
+      if (pointClear) {
         if (!best || distance < best.distance || (distance === best.distance && directionIndex === 0)) {
           best = { point, distance, directionIndex };
         }
@@ -405,12 +439,19 @@ function findGridPath3D(start, goal, obstacles, options, reuseCells) {
   const step = adapted.step;
   const bounds = adapted.bounds;
 
-  const blocked = buildBlockedSet3D(obstacles, step, bounds, Number(options.clearanceMm) || 0);
+  const blocked = buildBlockedSet3D(
+    obstacles,
+    step,
+    bounds,
+    Number(options.centerlineClearanceMm) || Number(options.clearanceMm) || 0,
+    options.exactCollisionRouting !== true
+  );
+
   const startBridge = findBridgeCell(
-    start, goal, blocked, bounds, step, obstacles, Number(options.clearanceMm) || 0
+    start, goal, blocked, bounds, step, obstacles, options
   );
   const goalBridge = findBridgeCell(
-    goal, start, blocked, bounds, step, obstacles, Number(options.clearanceMm) || 0
+    goal, start, blocked, bounds, step, obstacles, options
   );
 
   if (!startBridge || !goalBridge) {
@@ -486,6 +527,18 @@ function findGridPath3D(start, goal, obstacles, options, reuseCells) {
 
       const nextKey3d = pointKey3D(nx, ny, nz);
       if (blocked.has(nextKey3d)) continue;
+
+      const currentPoint = {
+        x:current.ix * step,
+        y:current.iy * step,
+        z:current.iz * step
+      };
+      const nextPoint = {
+        x:nx * step,
+        y:ny * step,
+        z:nz * step
+      };
+      if (!segmentClearForRouting(currentPoint, nextPoint, obstacles, options)) continue;
 
       const next = makeCell3D(nx, ny, nz, stepDir.dir);
       const nextKey = cellKey3D(next);
@@ -984,7 +1037,14 @@ export function routeEngineeringNetwork(inputs) {
       ? inputs.options.standardTrayWidthsMm
       : [100,150,200,300,400,500,600,800,1000,1200],
     maxGridCells:Number(inputs && inputs.options && inputs.options.maxGridCells) || 120000,
-    routingPaddingMm:Number(inputs && inputs.options && inputs.options.routingPaddingMm) || 1000
+    routingPaddingMm:Number(inputs && inputs.options && inputs.options.routingPaddingMm) || 1000,
+    exactCollisionRouting:inputs && inputs.options && inputs.options.exactCollisionRouting === true,
+    segmentClear:inputs && inputs.options && typeof inputs.options.segmentClear === 'function'
+      ? inputs.options.segmentClear
+      : null,
+    standoffClear:inputs && inputs.options && typeof inputs.options.standoffClear === 'function'
+      ? inputs.options.standoffClear
+      : null
   };
 
   const obstacles = Array.isArray(inputs && inputs.obstacles) ? inputs.obstacles : [];
@@ -1027,7 +1087,8 @@ export function routeEngineeringNetwork(inputs) {
     // network may require.
     const routeOptions = {
       ...options,
-      clearanceMm:options.clearanceMm + planningTrayWidth / 2
+      centerlineClearanceMm:options.clearanceMm + planningTrayWidth / 2,
+      routingTrayWidthMm:planningTrayWidth
     };
 
     const panelStandoff = resolveAnchorStandoff(group.panel.anchor, obstacles, routeOptions);
