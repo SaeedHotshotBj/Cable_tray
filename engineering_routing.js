@@ -313,6 +313,10 @@ function findBridgeCell(point, otherPoint, blocked, bounds, step, obstacles, opt
         if (blocked.has(pointKey3D(ix, iy, iz))) continue;
 
         const target = {x:ix*step,y:iy*step,z:iz*step};
+        if (
+          Number.isFinite(Number(options.fixedRoutingY)) &&
+          Math.abs(target.y - Number(options.fixedRoutingY)) > 0.001
+        ) continue;
         if (!pointWithinBodyDistanceForRouting(target, options)) continue;
         const bridge = bridgePath3D(point, target, obstacles, options);
         if (!bridge) continue;
@@ -763,6 +767,11 @@ function findGridPath3D(start, goal, obstacles, options, reuseCells) {
 
     for (let i = 0; i < directions.length; i++) {
       const stepDir = directions[i];
+      if (
+        Number.isFinite(Number(options.fixedRoutingY)) &&
+        (stepDir.dir === 1 || stepDir.dir === 4)
+      ) continue;
+
       const nx = current.ix + stepDir.x;
       const ny = current.iy + stepDir.y;
       const nz = current.iz + stepDir.z;
@@ -1183,11 +1192,24 @@ function buildTrayRuns(cablePlans, options, mainCorridors) {
       height_mm:Number(corridor.height_mm) || Number(options.trayHeightMm) || 100,
       cable_ids:Array.isArray(corridor.cable_ids) ? corridor.cable_ids.slice() : [],
       points,
-      length_m:routeLengthMeters(points)
+      main_level_y_mm:Number(corridor.main_level_y_mm)
     };
   }).filter(function(run){ return run.points.length > 1; });
 
-  return stitchTrayRuns(runs.concat(sharedMainRuns));
+  const panelConnectionRuns = (mainCorridors || []).map(function(corridor){
+    const points = (corridor.panel_drop_points || []).map(clonePoint);
+    return {
+      classification:'branch',
+      width_mm:Number(corridor.width_mm) || Number(options.trayHeightMm) || 100,
+      height_mm:Number(corridor.height_mm) || Number(options.trayHeightMm) || 100,
+      cable_ids:[],
+      points,
+      length_m:routeLengthMeters(points),
+      panel_connection:true
+    };
+  }).filter(function(run){ return run.points.length > 1; });
+
+  return stitchTrayRuns(runs.concat(sharedMainRuns).concat(panelConnectionRuns));
 }
 
 function trayRunNodeKey(point) {
@@ -1538,6 +1560,45 @@ function pointAtRoutingY(point, y) {
   };
 }
 
+function resolveCommonMainRoutingY(points, options) {
+  if (!Array.isArray(points) || !points.length) return null;
+
+  const bounds = normalizeRoutingBounds(options.routingBounds, options);
+  if (!bounds || bounds.valid === false) return null;
+
+  const step = Math.max(50, Number(options.gridStepMm) || 100);
+  const trayHeight = Math.max(1, Number(options.trayHeightMm) || 100);
+  const clearance = Math.max(0, Number(options.clearanceMm) || 0);
+  const safetyGap = Math.max(0, Number(options.ceilingSafetyGapMm) || 0);
+  const ceilingY = Number(options.ceilingY);
+  if (!Number.isFinite(ceilingY)) return null;
+
+  const desiredY = Math.min(
+    ceilingY - safetyGap - trayHeight / 2 - clearance,
+    bounds.maxY
+  );
+
+  const alignedStart = Math.floor(desiredY / step) * step;
+  const alignedMin = Math.ceil(bounds.minY / step) * step;
+
+  for (let y = alignedStart; y >= alignedMin - 0.001; y -= step) {
+    let valid = true;
+
+    for (let i = 0; i < points.length; i++) {
+      const point = pointAtRoutingY(points[i], y);
+      if (!pointWithinRoutingBounds(point, options) ||
+          !pointWithinBodyDistanceForRouting(point, options)) {
+        valid = false;
+        break;
+      }
+    }
+
+    if (valid) return y;
+  }
+
+  return null;
+}
+
 
 export function routeEngineeringNetwork(inputs) {
   const equipment = Array.isArray(inputs && inputs.equipment) ? inputs.equipment : [];
@@ -1781,13 +1842,22 @@ export function routeEngineeringNetwork(inputs) {
         manhattanDistance3D(b.start, panelStandoff.point);
     }).slice(0, candidateLimit);
 
+    const commonMainRoutingY = resolveCommonMainRoutingY(
+      [panelStandoff.point].concat(prepared.map(function(entry){ return entry.start; })),
+      routeOptions
+    );
+
+    if (!Number.isFinite(commonMainRoutingY)) {
+      warnings.push(
+        group.panel.name + ': no common horizontal main-tray level was found inside the model envelope.'
+      );
+      return;
+    }
+
     let bestCorridor = null;
     candidates.forEach(function(candidate){
-      const routingY = resolveHighestValidRoutingY(
-        [panelStandoff.point, candidate.start],
-        routeOptions
-      );
-      if (routingY == null) return;
+      const routingY = commonMainRoutingY;
+      if (!Number.isFinite(routingY)) return;
 
       const corridorResult = findGridPath3D(
         pointAtRoutingY(panelStandoff.point, routingY),
@@ -1795,6 +1865,7 @@ export function routeEngineeringNetwork(inputs) {
         obstacles,
         {
           ...routeOptions,
+          fixedRoutingY:routingY,
           preferredRoutingY:routingY,
           routeTurnPenaltyRatio:Math.max(
             Number(options.turnPenaltyRatio) || 20,
@@ -1842,6 +1913,7 @@ export function routeEngineeringNetwork(inputs) {
     const corridorPoints = bestCorridor.points;
     const mainRouteOptions = {
       ...routeOptions,
+      fixedRoutingY:bestCorridor.routingY,
       preferredRoutingY:bestCorridor.routingY,
       routeTurnPenaltyRatio:Math.max(
         Number(options.turnPenaltyRatio) || 20,
@@ -1865,18 +1937,16 @@ export function routeEngineeringNetwork(inputs) {
       return;
     }
 
-    const mainTrayPoints = panelDrop.points
-      .slice()
-      .reverse()
-      .concat(corridorPoints.slice(1))
-      .map(clonePoint);
+    const mainTrayPoints = corridorPoints.map(clonePoint);
 
     mainCorridors.push({
       panel_id:group.panel.id,
       width_mm:planningTrayWidth,
       height_mm:Number(options.trayHeightMm) || 100,
       cable_ids:prepared.map(function(entry){ return entry.equipment.id; }),
-      points:mainTrayPoints
+      points:mainTrayPoints,
+      panel_drop_points:panelDrop.points.map(clonePoint),
+      main_level_y_mm:bestCorridor.routingY
     });
 
     const reuseCells = new Set();
