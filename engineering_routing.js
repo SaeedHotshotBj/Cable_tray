@@ -487,6 +487,21 @@ function findGridPath3D(start, goal, obstacles, options, reuseCells) {
 
       let moveCost = step;
       if (stepDir.dir === 1 || stepDir.dir === 4) moveCost += verticalPenalty;
+
+      const currentWorldY = current.iy * step;
+      const nextWorldY = ny * step;
+      const lowY = Math.min(start.y, goal.y);
+      const highY = Math.max(start.y, goal.y);
+      const outsideY = nextWorldY < lowY
+        ? lowY - nextWorldY
+        : nextWorldY > highY
+          ? nextWorldY - highY
+          : 0;
+      moveCost += outsideY * Math.max(
+        0,
+        Number(options.verticalRangePenaltyRatio) || 0
+      );
+
       if (current.dir >= 0 && current.dir !== stepDir.dir) moveCost += turnPenalty;
       if (reuseCells && reuseCells.has(nextKey3d)) moveCost *= (1 - reuseBonus);
 
@@ -956,6 +971,7 @@ export function routeEngineeringNetwork(inputs) {
     mainMinCables:Number(inputs && inputs.options && inputs.options.mainMinCables) || 2,
     turnPenaltyRatio:Number(inputs && inputs.options && inputs.options.turnPenaltyRatio) || 0.04,
     verticalPenaltyRatio:Number(inputs && inputs.options && inputs.options.verticalPenaltyRatio) || 0.02,
+    verticalRangePenaltyRatio:Number(inputs && inputs.options && inputs.options.verticalRangePenaltyRatio) || 0.25,
     reuseBonus:Number(inputs && inputs.options && inputs.options.reuseBonus) || 0.45,
     traySideMarginMm:Number(inputs && inputs.options && inputs.options.traySideMarginMm) || 25,
     standardTrayWidthsMm:inputs && inputs.options && Array.isArray(inputs.options.standardTrayWidthsMm)
@@ -987,11 +1003,32 @@ export function routeEngineeringNetwork(inputs) {
   const cablePlans = [];
 
   groups.forEach(function(group) {
-    const panelStandoff = resolveAnchorStandoff(group.panel.anchor, obstacles, options);
+    let planningCableDiameterSum = 0;
+    group.equipment.forEach(function(item){
+      planningCableDiameterSum += Math.max(0, Number(item.cable_diameter_mm) || 0);
+    });
+
+    const planningRequiredWidth = (
+      planningCableDiameterSum + options.traySideMarginMm * 2
+    ) / (options.fillLimitPercent / 100);
+    const planningTrayWidth = chooseTrayWidth(
+      planningRequiredWidth,
+      options.standardTrayWidthsMm
+    );
+
+    // The user's Body Clearance is an edge-to-body requirement for the tray.
+    // Routing centerlines therefore reserve half of the largest tray that this
+    // network may require.
+    const routeOptions = {
+      ...options,
+      clearanceMm:options.clearanceMm + planningTrayWidth / 2
+    };
+
+    const panelStandoff = resolveAnchorStandoff(group.panel.anchor, obstacles, routeOptions);
     if (panelStandoff.warning) warnings.push(group.panel.name + ': ' + panelStandoff.warning);
 
     const prepared = group.equipment.map(function(item) {
-      const equipmentStandoff = resolveAnchorStandoff(item.anchor, obstacles, options);
+      const equipmentStandoff = resolveAnchorStandoff(item.anchor, obstacles, routeOptions);
       if (equipmentStandoff.warning) warnings.push(item.name + ': ' + equipmentStandoff.warning);
 
       return {
@@ -1013,7 +1050,7 @@ export function routeEngineeringNetwork(inputs) {
         entry.start,
         panelStandoff.point,
         obstacles,
-        options,
+        routeOptions,
         reuseCells
       );
 
@@ -1048,6 +1085,7 @@ export function routeEngineeringNetwork(inputs) {
         routing_start:entry.start,
         routing_goal:panelStandoff.point,
         standoff_distance_mm:Math.max(entry.startDistanceMm, panelStandoff.distance_mm),
+        planning_tray_width_mm:planningTrayWidth,
         points,
         warning:horizontal.warning || null,
         fallback:!!horizontal.fallback
