@@ -842,14 +842,19 @@ function runEngineeringAutoDesign() {
     fillLimitPercent:Number($('fillLimit').value) || 80,
     mainMinCables:Number($('mainTrayMinCables').value) || 2,
     trayHeightMm:Number($('defaultTrayHeight').value) || 100,
+    mainCorridorTurnPenaltyRatio:0.75,
+    routingPaddingMm:Math.max(
+      1000,
+      (Number.isFinite(Number($('autoTrayMaxDistance').value)) ? Number($('autoTrayMaxDistance').value) : 1500) +
+      2 * (Number($('routingGridStep').value) || 100)
+    ),
     traySideMarginMm:25,
     standardTrayWidthsMm:parseNumberList($('autoTrayStandards').value),
     turnPenaltyRatio:0.04,
     verticalPenaltyRatio:0.02,
     verticalRangePenaltyRatio:0.25,
     reuseBonus:0.45,
-    maxGridCells:120000,
-    routingPaddingMm:1000
+    maxGridCells:120000
   };
 
   engineeringCollisionCache = new Map();
