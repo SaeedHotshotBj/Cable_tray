@@ -1137,7 +1137,128 @@ function buildTrayRuns(cablePlans, options, mainCorridors) {
     };
   }).filter(function(run){ return run.points.length > 1; });
 
-  return runs.concat(sharedMainRuns);
+  return stitchTrayRuns(runs.concat(sharedMainRuns));
+}
+
+function trayRunNodeKey(point) {
+  return rounded(point.x) + '|' + rounded(point.y) + '|' + rounded(point.z);
+}
+
+function mergeTrayRunPath(items) {
+  if (!items || !items.length) return null;
+
+  const first = items[0];
+  const cableIds = new Set();
+  const points = [];
+
+  items.forEach(function(item, index){
+    (item.cable_ids || []).forEach(function(id){ cableIds.add(id); });
+    (item.points || []).forEach(function(point, pointIndex){
+      if (index === 0 || pointIndex > 0) points.push(clonePoint(point));
+    });
+  });
+
+  return {
+    classification:first.classification,
+    width_mm:first.width_mm,
+    height_mm:first.height_mm,
+    cable_ids:Array.from(cableIds),
+    points,
+    length_m:routeLengthMeters(points)
+  };
+}
+
+function stitchTrayRuns(runs) {
+  const source = (runs || []).filter(function(run){
+    return run && Array.isArray(run.points) && run.points.length >= 2;
+  });
+  const grouped = new Map();
+
+  source.forEach(function(run){
+    const groupKey = [
+      run.classification || 'branch',
+      Number(run.width_mm) || 0,
+      Number(run.height_mm) || 0
+    ].join('|');
+
+    if (!grouped.has(groupKey)) grouped.set(groupKey, []);
+    grouped.get(groupKey).push({
+      run,
+      startKey:trayRunNodeKey(run.points[0]),
+      endKey:trayRunNodeKey(run.points[run.points.length - 1])
+    });
+  });
+
+  const result = [];
+
+  grouped.forEach(function(group){
+    const adjacency = new Map();
+
+    group.forEach(function(item, localIndex){
+      item.localIndex = localIndex;
+      [item.startKey, item.endKey].forEach(function(key){
+        if (!adjacency.has(key)) adjacency.set(key, new Set());
+        adjacency.get(key).add(localIndex);
+      });
+    });
+
+    function degree(key) {
+      const set = adjacency.get(key);
+      return set ? set.size : 0;
+    }
+
+    const visited = new Set();
+
+    function walk(startIndex, startNode) {
+      const pathItems = [];
+      let currentIndex = startIndex;
+      let currentNode = startNode;
+
+      while (currentIndex != null && !visited.has(currentIndex)) {
+        const item = group[currentIndex];
+        let oriented = item.run.points.map(clonePoint);
+        if (item.endKey === currentNode) oriented.reverse();
+
+        pathItems.push({
+          ...item.run,
+          points:oriented
+        });
+        visited.add(currentIndex);
+
+        const nextNode = trayRunNodeKey(oriented[oriented.length - 1]);
+        if (degree(nextNode) !== 2) break;
+
+        const candidates = Array.from(adjacency.get(nextNode) || [])
+          .filter(function(index){ return !visited.has(index); });
+        if (!candidates.length) break;
+
+        currentNode = nextNode;
+        currentIndex = candidates[0];
+      }
+
+      return mergeTrayRunPath(pathItems);
+    }
+
+    group.forEach(function(item, localIndex){
+      if (visited.has(localIndex)) return;
+
+      const endpoints = [item.startKey, item.endKey]
+        .filter(function(key){ return degree(key) !== 2; });
+
+      if (!endpoints.length) return;
+
+      const merged = walk(localIndex, endpoints[0]);
+      if (merged && merged.points.length >= 2) result.push(merged);
+    });
+
+    group.forEach(function(item, localIndex){
+      if (visited.has(localIndex)) return;
+      const merged = walk(localIndex, item.startKey);
+      if (merged && merged.points.length >= 2) result.push(merged);
+    });
+  });
+
+  return result;
 }
 
 function makeTrayRun(group, range) {
