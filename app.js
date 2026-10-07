@@ -93,7 +93,10 @@ state.engineeringMarkerRoot = engineeringMarkerRoot;
 const raycaster = new THREE.Raycaster();
 const engineeringCollisionRaycaster = new THREE.Raycaster();
 engineeringCollisionRaycaster.firstHitOnly = true;
+THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
+THREE.BufferGeometry.prototype.disposeBoundsTree = disposeBoundsTree;
 const mouse = new THREE.Vector2();
+let engineeringCollisionCache = new Map();
 
 function resize() {
   const r = viewport.getBoundingClientRect();
@@ -532,6 +535,165 @@ function parseNumberList(value) {
   return String(value || '').split(',').map(function(v){ return Number(v.trim()); }).filter(function(v){ return Number.isFinite(v) && v > 0; });
 }
 
+function prepareEngineeringCollisionGeometry(root) {
+  if (!root) return;
+  root.traverse(function(node){
+    if (!node.isMesh || !node.geometry) return;
+    if (!node.geometry.boundsTree) node.geometry.computeBoundsTree();
+    node.raycast = acceleratedRaycast;
+  });
+}
+
+function disposeEngineeringCollisionGeometry(root) {
+  if (!root) return;
+  root.traverse(function(node){
+    if (!node.isMesh || !node.geometry || !node.geometry.boundsTree) return;
+    node.geometry.disposeBoundsTree();
+  });
+}
+
+function engineeringPointToScene(point) {
+  return new THREE.Vector3(
+    Number(point.x) / 10,
+    Number(point.y) / 10,
+    Number(point.z) / 10
+  );
+}
+
+function engineeringSegmentHitsModel(a, b) {
+  const start = engineeringPointToScene(a);
+  const end = engineeringPointToScene(b);
+  const direction = end.clone().sub(start);
+  const length = direction.length();
+  if (length < 1e-9) return false;
+  direction.multiplyScalar(1 / length);
+
+  const epsilon = Math.min(0.25, length * 0.25);
+  const origin = start.clone().add(direction.clone().multiplyScalar(epsilon));
+  const usableLength = length - epsilon * 2;
+  if (usableLength <= 1e-9) return false;
+
+  engineeringCollisionRaycaster.set(origin, direction);
+  engineeringCollisionRaycaster.near = 0;
+  engineeringCollisionRaycaster.far = usableLength;
+
+  const roots = Array.from(state.modelRoots.values());
+  if (!roots.length) return false;
+
+  for (let i = 0; i < roots.length; i++) {
+    roots[i].updateMatrixWorld(true);
+  }
+
+  const hits = engineeringCollisionRaycaster.intersectObject(
+    roots[0],
+    true
+  );
+
+  if (roots.length === 1) {
+    return hits.some(function(hit){
+      return hit && hit.distance > 0.01 && hit.distance < usableLength - 0.01;
+    });
+  }
+
+  // The common case is one imported model, but preserve support for multiple
+  // imported roots without changing routing semantics.
+  for (let i = 1; i < roots.length; i++) {
+    const more = engineeringCollisionRaycaster.intersectObject(roots[i], true);
+    if (more.some(function(hit){
+      return hit && hit.distance > 0.01 && hit.distance < usableLength - 0.01;
+    })) return true;
+  }
+
+  return hits.some(function(hit){
+    return hit && hit.distance > 0.01 && hit.distance < usableLength - 0.01;
+  });
+}
+
+function engineeringSegmentClear(a, b, context) {
+  const width = Math.max(1, Number(context && context.trayWidthMm) || 100);
+  const height = Math.max(1, Number(context && context.trayHeightMm) || 100);
+  const clearance = Math.max(0, Number(context && context.bodyClearanceMm) || 0);
+
+  const dx = Math.abs(Number(b.x) - Number(a.x));
+  const dy = Math.abs(Number(b.y) - Number(a.y));
+  const dz = Math.abs(Number(b.z) - Number(a.z));
+  if (dx < 0.001 && dy < 0.001 && dz < 0.001) return true;
+
+  const halfWidth = width / 2 + clearance;
+  const halfHeight = height / 2 + clearance;
+  let offsets;
+
+  if (dx >= dy && dx >= dz) {
+    const valuesY = [-halfHeight, 0, halfHeight];
+    const valuesZ = [-halfWidth, 0, halfWidth];
+    offsets = [];
+    valuesY.forEach(function(oy){
+      valuesZ.forEach(function(oz){
+        offsets.push({x:0,y:oy,z:oz});
+      });
+    });
+  } else if (dy >= dx && dy >= dz) {
+    const valuesX = [-halfWidth, 0, halfWidth];
+    const valuesZ = [-halfHeight, 0, halfHeight];
+    offsets = [];
+    valuesX.forEach(function(ox){
+      valuesZ.forEach(function(oz){
+        offsets.push({x:ox,y:0,z:oz});
+      });
+    });
+  } else {
+    const valuesX = [-halfWidth, 0, halfWidth];
+    const valuesY = [-halfHeight, 0, halfHeight];
+    offsets = [];
+    valuesX.forEach(function(ox){
+      valuesY.forEach(function(oy){
+        offsets.push({x:ox,y:oy,z:0});
+      });
+    });
+  }
+
+  for (let i = 0; i < offsets.length; i++) {
+    const offset = offsets[i];
+    const start = {
+      x:Number(a.x) + offset.x,
+      y:Number(a.y) + offset.y,
+      z:Number(a.z) + offset.z
+    };
+    const end = {
+      x:Number(b.x) + offset.x,
+      y:Number(b.y) + offset.y,
+      z:Number(b.z) + offset.z
+    };
+
+    const key = [
+      Math.round(start.x),
+      Math.round(start.y),
+      Math.round(start.z),
+      Math.round(end.x),
+      Math.round(end.y),
+      Math.round(end.z),
+      Math.round(width),
+      Math.round(height),
+      Math.round(clearance)
+    ].join('|');
+
+    if (engineeringCollisionCache.has(key)) {
+      if (!engineeringCollisionCache.get(key)) return false;
+      continue;
+    }
+
+    const clear = !engineeringSegmentHitsModel(start, end);
+    engineeringCollisionCache.set(key, clear);
+    if (!clear) return false;
+  }
+
+  return true;
+}
+
+function engineeringStandoffClear(base, point, context) {
+  return engineeringSegmentClear(base, point, context);
+}
+
 function collectRoutingObstacles(clearanceMm) {
   const obstacles = [];
   const unique = new Set();
@@ -636,12 +798,22 @@ function runEngineeringAutoDesign() {
     routingPaddingMm:1000
   };
 
+  engineeringCollisionCache = new Map();
+  state.modelRoots.forEach(function(root){ root.updateMatrixWorld(true); });
+
   const obstacles = collectRoutingObstacles(settings.clearanceMm);
+  const routingOptions = {
+    ...settings,
+    exactCollisionRouting:true,
+    segmentClear:engineeringSegmentClear,
+    standoffClear:engineeringStandoffClear
+  };
+
   const report = routeEngineeringNetwork({
     equipment:state.equipment,
     panels:state.panels,
     obstacles:obstacles,
-    options:settings
+    options:routingOptions
   });
 
   const beforeHistory = captureDesignState();
@@ -1810,7 +1982,11 @@ function deleteSelected() {
   const object = state.objects[idx];
   const beforeHistory = object.kind === 'cable' || object.kind === 'tray' ? captureDesignState() : null;
   const root = state.modelRoots.get(state.selected);
-  if (root) { scene.remove(root); state.modelRoots.delete(state.selected); }
+  if (root) {
+    disposeEngineeringCollisionGeometry(root);
+    scene.remove(root);
+    state.modelRoots.delete(state.selected);
+  }
   state.objects.splice(idx, 1);
   state.selected = null;
   if (beforeHistory) recordHistory(beforeHistory);
@@ -3365,6 +3541,8 @@ async function importModelFile(fileUrl, displayName, format, nativeFormat, sourc
         sceneMillimetersPerUnit: 10
       });
     }
+
+    prepareEngineeringCollisionGeometry(root);
 
     const objectId = id('model');
     root.userData.objectId = objectId;
