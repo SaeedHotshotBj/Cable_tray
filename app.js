@@ -574,9 +574,17 @@ function engineeringSegmentHitsModel(a, b, context) {
   const clearance = Math.max(0, Number(context && context.bodyClearanceMm) || 0);
 
   const direction = delta.clone().multiplyScalar(1 / length);
-  const endpointInset = Math.min(0.1, length * 0.2);
-  const aSafe = start.clone().add(direction.clone().multiplyScalar(endpointInset));
-  const bSafe = end.clone().add(direction.clone().multiplyScalar(-endpointInset));
+  const requestedStartIgnoreMm = Math.max(
+    0,
+    Number(context && context.ignoreStartMm) || 0
+  );
+  const startInsetScene = Math.min(
+    requestedStartIgnoreMm / 10,
+    length * 0.45
+  );
+  const endInsetScene = Math.min(0.1, length * 0.05);
+  const aSafe = start.clone().add(direction.clone().multiplyScalar(startInsetScene));
+  const bSafe = end.clone().add(direction.clone().multiplyScalar(-endInsetScene));
   if (aSafe.distanceTo(bSafe) <= 1e-9) return false;
 
   const halfWidthScene = (width / 2 + clearance) / 10;
@@ -657,6 +665,7 @@ function engineeringStandoffClear(base, point, context) {
   const width = Math.max(1, Number(context && context.trayWidthMm) || 100);
   const height = Math.max(1, Number(context && context.trayHeightMm) || 100);
   const clearance = Math.max(0, Number(context && context.bodyClearanceMm) || 0);
+  const minCenterlineDistance = Math.max(width, height) / 2 + clearance;
 
   const direction = new THREE.Vector3(
     Number(point.x) - Number(base.x),
@@ -667,20 +676,23 @@ function engineeringStandoffClear(base, point, context) {
   if (length < 1e-9) return true;
   direction.multiplyScalar(1 / length);
 
-  const safeOffset = Math.min(
-    length * 0.8,
-    Math.max(width, height) / 2 + clearance
-  );
-  const safeStart = {
-    x:Number(base.x) + direction.x * safeOffset,
-    y:Number(base.y) + direction.y * safeOffset,
-    z:Number(base.z) + direction.z * safeOffset
-  };
+  // The first part of a standoff starts on the host surface itself. That
+  // surface must not be mistaken for an obstruction. Start volume checking
+  // only after the tray has cleared its own cross-section + required clearance.
+  if (length <= minCenterlineDistance + 5) {
+    return engineeringPointBodyDistanceClear(point, {
+      trayWidthMm:width,
+      trayHeightMm:height,
+      bodyClearanceMm:clearance,
+      maxBodyDistanceMm:Number(context && context.maxBodyDistanceMm) || 0
+    });
+  }
 
-  return engineeringSegmentClear(safeStart, point, {
+  return engineeringSegmentClear(base, point, {
     trayWidthMm:width,
     trayHeightMm:height,
-    bodyClearanceMm:clearance
+    bodyClearanceMm:clearance,
+    ignoreStartMm:minCenterlineDistance + 5
   });
 }
 
