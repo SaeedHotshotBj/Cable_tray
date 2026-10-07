@@ -308,7 +308,9 @@ function setTool(tool) {
     model: 'Use Load Model for 3D, SolidWorks, AutoCAD DWG or DXF files.',
     measure: state.measureMode === 'surface'
       ? 'Surface to Surface: click two CAD/model surfaces to measure the shortest surface distance.'
-      : 'Point to Point: click two points on project geometry to measure the direct 3D distance.',
+      : state.measureMode === 'edge'
+        ? 'Edge Length: click directly on a visible model edge to measure its length.'
+        : 'Point to Point: click two points on project geometry to measure the direct 3D distance.',
     'auto-route': 'Select Cable or Tray, click as many route points as needed, then press Enter to create the route.'
   };
   $('toolHint').textContent = hint[tool] || '';
@@ -321,13 +323,21 @@ $('autoRouteType').addEventListener('change', function(){
   if (row) row.classList.toggle('hidden', state.tool !== 'auto-route' || this.value !== 'tray');
 });
 $('measureType').addEventListener('change', function(){
-  state.measureMode = this.value === 'surface' ? 'surface' : 'point';
+  state.measureMode = this.value === 'surface'
+    ? 'surface'
+    : (this.value === 'edge' ? 'edge' : 'point');
   state.measureStart = null;
   clearSurfaceSelectionVisuals();
-  status(state.measureMode === 'surface' ? 'Measure: select first surface' : 'Measure: select first point');
-  toast(state.measureMode === 'surface'
-    ? 'Measurement mode: Surface to Surface'
-    : 'Measurement mode: Point to Point');
+  status(
+    state.measureMode === 'surface'
+      ? 'Measure: select first surface'
+      : (state.measureMode === 'edge' ? 'Measure: select an edge' : 'Measure: select first point')
+  );
+  toast(
+    state.measureMode === 'surface'
+      ? 'Measurement mode: Surface to Surface'
+      : (state.measureMode === 'edge' ? 'Measurement mode: Edge Length' : 'Measurement mode: Point to Point')
+  );
 });
 $('projectName').addEventListener('input', function(e){ state.project.name = e.target.value; });
 $('unitSystem').addEventListener('change', function(e){ state.project.units = e.target.value; });
@@ -1097,6 +1107,11 @@ renderer.domElement.addEventListener('click', function(e){
     const target = measurementTargetFromEvent(e);
     if (!target) return;
 
+    if (state.measureMode === 'edge') {
+      addEdgeMeasurement(target);
+      return;
+    }
+
     const expectedKind = state.measureMode === 'surface' ? 'surface' : 'point';
     if (target.kind !== expectedKind) {
       toast(expectedKind === 'surface'
@@ -1418,6 +1433,15 @@ function measurementTargetFromEvent(event) {
     };
   }
 
+  if (state.measureMode === 'edge') {
+    const edge = edgeMeasurementTargetFromHit(hit, event, root);
+    if (!edge) {
+      toast('Click directly on a visible model edge');
+      return null;
+    }
+    return edge;
+  }
+
   const localPoint = root.worldToLocal(hit.point.clone());
   return {
     kind:'point',
@@ -1431,6 +1455,155 @@ function measurementTargetFromEvent(event) {
     localTriangle:null,
     object:hit.object,
     faceIndex:hit.faceIndex
+  };
+}
+
+function screenDistanceToSegment(point, a, b) {
+  const ab = b.clone().sub(a);
+  const denom = ab.lengthSq();
+  const t = denom > 1e-12
+    ? THREE.MathUtils.clamp(point.clone().sub(a).dot(ab) / denom, 0, 1)
+    : 0;
+  const closest = a.clone().add(ab.multiplyScalar(t));
+  return point.distanceTo(closest);
+}
+
+function edgeKey(a, b, precision) {
+  const scale = precision || 1000000;
+  function key(v) {
+    return [
+      Math.round(v.x * scale),
+      Math.round(v.y * scale),
+      Math.round(v.z * scale)
+    ].join(',');
+  }
+  const ka = key(a);
+  const kb = key(b);
+  return ka < kb ? ka + '|' + kb : kb + '|' + ka;
+}
+
+function geometryEdgeIsExternalOrCrease(geometry, edgeA, edgeB, faceIndex, hitFace) {
+  const position = geometry && geometry.attributes ? geometry.attributes.position : null;
+  if (!position || position.count < 3) return false;
+
+  const indices = geometry.index;
+  const faceCount = indices ? Math.floor(indices.count / 3) : Math.floor(position.count / 3);
+  if (faceCount <= 1) return true;
+
+  const targetKey = edgeKey(edgeA, edgeB, 1000000);
+  const hitNormal = hitFace && hitFace.normal ? hitFace.normal.clone().normalize() : null;
+  let foundAdjacent = false;
+
+  for (let i = 0; i < faceCount; i++) {
+    if (i === faceIndex) continue;
+
+    const ids = indices
+      ? [indices.getX(i * 3), indices.getX(i * 3 + 1), indices.getX(i * 3 + 2)]
+      : [i * 3, i * 3 + 1, i * 3 + 2];
+
+    const verts = ids.map(function(id){
+      return new THREE.Vector3().fromBufferAttribute(position, id);
+    });
+
+    for (let e = 0; e < 3; e++) {
+      if (edgeKey(verts[e], verts[(e + 1) % 3], 1000000) !== targetKey) continue;
+      foundAdjacent = true;
+
+      if (!hitNormal) return true;
+      const normal = verts[1].clone().sub(verts[0])
+        .cross(verts[2].clone().sub(verts[0]));
+      if (normal.lengthSq() < 1e-12) return true;
+      normal.normalize();
+
+      // A coplanar shared edge is triangle tessellation, not a physical model edge.
+      if (Math.abs(normal.dot(hitNormal)) < 0.9995) return true;
+      return false;
+    }
+  }
+
+  return !foundAdjacent;
+}
+
+function edgeMeasurementTargetFromHit(hit, event, root) {
+  if (!hit || !hit.face || !hit.object || !root) return null;
+
+  const geometry = hit.object.geometry;
+  const position = geometry && geometry.attributes ? geometry.attributes.position : null;
+  if (!position) return null;
+
+  const indices = geometry.index;
+  const ids = indices
+    ? [indices.getX(hit.faceIndex * 3), indices.getX(hit.faceIndex * 3 + 1), indices.getX(hit.faceIndex * 3 + 2)]
+    : [hit.faceIndex * 3, hit.faceIndex * 3 + 1, hit.faceIndex * 3 + 2];
+
+  if (ids.some(function(i){ return !Number.isInteger(i) || i < 0 || i >= position.count; })) return null;
+
+  const worldVertices = ids.map(function(i){
+    return new THREE.Vector3()
+      .fromBufferAttribute(position, i)
+      .applyMatrix4(hit.object.matrixWorld);
+  });
+
+  const rect = renderer.domElement.getBoundingClientRect();
+  const click = new THREE.Vector2(
+    event.clientX - rect.left,
+    event.clientY - rect.top
+  );
+
+  const candidates = [
+    {a:worldVertices[0], b:worldVertices[1]},
+    {a:worldVertices[1], b:worldVertices[2]},
+    {a:worldVertices[2], b:worldVertices[0]}
+  ];
+
+  candidates.forEach(function(candidate){
+    const sa = candidate.a.clone().project(camera);
+    const sb = candidate.b.clone().project(camera);
+    candidate.screenA = new THREE.Vector2(
+      (sa.x * 0.5 + 0.5) * rect.width,
+      (-sa.y * 0.5 + 0.5) * rect.height
+    );
+    candidate.screenB = new THREE.Vector2(
+      (sb.x * 0.5 + 0.5) * rect.width,
+      (-sb.y * 0.5 + 0.5) * rect.height
+    );
+    candidate.screenDistance = screenDistanceToSegment(click, candidate.screenA, candidate.screenB);
+
+    const inverseObject = hit.object.matrixWorld.clone().invert();
+    const localA = candidate.a.clone().applyMatrix4(inverseObject);
+    const localB = candidate.b.clone().applyMatrix4(inverseObject);
+    candidate.valid = geometryEdgeIsExternalOrCrease(
+      geometry,
+      localA,
+      localB,
+      hit.faceIndex,
+      hit.face
+    );
+    candidate.length = candidate.a.distanceTo(candidate.b);
+  });
+
+  candidates.sort(function(a,b){
+    if (a.valid !== b.valid) return a.valid ? -1 : 1;
+    return a.screenDistance - b.screenDistance;
+  });
+
+  const chosen = candidates[0];
+  if (!chosen || !chosen.valid || chosen.screenDistance > 14 || chosen.length < 1e-9) return null;
+
+  const inverseRoot = root.matrixWorld.clone().invert();
+  const localA = chosen.a.clone().applyMatrix4(inverseRoot);
+  const localB = chosen.b.clone().applyMatrix4(inverseRoot);
+
+  return {
+    kind:'edge',
+    point:chosen.a.clone().add(chosen.b).multiplyScalar(0.5),
+    normal:null,
+    objectId:hit.object.userData.objectId || null,
+    root:root,
+    edgeStart:chosen.a.clone(),
+    edgeEnd:chosen.b.clone(),
+    localEdgeStart:{x:localA.x,y:localA.y,z:localA.z},
+    localEdgeEnd:{x:localB.x,y:localB.y,z:localB.z}
   };
 }
 
@@ -1827,7 +2000,11 @@ function renderMeasurementList() {
   }
 
   if (selected.kind !== 'surface') {
-    editor.innerHTML = '<div class="hint">Exact target distance is available only for surface-to-surface measurements.</div>';
+    editor.innerHTML = '<div class="hint">' +
+      (selected.kind === 'edge'
+        ? 'Edge length measurements are read directly from the selected model edge.'
+        : 'Exact target distance is available only for surface-to-surface measurements.') +
+      '</div>';
     return;
   }
 
@@ -1880,7 +2057,7 @@ function rebuildMeasurements() {
       const label=document.createElement('div');
       label.className='measurement-label'+(selected?' active':'');
       label.textContent=formatDistance(m.distance_m);
-      label.title=m.kind==='surface'?'Surface distance':'Point distance';
+      label.title=m.kind==='surface'?'Surface distance':(m.kind==='edge'?'Edge length':'Point distance');
       label.addEventListener('click',function(event){
         event.stopPropagation();
         selectMeasurement(m.id);
@@ -1914,6 +2091,39 @@ function updateMeasurementOverlay() {
       m.label.style.top=((-projected.y*0.5+0.5)*rect.height)+'px';
     }
   });
+}
+
+function addEdgeMeasurement(target) {
+  if (!target || target.kind !== 'edge' || !target.objectId || !target.localEdgeStart || !target.localEdgeEnd) return;
+
+  const m={
+    id:id('measure'),
+    kind:'edge',
+    start:target.edgeStart.clone(),
+    end:target.edgeEnd.clone(),
+    distance_m:sceneToM(target.edgeStart.distanceTo(target.edgeEnd)),
+    start_normal:null,
+    end_normal:null,
+    start_anchor:{
+      objectId:target.objectId,
+      localPoint:{x:target.localEdgeStart.x,y:target.localEdgeStart.y,z:target.localEdgeStart.z},
+      localNormal:null,
+      localTriangle:null
+    },
+    end_anchor:{
+      objectId:target.objectId,
+      localPoint:{x:target.localEdgeEnd.x,y:target.localEdgeEnd.y,z:target.localEdgeEnd.z},
+      localNormal:null,
+      localTriangle:null
+    }
+  };
+
+  state.measurements.push(m);
+  state.selectedMeasurementId=m.id;
+  syncMeasurements();
+  rebuildMeasurements();
+  renderMeasurementsToggle();
+  toast('Edge length: ' + formatDistance(m.distance_m));
 }
 
 function addMeasurement(first,second) {
