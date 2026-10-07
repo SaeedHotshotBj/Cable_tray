@@ -67,7 +67,7 @@ controls.enableDamping = true;
 controls.dampingFactor = 0.085;
 controls.enablePan = true;
 controls.screenSpacePanning = true;
-controls.zoomToCursor = true;
+controls.zoomToCursor = false;
 controls.zoomSpeed = 0.8;
 controls.panSpeed = 0.85;
 controls.rotateSpeed = 0.7;
@@ -1092,7 +1092,9 @@ async function runEngineeringAutoDesign() {
       engineering_equipment_id:item.id,
       engineering_panel_id:panel.id,
       engineering_network_id:'network-' + panel.id,
-      engineering_tray_width_mm:Number(plan.planning_tray_width_mm) || null
+      engineering_tray_width_mm:Number(plan.planning_tray_width_mm) || null,
+      engineering_main_corridor_axis:plan.main_corridor_axis || null,
+      engineering_main_corridor_y_mm:Number(plan.main_corridor_routing_y_mm)
     });
   });
 
@@ -1312,45 +1314,71 @@ function pointerRay(event) {
   raycaster.setFromCamera(mouse, camera);
 }
 
-function focusOrbitTargetOnPointer(event) {
+function zoomCameraToCursor(event) {
   const rect = renderer.domElement.getBoundingClientRect();
   if (rect.width <= 0 || rect.height <= 0) return;
+
+  let delta = Number(event.deltaY) || 0;
+  if (event.deltaMode === 1) delta *= 16;
+  else if (event.deltaMode === 2) delta *= rect.height;
+  if (Math.abs(delta) < 0.001) return;
+
+  // Own the wheel event completely. This avoids fighting OrbitControls'
+  // target math and keeps zoom centered on the actual mouse location.
+  event.preventDefault();
+  event.stopImmediatePropagation();
 
   const cursor = new THREE.Vector2(
     ((event.clientX - rect.left) / rect.width) * 2 - 1,
     -((event.clientY - rect.top) / rect.height) * 2 + 1
   );
-  const focusRaycaster = new THREE.Raycaster();
-  focusRaycaster.setFromCamera(cursor, camera);
 
-  const modelRoots = Array.from(state.modelRoots.values());
-  const routeRoots = Array.from(state.routeRoots.values());
-  const modelHits = modelRoots.length
-    ? focusRaycaster.intersectObjects(modelRoots, true)
-    : [];
-  const routeHits = routeRoots.length
-    ? focusRaycaster.intersectObjects(routeRoots, true)
-    : [];
-  const hit = modelHits.concat(routeHits).sort(function(a, b){
-    return a.distance - b.distance;
-  })[0];
+  const cursorDirection = new THREE.Vector3(cursor.x, cursor.y, 0.5)
+    .unproject(camera)
+    .sub(camera.position)
+    .normalize();
+  const viewDirection = camera.getWorldDirection(new THREE.Vector3()).normalize();
 
-  if (hit && hit.point) {
-    controls.target.copy(hit.point);
-    controls.update();
-    return;
+  const targetOffset = controls.target.clone().sub(camera.position);
+  const targetDepth = targetOffset.dot(viewDirection);
+  const rayDepth = cursorDirection.dot(viewDirection);
+
+  let focusDistance = rayDepth > 1e-6
+    ? targetDepth / rayDepth
+    : targetOffset.length();
+
+  if (!Number.isFinite(focusDistance) || focusDistance <= 0) {
+    focusDistance = targetOffset.length();
   }
 
-  const groundHits = focusRaycaster.intersectObject(ground, false);
-  if (groundHits[0] && groundHits[0].point) {
-    controls.target.lerp(groundHits[0].point, 0.35);
-    controls.update();
-  }
+  const focusPoint = camera.position.clone()
+    .add(cursorDirection.multiplyScalar(focusDistance));
+
+  const currentDistance = camera.position.distanceTo(controls.target);
+  if (!Number.isFinite(currentDistance) || currentDistance <= 1e-9) return;
+
+  let scale = Math.exp(delta * 0.0016);
+  const minDistance = Math.max(0.01, Number(controls.minDistance) || 0.01);
+  const maxDistance = Math.max(minDistance, Number(controls.maxDistance) || currentDistance * 1000);
+  const minScale = minDistance / currentDistance;
+  const maxScale = maxDistance / currentDistance;
+  scale = THREE.MathUtils.clamp(scale, minScale, maxScale);
+
+  const nextCamera = focusPoint.clone().add(
+    camera.position.clone().sub(focusPoint).multiplyScalar(scale)
+  );
+  const nextTarget = focusPoint.clone().add(
+    controls.target.clone().sub(focusPoint).multiplyScalar(scale)
+  );
+
+  camera.position.copy(nextCamera);
+  controls.target.copy(nextTarget);
+  controls.update();
 }
 
-renderer.domElement.addEventListener('wheel', focusOrbitTargetOnPointer, {
+renderer.domElement.addEventListener('wheel', zoomCameraToCursor, {
   capture: true,
-  passive: true
+  passive: false
 });
 
 function groundPoint(event) {
@@ -1779,9 +1807,9 @@ function roundedRouteCurve(points, radius) {
   return path;
 }
 
-function engineeringCableDisplayOffset(obj) {
+function engineeringCableLaneOffsetMm(obj) {
   if (!obj || obj.kind !== 'cable' || !obj.engineering_generated || !obj.engineering_network_id) {
-    return new THREE.Vector3();
+    return 0;
   }
 
   const cables = state.objects
@@ -1796,9 +1824,13 @@ function engineeringCableDisplayOffset(obj) {
         .localeCompare(String(b.engineering_equipment_id || b.id));
     });
 
-  if (cables.length < 2) return new THREE.Vector3();
+  if (cables.length < 2) return 0;
 
   const index = Math.max(0, cables.findIndex(function(item){ return item.id === obj.id; }));
+  const diameters = cables.map(function(item){
+    return Math.max(1, Number(item.diameter_mm) || 1);
+  });
+
   const tray = state.objects.find(function(item){
     return item.kind === 'tray' &&
       item.engineering_generated &&
@@ -1808,42 +1840,82 @@ function engineeringCableDisplayOffset(obj) {
       item.points.length >= 2;
   });
 
-  let side = new THREE.Vector3(0, 0, 1);
-  if (tray) {
-    for (let i = 1; i < tray.points.length; i++) {
-      const direction = tray.points[i].clone().sub(tray.points[i - 1]);
-      if (direction.lengthSq() < 1e-10) continue;
-
-      if (Math.abs(direction.x) >= Math.abs(direction.z)) {
-        side.set(0, 0, 1);
-      } else {
-        side.set(1, 0, 0);
-      }
-      break;
-    }
-  }
-
   const trayWidthMm = Math.max(
     Number(obj.engineering_tray_width_mm) || Number(tray && tray.width_mm) || 100,
     20
   );
-  const pitchMm = Math.min(
-    20,
-    Math.max(8, (trayWidthMm - 20) / Math.max(1, cables.length - 1))
-  );
-  const centeredIndex = index - (cables.length - 1) / 2;
-  return side.multiplyScalar(mmToScene(centeredIndex * pitchMm));
+  const sideMarginMm = Math.max(2, Math.min(25, trayWidthMm * 0.15));
+  const usableWidth = Math.max(0, trayWidthMm - sideMarginMm * 2);
+  const totalDiameter = diameters.reduce(function(sum, diameter){ return sum + diameter; }, 0);
+  const totalGap = Math.max(0, usableWidth - totalDiameter);
+  const gap = diameters.length > 1
+    ? totalGap / (diameters.length - 1)
+    : 0;
+
+  let cursor = -(totalDiameter + gap * Math.max(0, diameters.length - 1)) * 0.5;
+  for (let i = 0; i < index; i++) {
+    cursor += diameters[i] + gap;
+  }
+
+  return cursor + diameters[index] * 0.5;
 }
 
-function routeVisual(obj) {
+function engineeringCableMainSegment(obj, a, b) {
+  if (!obj || obj.kind !== 'cable' || !obj.engineering_generated) return false;
+
+  const axis = obj.engineering_main_corridor_axis === 'x' ||
+    obj.engineering_main_corridor_axis === 'z'
+    ? obj.engineering_main_corridor_axis
+    : null;
+  const routingY = Number(obj.engineering_main_corridor_y_mm);
+  if (!axis || !Number.isFinite(routingY)) return false;
+
+  if (
+    Math.abs(Number(a.y) - routingY) > 0.001 ||
+    Math.abs(Number(b.y) - routingY) > 0.001
+  ) {
+    return false;
+  }
+
+  const dx = Math.abs(Number(b.x) - Number(a.x));
+  const dz = Math.abs(Number(b.z) - Number(a.z));
+  return axis === 'x'
+    ? dx >= dz && dx > 0.001
+    : dz >= dx && dz > 0.001;
+}
+
+function engineeringCableDisplayOffset(obj, points, index) {
+  const laneOffsetMm = engineeringCableLaneOffsetMm(obj);
+  if (Math.abs(laneOffsetMm) < 0.001 || !Array.isArray(points) || points.length < 2) {
+    return new THREE.Vector3();
+  }
+
+  const previousMain = index > 0 &&
+    engineeringCableMainSegment(obj, points[index - 1], points[index]);
+  const nextMain = index < points.length - 1 &&
+    engineeringCableMainSegment(obj, points[index], points[index + 1]);
+
+  const laneFactor = (Number(previousMain) + Number(nextMain)) * 0.5;
+  if (laneFactor <= 0) return new THREE.Vector3();
+
+  const axis = obj.engineering_main_corridor_axis;
+  const side = axis === 'x'
+    ? new THREE.Vector3(0, 0, 1)
+    : new THREE.Vector3(1, 0, 0);
+
+  return side.multiplyScalar(mmToScene(laneOffsetMm * laneFactor));
+}
+
+function routeVisual(obj) {function routeVisual(obj) {
   const g = new THREE.Group();
   g.userData.objectId = obj.id;
   g.userData.routeVisual = true;
 
   const center = routeCenter(obj.points);
-  const cableDisplayOffset = engineeringCableDisplayOffset(obj);
-  const localPoints = obj.points.map(function(p){
-    return p.clone().sub(center).add(cableDisplayOffset);
+  const localPoints = obj.points.map(function(p, index){
+    return p.clone()
+      .sub(center)
+      .add(engineeringCableDisplayOffset(obj, obj.points, index));
   });
   const rot = obj.rotation_deg || { x: 0, y: 0, z: 0 };
   g.position.copy(center);
