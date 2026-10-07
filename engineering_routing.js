@@ -624,16 +624,37 @@ function findGridPath3D(start, goal, obstacles, options, reuseCells) {
   );
 
   if (!startBridge || !goalBridge) {
+    // A route can be completely valid even when the grid bridge around an
+    // endpoint is unavailable (for example, when the endpoint falls between
+    // grid cells). Prefer a validated orthogonal bridge before treating the
+    // route as a fallback.
+    const orthogonalBridge = bridgePath3D(start, goal, obstacles, options);
+    if (orthogonalBridge && orthogonalBridge.length >= 2) {
+      return {
+        step,
+        points:orthogonalBridge,
+        fallback:false,
+        warning:null
+      };
+    }
+
     const directClear = segmentClearForRouting(start, goal, obstacles, options);
-    if (directClear) {
+    if (directClear && (
+      Math.abs(start.y - goal.y) < 0.001 &&
+      Math.abs(start.z - goal.z) < 0.001 ||
+      Math.abs(start.x - goal.x) < 0.001 &&
+      Math.abs(start.z - goal.z) < 0.001 ||
+      Math.abs(start.x - goal.x) < 0.001 &&
+      Math.abs(start.y - goal.y) < 0.001
+    )) {
       return {
         step,
         points:[
           {x:start.x,y:start.y,z:start.z},
           {x:goal.x,y:goal.y,z:goal.z}
         ],
-        fallback:true,
-        warning:'A routing-grid bridge was unavailable, but the validated direct route was used.'
+        fallback:false,
+        warning:null
       };
     }
 
@@ -771,16 +792,16 @@ function findGridPath3D(start, goal, obstacles, options, reuseCells) {
   }
 
   if (!goalState) {
-    const directClear = segmentClearForRouting(start, goal, obstacles, options);
-    if (directClear) {
+    // Before reporting a failed A* search, retry a deterministic orthogonal
+    // bridge. This removes false fallback warnings for simple valid routes
+    // that do not need the full grid search.
+    const orthogonalBridge = bridgePath3D(start, goal, obstacles, options);
+    if (orthogonalBridge && orthogonalBridge.length >= 2) {
       return {
         step,
-        points:[
-          {x:start.x,y:start.y,z:start.z},
-          {x:goal.x,y:goal.y,z:goal.z}
-        ],
-        fallback:true,
-        warning:'Grid routing was unavailable, but a validated direct route was used.'
+        points:orthogonalBridge,
+        fallback:false,
+        warning:null
       };
     }
 
