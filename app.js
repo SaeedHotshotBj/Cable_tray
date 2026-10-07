@@ -3000,7 +3000,7 @@ function loadProject(data) {
   state.measurements = (data.measurements || []).map(function(m){
     return {
       id:m.id || id('measure'),
-      kind:m.kind === 'surface' ? 'surface' : 'point',
+      kind:m.kind === 'surface' ? 'surface' : (m.kind === 'edge' ? 'edge' : 'point'),
       start:new THREE.Vector3(mmToScene(m.start.x),mmToScene(m.start.y),mmToScene(m.start.z)),
       end:new THREE.Vector3(mmToScene(m.end.x),mmToScene(m.end.y),mmToScene(m.end.z)),
       dimensionEnd:new THREE.Vector3(mmToScene(m.end.x),mmToScene(m.end.y),mmToScene(m.end.z)),
