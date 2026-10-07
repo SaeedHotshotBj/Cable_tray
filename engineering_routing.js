@@ -1222,10 +1222,32 @@ function chooseTrayWidth(requiredWidthMm, standardWidths) {
 }
 
 function buildTrayRuns(cablePlans, options, mainCorridors) {
+  const networkWidthByPanel = new Map();
+
+  (cablePlans || []).forEach(function(plan) {
+    const panelId = plan.panel && plan.panel.id;
+    const width = Number(plan.planning_tray_width_mm);
+    if (!panelId || !Number.isFinite(width) || width <= 0) return;
+    networkWidthByPanel.set(
+      panelId,
+      Math.max(Number(networkWidthByPanel.get(panelId)) || 0, width)
+    );
+  });
+
   const segments = new Map();
 
   cablePlans.forEach(function(plan) {
-    const points = Array.isArray(plan.points) ? plan.points : [];
+    const branchPoints = Array.isArray(plan.branch_points)
+      ? trimBranchTrayStart(
+          plan,
+          plan.branch_points,
+          Math.max(0, Number(options.trayStopBeforeEquipmentMm) || 1000)
+        )
+      : [];
+    const points = Array.isArray(branchPoints) && branchPoints.length >= 2
+      ? branchPoints
+      : [];
+
     const mainLevelY = Number(plan.main_corridor_routing_y_mm);
 
     for (let i = 1; i < points.length; i++) {
@@ -1250,23 +1272,33 @@ function buildTrayRuns(cablePlans, options, mainCorridors) {
           plan.equipment.id,
           Number(plan.cable.diameter_mm) || 0
         );
-        existing.main_level_eligible = existing.main_level_eligible || segment.main_level_eligible;
+        existing.main_level_eligible =
+          existing.main_level_eligible || segment.main_level_eligible;
       }
     }
   });
 
-  const fillLimit = Math.min(100, Math.max(1, Number(options.fillLimitPercent) || 80));
-  const sideMargin = Math.max(0, Number(options.traySideMarginMm) || 25);
   const trayHeightMm = Math.max(25, Number(options.trayHeightMm) || 100);
   const mainMinCables = Math.max(2, Number(options.mainMinCables) || 2);
 
   const classified = [];
   segments.forEach(function(segment) {
-    let diameterSum = 0;
-    segment.diameterByCable.forEach(function(value){ diameterSum += value; });
+    const panelId = cablePlans.find(function(plan) {
+      return plan.equipment &&
+        segment.cableIds.has(plan.equipment.id);
+    })?.panel?.id || null;
 
-    const requiredWidth = (diameterSum + sideMargin * 2) / (fillLimit / 100);
-    const width = chooseTrayWidth(requiredWidth, options.standardTrayWidthsMm);
+    const networkWidth = Number(networkWidthByPanel.get(panelId));
+    const width = Number.isFinite(networkWidth) && networkWidth > 0
+      ? networkWidth
+      : chooseTrayWidth(
+          Array.from(segment.diameterByCable.values()).reduce(function(sum, value) {
+            return sum + (Number(value) || 0);
+          }, Math.max(0, Number(options.traySideMarginMm) || 25) * 2) /
+          (Math.min(100, Math.max(1, Number(options.fillLimitPercent) || 80)) / 100),
+          options.standardTrayWidthsMm
+        );
+
     const classification = (
       segment.cableIds.size >= mainMinCables &&
       segment.main_level_eligible
@@ -1277,7 +1309,7 @@ function buildTrayRuns(cablePlans, options, mainCorridors) {
       classification,
       width_mm:width,
       height_mm:trayHeightMm,
-      required_width_mm:requiredWidth
+      required_width_mm:width
     });
   });
 
@@ -1354,7 +1386,76 @@ function buildTrayRuns(cablePlans, options, mainCorridors) {
     if (current) runs.push(makeTrayRun(group, current));
   });
 
+  // One engineering network uses one physical tray width. This deliberately
+  // removes the need for any reducer/transition between branch and main runs.
   return stitchTrayRuns(runs);
+}
+
+function trimBranchTrayStart(plan, branchPoints, stopDistanceMm) {
+  const source = (branchPoints || []).map(clonePoint);
+  if (source.length < 2) return [];
+
+  const anchor = clonePoint(
+    plan &&
+    plan.equipment &&
+    plan.equipment.anchor &&
+    plan.equipment.anchor.point
+      ? plan.equipment.anchor.point
+      : source[0]
+  );
+  const limit = Math.max(0, Number(stopDistanceMm) || 0);
+  if (limit <= 0) return source;
+
+  const route = [anchor];
+  source.forEach(function(point) {
+    const previous = route[route.length - 1];
+    if (
+      Math.abs(previous.x - point.x) > 0.001 ||
+      Math.abs(previous.y - point.y) > 0.001 ||
+      Math.abs(previous.z - point.z) > 0.001
+    ) {
+      route.push(point);
+    }
+  });
+
+  let remaining = limit;
+  let accumulated = 0;
+
+  for (let i = 1; i < route.length; i++) {
+    const a = route[i - 1];
+    const b = route[i];
+    const length = manhattanDistance3D(a, b);
+    if (length < 0.001) continue;
+
+    if (accumulated + length >= limit - 0.001) {
+      const ratio = Math.max(0, Math.min(1, (limit - accumulated) / length));
+      const stopPoint = {
+        x:a.x + (b.x - a.x) * ratio,
+        y:a.y + (b.y - a.y) * ratio,
+        z:a.z + (b.z - a.z) * ratio
+      };
+
+      const result = [stopPoint];
+      for (let j = i; j < route.length; j++) {
+        const point = route[j];
+        const previous = result[result.length - 1];
+        if (
+          Math.abs(previous.x - point.x) > 0.001 ||
+          Math.abs(previous.y - point.y) > 0.001 ||
+          Math.abs(previous.z - point.z) > 0.001
+        ) {
+          result.push(clonePoint(point));
+        }
+      }
+      return result.length >= 2 ? result : [];
+    }
+
+    accumulated += length;
+  }
+
+  // The main/branch route is shorter than the requested free cable allowance.
+  // In that case no tray should be forced all the way to the equipment.
+  return [];
 }
 
 function trayRunNodeKey(point) {
@@ -2194,6 +2295,9 @@ export function routeEngineeringNetwork(inputs) {
       : 0,
     networkSeedAttempts:Number(inputs && inputs.options && inputs.options.networkSeedAttempts) || 4,
     networkAttachmentCandidateLimit:Number(inputs && inputs.options && inputs.options.networkAttachmentCandidateLimit) || 4,
+    trayStopBeforeEquipmentMm:Number.isFinite(Number(inputs && inputs.options && inputs.options.trayStopBeforeEquipmentMm))
+      ? Number(inputs.options.trayStopBeforeEquipmentMm)
+      : 1000,
     exactCollisionRouting:inputs && inputs.options && inputs.options.exactCollisionRouting === true,
     segmentClear:inputs && inputs.options && typeof inputs.options.segmentClear === 'function'
       ? inputs.options.segmentClear
