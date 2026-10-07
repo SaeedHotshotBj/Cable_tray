@@ -1398,12 +1398,7 @@ export function routeEngineeringNetwork(inputs) {
       return;
     }
 
-    warnings.push(
-      group.panel.name + ': main corridor optimized near ' +
-      bestCorridor.endpoint.equipment.name +
-      ' (' + Math.round(bestCorridor.length_mm) + ' mm, ' +
-      bestCorridor.turns + ' turn(s)).'
-    );
+    // Successful corridor selection is informational, not a warning.
 
     const corridorPoints = bestCorridor.points;
     mainCorridors.push({
