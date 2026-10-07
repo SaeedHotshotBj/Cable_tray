@@ -673,34 +673,23 @@ function engineeringStandoffClear(base, point, context) {
   const width = Math.max(1, Number(context && context.trayWidthMm) || 100);
   const height = Math.max(1, Number(context && context.trayHeightMm) || 100);
   const clearance = Math.max(0, Number(context && context.bodyClearanceMm) || 0);
-  const minCenterlineDistance = Math.max(width, height) / 2 + clearance;
+  const maxBodyDistanceMm = Number(context && context.maxBodyDistanceMm) || 0;
 
-  const direction = new THREE.Vector3(
-    Number(point.x) - Number(base.x),
-    Number(point.y) - Number(base.y),
-    Number(point.z) - Number(base.z)
-  );
-  const length = direction.length();
-  if (length < 1e-9) return true;
-  direction.multiplyScalar(1 / length);
-
-  // The first part of a standoff starts on the host surface itself. That
-  // surface must not be mistaken for an obstruction. Start volume checking
-  // only after the tray has cleared its own cross-section + required clearance.
-  if (length <= minCenterlineDistance + 5) {
-    return engineeringPointBodyDistanceClear(point, {
-      trayWidthMm:width,
-      trayHeightMm:height,
-      bodyClearanceMm:clearance,
-      maxBodyDistanceMm:Number(context && context.maxBodyDistanceMm) || 0
-    });
-  }
-
-  return engineeringSegmentClear(base, point, {
+  // The standoff is only the short transition from the equipment/panel
+  // attachment surface to the first routing point. Its straight vector may
+  // be diagonal, while the actual tray routing is orthogonal. Treating this
+  // diagonal transition as an axis-aligned tray volume creates false
+  // collisions at curved/angled host surfaces and prevents routing entirely.
+  //
+  // The routing point itself is still subject to the exact body-distance
+  // limits. Once the route starts from this validated point, every generated
+  // orthogonal tray segment continues through the normal exact collision
+  // checker.
+  return engineeringPointBodyDistanceClear(point, {
     trayWidthMm:width,
     trayHeightMm:height,
     bodyClearanceMm:clearance,
-    ignoreStartMm:minCenterlineDistance + 5
+    maxBodyDistanceMm:maxBodyDistanceMm
   });
 }
 
