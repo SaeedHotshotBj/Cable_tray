@@ -523,7 +523,7 @@ function findGridPath3D(start, goal, obstacles, options, reuseCells) {
   const goalCell = {ix:goalBridge.ix,iy:goalBridge.iy,iz:goalBridge.iz};
   removeEndpointBlocks3D(blocked, startCell, goalCell);
 
-  const turnPenalty = step * Math.max(0, Number(options.turnPenaltyRatio) || 0.04);
+  const turnPenalty = step * Math.max(0, Number(options.routeTurnPenaltyRatio ?? options.turnPenaltyRatio) || 0.04);
   const verticalPenalty = step * Math.max(0, Number(options.verticalPenaltyRatio) || 0.02);
   const reuseBonus = Math.min(0.8, Math.max(0, Number(options.reuseBonus) || 0.45));
 
@@ -640,14 +640,24 @@ function findGridPath3D(start, goal, obstacles, options, reuseCells) {
   }
 
   if (!goalState) {
+    const directClear = segmentClearForRouting(start, goal, obstacles, options);
+    if (directClear) {
+      return {
+        step,
+        points:[
+          {x:start.x,y:start.y,z:start.z},
+          {x:goal.x,y:goal.y,z:goal.z}
+        ],
+        fallback:true,
+        warning:'Grid routing was unavailable, but a validated direct route was used.'
+      };
+    }
+
     return {
       step,
-      points:[
-        {x:start.x,y:start.y,z:start.z},
-        {x:goal.x,y:goal.y,z:goal.z}
-      ],
+      points:[],
       fallback:true,
-      warning:'No obstacle-free 3D routing-grid path was found; a direct fallback was returned.'
+      warning:'No collision-free route inside the configured body-distance corridor was found.'
     };
   }
 
@@ -1069,6 +1079,77 @@ function buildEquipmentResults(cablePlans, trayRuns) {
   });
 }
 
+function polylineLengthMm(points) {
+  let total = 0;
+  for (let i = 1; i < points.length; i++) total += manhattanDistance3D(points[i - 1], points[i]);
+  return total;
+}
+
+function countPolylineTurns(points) {
+  if (!points || points.length < 3) return 0;
+  let turns = 0;
+  for (let i = 1; i < points.length - 1; i++) {
+    if (!areCollinearForward(points[i - 1], points[i], points[i + 1])) turns++;
+  }
+  return turns;
+}
+
+function closestPointOnPolyline3D(point, polyline) {
+  let best = null;
+  if (!Array.isArray(polyline) || polyline.length === 0) return null;
+  if (polyline.length === 1) return {
+    point:clonePoint(polyline[0]),
+    distance:manhattanDistance3D(point, polyline[0]),
+    segmentIndex:0
+  };
+
+  for (let i = 1; i < polyline.length; i++) {
+    const a = polyline[i - 1];
+    const b = polyline[i];
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const dz = b.z - a.z;
+    const lengthSq = dx*dx + dy*dy + dz*dz;
+    let t = 0;
+    if (lengthSq > 1e-9) {
+      t = ((point.x - a.x) * dx + (point.y - a.y) * dy + (point.z - a.z) * dz) / lengthSq;
+      t = Math.max(0, Math.min(1, t));
+    }
+    const candidate = {x:a.x + dx*t, y:a.y + dy*t, z:a.z + dz*t};
+    const distance = manhattanDistance3D(point, candidate);
+    if (!best || distance < best.distance) best = {point:candidate, distance, segmentIndex:i - 1};
+  }
+  return best;
+}
+
+function corridorFromAttachmentToStart(attachment, corridor, segmentIndex) {
+  const points = [clonePoint(attachment)];
+  for (let i = segmentIndex; i >= 0; i--) {
+    const candidate = corridor[i];
+    if (manhattanDistance3D(points[points.length - 1], candidate) > 0.001) points.push(clonePoint(candidate));
+  }
+  return points;
+}
+
+function equipmentDensityScore(entry, allEntries, radius) {
+  const r = Math.max(1, Number(radius) || 1000);
+  let score = 0;
+  allEntries.forEach(function(other){
+    const distance = manhattanDistance3D(entry.start, other.start);
+    score += Math.max(0, 1 - distance / r);
+  });
+  return score;
+}
+
+function approximateCorridorBranchDistance(corridor, entries) {
+  let total = 0;
+  entries.forEach(function(entry){
+    const nearest = closestPointOnPolyline3D(entry.start, corridor);
+    if (nearest) total += nearest.distance;
+  });
+  return total;
+}
+
 
 export function routeEngineeringNetwork(inputs) {
   const equipment = Array.isArray(inputs && inputs.equipment) ? inputs.equipment : [];
@@ -1085,6 +1166,15 @@ export function routeEngineeringNetwork(inputs) {
     verticalPenaltyRatio:Number(inputs && inputs.options && inputs.options.verticalPenaltyRatio) || 0.02,
     verticalRangePenaltyRatio:Number(inputs && inputs.options && inputs.options.verticalRangePenaltyRatio) || 0.25,
     reuseBonus:Number(inputs && inputs.options && inputs.options.reuseBonus) || 0.45,
+    maxBodyDistanceMm:Number.isFinite(Number(inputs && inputs.options && inputs.options.maxBodyDistanceMm))
+      ? Number(inputs.options.maxBodyDistanceMm)
+      : 1500,
+    mainCorridorBranchWeight:Number(inputs && inputs.options && inputs.options.mainCorridorBranchWeight) || 1.15,
+    mainCorridorTurnPenaltyRatio:Number(inputs && inputs.options && inputs.options.mainCorridorTurnPenaltyRatio) || 0.14,
+    mainCorridorCandidateLimit:Number(inputs && inputs.options && inputs.options.mainCorridorCandidateLimit) || 8,
+    pointBodyDistanceClear:inputs && inputs.options && typeof inputs.options.pointBodyDistanceClear === 'function'
+      ? inputs.options.pointBodyDistanceClear
+      : null,
     traySideMarginMm:Number(inputs && inputs.options && inputs.options.traySideMarginMm) || 25,
     standardTrayWidthsMm:inputs && inputs.options && Array.isArray(inputs.options.standardTrayWidthsMm)
       ? inputs.options.standardTrayWidthsMm
@@ -1130,14 +1220,8 @@ export function routeEngineeringNetwork(inputs) {
     const planningRequiredWidth = (
       planningCableDiameterSum + options.traySideMarginMm * 2
     ) / (options.fillLimitPercent / 100);
-    const planningTrayWidth = chooseTrayWidth(
-      planningRequiredWidth,
-      options.standardTrayWidthsMm
-    );
+    const planningTrayWidth = chooseTrayWidth(planningRequiredWidth, options.standardTrayWidthsMm);
 
-    // The user's Body Clearance is an edge-to-body requirement for the tray.
-    // Routing centerlines therefore reserve half of the largest tray that this
-    // network may require.
     const routeOptions = {
       ...options,
       centerlineClearanceMm:options.clearanceMm + planningTrayWidth / 2,
@@ -1150,7 +1234,6 @@ export function routeEngineeringNetwork(inputs) {
     const prepared = group.equipment.map(function(item) {
       const equipmentStandoff = resolveAnchorStandoff(item.anchor, obstacles, routeOptions);
       if (equipmentStandoff.warning) warnings.push(item.name + ': ' + equipmentStandoff.warning);
-
       return {
         equipment:item,
         start:equipmentStandoff.point,
@@ -1158,24 +1241,120 @@ export function routeEngineeringNetwork(inputs) {
       };
     });
 
-    prepared.sort(function(a,b){
-      return manhattanDistance3D(b.start, panelStandoff.point) -
-        manhattanDistance3D(a.start, panelStandoff.point);
+    if (!prepared.length) return;
+
+    const densityRadius = Math.max(
+      Number(options.gridStepMm) * 8,
+      Number(options.maxBodyDistanceMm) * 0.75,
+      1000
+    );
+    prepared.forEach(function(entry){
+      entry.densityScore = equipmentDensityScore(entry, prepared, densityRadius);
     });
 
-    const reuseCells = new Set();
+    const candidateLimit = Math.min(
+      prepared.length,
+      Math.max(1, Math.floor(Number(options.mainCorridorCandidateLimit) || 8))
+    );
 
-    prepared.forEach(function(entry) {
-      const horizontal = findGridPath3D(
-        entry.start,
+    const candidates = prepared.slice().sort(function(a,b){
+      return b.densityScore - a.densityScore ||
+        manhattanDistance3D(a.start, panelStandoff.point) -
+        manhattanDistance3D(b.start, panelStandoff.point);
+    }).slice(0, candidateLimit);
+
+    let bestCorridor = null;
+    candidates.forEach(function(candidate){
+      const corridorResult = findGridPath3D(
         panelStandoff.point,
+        candidate.start,
         obstacles,
-        routeOptions,
-        reuseCells
+        {
+          ...routeOptions,
+          routeTurnPenaltyRatio:Math.max(
+            Number(options.turnPenaltyRatio) || 0.04,
+            Number(options.mainCorridorTurnPenaltyRatio) || 0.14
+          )
+        },
+        new Set()
       );
 
-      horizontal.points.forEach(function(point){
-        const adaptedStep = horizontal.step || options.gridStepMm;
+      if (!corridorResult.points || corridorResult.points.length < 2) return;
+
+      const branchEstimate = approximateCorridorBranchDistance(corridorResult.points, prepared);
+      const corridorLength = polylineLengthMm(corridorResult.points);
+      const turns = countPolylineTurns(corridorResult.points);
+      const score =
+        corridorLength +
+        branchEstimate * Math.max(0.1, Number(options.mainCorridorBranchWeight) || 1.15) +
+        turns * Number(options.gridStepMm) * 0.5;
+
+      if (!bestCorridor || score < bestCorridor.score) {
+        bestCorridor = {
+          points:corridorResult.points,
+          endpoint:candidate,
+          score,
+          length_mm:corridorLength,
+          turns
+        };
+      }
+    });
+
+    if (!bestCorridor) {
+      warnings.push(
+        group.panel.name + ': no collision-free main tray corridor was found inside the configured body-distance corridor.'
+      );
+      return;
+    }
+
+    warnings.push(
+      group.panel.name + ': main corridor optimized near ' +
+      bestCorridor.endpoint.equipment.name +
+      ' (' + Math.round(bestCorridor.length_mm) + ' mm, ' +
+      bestCorridor.turns + ' turn(s)).'
+    );
+
+    const corridorPoints = bestCorridor.points;
+    const reuseCells = new Set();
+    corridorPoints.forEach(function(point){
+      const adaptedStep = Math.max(50, Number(routeOptions.gridStepMm) || 250);
+      reuseCells.add(pointKey3D(
+        Math.round(point.x / adaptedStep),
+        Math.round(point.y / adaptedStep),
+        Math.round(point.z / adaptedStep)
+      ));
+    });
+
+    prepared.forEach(function(entry) {
+      const attachment = closestPointOnPolyline3D(entry.start, corridorPoints);
+      if (!attachment) return;
+
+      let branchResult = {
+        points:[clonePoint(entry.start)],
+        warning:null,
+        fallback:false
+      };
+
+      if (attachment.distance > 0.5) {
+        branchResult = findGridPath3D(
+          entry.start,
+          attachment.point,
+          obstacles,
+          routeOptions,
+          reuseCells
+        );
+      }
+
+      if (!branchResult.points || !branchResult.points.length) {
+        warnings.push(
+          entry.equipment.name + ' → ' + group.panel.name +
+          ': no collision-free branch to the main tray was found.'
+        );
+        return;
+      }
+
+      branchResult.points.forEach(function(point){
+        const adaptedStep = branchResult.step || routeOptions.gridStepMm;
         reuseCells.add(pointKey3D(
           Math.round(point.x / adaptedStep),
           Math.round(point.y / adaptedStep),
@@ -1183,17 +1362,54 @@ export function routeEngineeringNetwork(inputs) {
         ));
       });
 
-      const points = buildCablePoints(
-        entry.equipment,
-        group.panel,
-        entry.start,
-        panelStandoff.point,
-        horizontal.points
+      const corridorToPanel = corridorFromAttachmentToStart(
+        attachment.point,
+        corridorPoints,
+        attachment.segmentIndex
       );
 
-      if (horizontal.warning) warnings.push(
-        entry.equipment.name + ' → ' + group.panel.name + ': ' + horizontal.warning
-      );
+      const points = [];
+      function pushDistinct(point) {
+        if (!point) return;
+        const candidate = clonePoint(point);
+        const previous = points[points.length - 1];
+        if (
+          previous &&
+          Math.abs(candidate.x - previous.x) < 0.001 &&
+          Math.abs(candidate.y - previous.y) < 0.001 &&
+          Math.abs(candidate.z - previous.z) < 0.001
+        ) return;
+        points.push(candidate);
+      }
+
+      pushDistinct(entry.equipment.anchor.point);
+      pushDistinct(entry.start);
+      (branchResult.points || []).forEach(pushDistinct);
+      corridorToPanel.forEach(pushDistinct);
+      pushDistinct(panelStandoff.point);
+      pushDistinct(group.panel.anchor.point);
+
+      const compressed = [];
+      points.forEach(function(point){
+        if (!compressed.length) {
+          compressed.push(point);
+          return;
+        }
+        const previous = compressed[compressed.length - 1];
+        if (
+          Math.abs(point.x - previous.x) < 0.001 &&
+          Math.abs(point.y - previous.y) < 0.001 &&
+          Math.abs(point.z - previous.z) < 0.001
+        ) return;
+        if (compressed.length >= 2) {
+          const before = compressed[compressed.length - 2];
+          if (areCollinearForward(before, previous, point)) {
+            compressed[compressed.length - 1] = point;
+            return;
+          }
+        }
+        compressed.push(point);
+      });
 
       cablePlans.push({
         equipment:entry.equipment,
@@ -1204,11 +1420,12 @@ export function routeEngineeringNetwork(inputs) {
         },
         routing_start:entry.start,
         routing_goal:panelStandoff.point,
+        main_corridor_equipment_id:bestCorridor.endpoint.equipment.id,
         standoff_distance_mm:Math.max(entry.startDistanceMm, panelStandoff.distance_mm),
         planning_tray_width_mm:planningTrayWidth,
-        points,
-        warning:horizontal.warning || null,
-        fallback:!!horizontal.fallback
+        points:compressed,
+        warning:branchResult.warning || null,
+        fallback:!!branchResult.fallback
       });
     });
   });
