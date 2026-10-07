@@ -1480,7 +1480,7 @@ function routeBendGeometry(points, index, radius) {
   };
 }
 
-function sweptRectGeometry(points, sideWidth, verticalHeight, sideOffset, verticalOffset) {
+function sweptRectGeometry(points, sideWidth, verticalHeight, sideOffset, verticalOffset, frameNormal) {
   if (!points || points.length < 2) return null;
 
   const halfSide = Math.max(0, Number(sideWidth) || 0) * 0.5;
@@ -1502,8 +1502,15 @@ function sweptRectGeometry(points, sideWidth, verticalHeight, sideOffset, vertic
 
   for (let i = 0; i < points.length; i++) {
     const tangent = sampleTangent(i);
-    let referenceUp = new THREE.Vector3(0, 1, 0);
-    if (Math.abs(referenceUp.dot(tangent)) > 0.999) referenceUp.set(0, 0, 1);
+    let referenceUp = frameNormal && frameNormal.lengthSq() > 1e-12
+      ? frameNormal.clone().normalize()
+      : new THREE.Vector3(0, 1, 0);
+
+    if (Math.abs(referenceUp.dot(tangent)) > 0.999) {
+      referenceUp = Math.abs(tangent.z) < 0.999
+        ? new THREE.Vector3(0, 0, 1)
+        : new THREE.Vector3(1, 0, 0);
+    }
 
     let side = referenceUp.clone().cross(tangent);
     if (side.lengthSq() < 1e-12) side = new THREE.Vector3(1, 0, 0).cross(tangent);
@@ -1795,12 +1802,29 @@ function routeVisual(obj) {
       const bendSheet = sheet;
       const bendLipWidth = lipWidth;
 
+      const incomingDirection = localPoints[i].clone().sub(localPoints[i - 1]).normalize();
+      const outgoingDirection = localPoints[i + 1].clone().sub(localPoints[i]).normalize();
+      const bendNormal = incomingDirection.clone().cross(outgoingDirection);
+      if (bendNormal.lengthSq() > 1e-12) {
+        bendNormal.normalize();
+
+        const preferredAxis = Math.abs(bendNormal.y) > 0.5
+          ? new THREE.Vector3(0, 1, 0)
+          : (Math.abs(bendNormal.z) > 0.5
+            ? new THREE.Vector3(0, 0, 1)
+            : new THREE.Vector3(1, 0, 0));
+        if (bendNormal.dot(preferredAxis) < 0) bendNormal.negate();
+      } else {
+        bendNormal.set(0, 1, 0);
+      }
+
       const bendFloor = sweptRectGeometry(
         elbowPoints,
         width,
         bendSheet,
         0,
-        -bendHeight * 0.5 + bendSheet * 0.5
+        -bendHeight * 0.5 + bendSheet * 0.5,
+        bendNormal
       );
       if (bendFloor) {
         const mesh = new THREE.Mesh(bendFloor, mat);
@@ -1815,7 +1839,8 @@ function routeVisual(obj) {
           bendSheet,
           Math.max(bendHeight, bendSheet),
           side * halfWallOffset,
-          0
+          0,
+          bendNormal
         );
         if (wall) {
           const mesh = new THREE.Mesh(wall, mat);
@@ -1828,7 +1853,8 @@ function routeVisual(obj) {
           bendLipWidth,
           Math.max(bendSheet, bendLipWidth * 0.65),
           side * (width * 0.5 + bendLipWidth * 0.5),
-          bendHeight * 0.5 - bendLipWidth * 0.35
+          bendHeight * 0.5 - bendLipWidth * 0.35,
+          bendNormal
         );
         if (lip) {
           const mesh = new THREE.Mesh(lip, mat);
@@ -1841,7 +1867,8 @@ function routeVisual(obj) {
           Math.max(bendSheet * 1.8, bendLipWidth * 0.9),
           bendSheet,
           side * (width * 0.5 - bendSheet * 0.5),
-          -bendHeight * 0.5 + bendSheet * 1.45
+          -bendHeight * 0.5 + bendSheet * 1.45,
+          bendNormal
         );
         if (lowerFlange) {
           const mesh = new THREE.Mesh(lowerFlange, mat);
