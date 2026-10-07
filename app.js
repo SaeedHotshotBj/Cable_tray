@@ -14,7 +14,7 @@ const state = {
   modelRoots: new Map(), routeRoots: new Map(), measureStart: null,
   sourceModels: [], dragging: null, skipClick: false,
   surfacePickMode: false, surfacePick: null,
-  measureStart: null, autoRoutePoints: [], autoRoutePreviewRoot: null, autoRouteClearanceMm: 100, measurements: [], measurementsVisible: true,
+  measureStart: null, measureMode: 'point', autoRoutePoints: [], autoRoutePreviewRoot: null, autoRouteClearanceMm: 100, measurements: [], measurementsVisible: true,
   selectedMeasurementId: null,
   surfaceAlignStart: null,
   clipboard: null,
@@ -291,6 +291,7 @@ function setTool(tool) {
   const autoRouteTypeRow = $('autoRouteTypeRow');
   const autoRouteOffsetAxisRow = $('autoRouteOffsetAxisRow');
   const autoRouteActions = $('autoRouteActions');
+  const measureTypeRow = $('measureTypeRow');
   if (autoRouteTypeRow) autoRouteTypeRow.classList.toggle('hidden', tool !== 'auto-route');
   if (autoRouteOffsetAxisRow) {
     autoRouteOffsetAxisRow.classList.toggle(
@@ -298,13 +299,16 @@ function setTool(tool) {
       tool !== 'auto-route' || $('autoRouteType').value !== 'tray'
     );
   }
+  if (measureTypeRow) measureTypeRow.classList.toggle('hidden', tool !== 'measure');
   if (autoRouteActions) autoRouteActions.classList.add('hidden');
   const hint = {
     select: 'Click a route to select it. Drag a selected tray or cable to move it in 3D; edit Position/Slope in Properties.',
     cable: 'Click route points. Press Enter to finish.',
     tray: 'Click route points. Press Enter to finish.',
     model: 'Use Load Model for 3D, SolidWorks, AutoCAD DWG or DXF files.',
-    measure: 'Click two points, or two CAD/model surfaces, to create a persistent distance dimension.',
+    measure: state.measureMode === 'surface'
+      ? 'Surface to Surface: click two CAD/model surfaces to measure the shortest surface distance.'
+      : 'Point to Point: click two points on project geometry to measure the direct 3D distance.',
     'auto-route': 'Select Cable or Tray, click as many route points as needed, then press Enter to create the route.'
   };
   $('toolHint').textContent = hint[tool] || '';
@@ -315,6 +319,15 @@ document.querySelectorAll('.tool').forEach(function(b){ b.addEventListener('clic
 $('autoRouteType').addEventListener('change', function(){
   const row = $('autoRouteOffsetAxisRow');
   if (row) row.classList.toggle('hidden', state.tool !== 'auto-route' || this.value !== 'tray');
+});
+$('measureType').addEventListener('change', function(){
+  state.measureMode = this.value === 'surface' ? 'surface' : 'point';
+  state.measureStart = null;
+  clearSurfaceSelectionVisuals();
+  status(state.measureMode === 'surface' ? 'Measure: select first surface' : 'Measure: select first point');
+  toast(state.measureMode === 'surface'
+    ? 'Measurement mode: Surface to Surface'
+    : 'Measurement mode: Point to Point');
 });
 $('projectName').addEventListener('input', function(e){ state.project.name = e.target.value; });
 $('unitSystem').addEventListener('change', function(e){ state.project.units = e.target.value; });
@@ -1083,6 +1096,15 @@ renderer.domElement.addEventListener('click', function(e){
   if (state.tool === 'measure') {
     const target = measurementTargetFromEvent(e);
     if (!target) return;
+
+    const expectedKind = state.measureMode === 'surface' ? 'surface' : 'point';
+    if (target.kind !== expectedKind) {
+      toast(expectedKind === 'surface'
+        ? 'Surface to Surface mode requires two surfaces'
+        : 'Point to Point mode requires two points');
+      return;
+    }
+
     if (!state.measureStart) {
       state.measureStart = target;
       if (target.kind === 'surface') {
@@ -1090,7 +1112,7 @@ renderer.domElement.addEventListener('click', function(e){
         addSurfaceSelectionVisual(target, 0xffd45a);
         toast('First surface selected — click the second surface');
       } else {
-        toast('First measurement point set');
+        toast('First measurement point set — click the second point');
       }
     } else {
       if (target.kind === 'surface') addSurfaceSelectionVisual(target, 0x7ae6ff);
@@ -1144,6 +1166,13 @@ function handleKeyboardShortcut(e) {
     }
     if (state.tool === 'auto-route' && state.autoRoutePoints.length) {
       cancelAutoRoute();
+      e.preventDefault();
+      return;
+    }
+    if (state.tool === 'measure' && state.measureStart) {
+      state.measureStart = null;
+      clearSurfaceSelectionVisuals();
+      toast('Measurement selection cleared');
       e.preventDefault();
       return;
     }
@@ -1336,50 +1365,72 @@ function measurementTargetFromEvent(event) {
 
   const roots = Array.from(state.modelRoots.values()).concat(Array.from(state.routeRoots.values()));
   if (!roots.length) {
-    toast('No project surfaces are available for measurement');
+    toast('No project geometry is available for measurement');
     return null;
   }
 
   const hits = [];
   roots.forEach(function(root){
     raycaster.intersectObject(root, true).forEach(function(hit){
-      if (hit && hit.face) hits.push(hit);
+      if (hit && hit.point && hit.object && hit.object.userData) hits.push(hit);
     });
   });
   hits.sort(function(a,b){ return a.distance - b.distance; });
 
   const hit = hits[0];
-  if (!hit || !hit.face) {
-    toast('Click a surface that belongs to the project');
+  if (!hit || !hit.point) {
+    toast('Click a point or surface that belongs to the project');
     return null;
   }
 
   const objectId = hit.object.userData && hit.object.userData.objectId ? hit.object.userData.objectId : null;
-  const modelObject = objectId ? state.objects.find(function(o){ return o.id === objectId; }) : null;
+  const objectData = objectId ? state.objects.find(function(o){ return o.id === objectId; }) : null;
   const root = objectId ? getProjectRoot(objectId) : null;
   if (!root) {
-    toast('The selected surface is not a project object');
+    toast('The selected geometry is not a project object');
     return null;
   }
 
-  const face = faceGeometryData(hit, root);
-  if (!face) {
-    toast('The selected face has no usable surface geometry');
-    return null;
+  if (state.measureMode === 'surface') {
+    if (!hit.face) {
+      toast('Click a valid CAD/model surface');
+      return null;
+    }
+
+    const face = faceGeometryData(hit, root);
+    if (!face) {
+      toast('The selected face has no usable surface geometry');
+      return null;
+    }
+
+    return {
+      kind:'surface',
+      point:face.point,
+      normal:face.normal,
+      modelId:objectData && objectData.kind === 'model' ? objectId : null,
+      objectId:objectId,
+      root:root,
+      localPoint:face.localPoint,
+      localNormal:face.localNormal,
+      localTriangle:face.localTriangle,
+      object:face.object,
+      faceIndex:face.faceIndex
+    };
   }
 
+  const localPoint = root.worldToLocal(hit.point.clone());
   return {
-    kind:'surface',
-    point:face.point,
-    normal:face.normal,
-    modelId:modelObject && modelObject.kind === 'model' ? objectId : null,
+    kind:'point',
+    point:hit.point.clone(),
+    normal:null,
+    modelId:objectData && objectData.kind === 'model' ? objectId : null,
     objectId:objectId,
     root:root,
-    localPoint:face.localPoint,
-    localNormal:face.localNormal,
-    localTriangle:face.localTriangle,
-    object:face.object,
-    faceIndex:face.faceIndex
+    localPoint:{x:localPoint.x,y:localPoint.y,z:localPoint.z},
+    localNormal:null,
+    localTriangle:null,
+    object:hit.object,
+    faceIndex:hit.faceIndex
   };
 }
 
@@ -1771,7 +1822,7 @@ function renderMeasurementList() {
 
   const selected = state.measurements.find(function(m){ return m.id === state.selectedMeasurementId; });
   if (!selected) {
-    editor.innerHTML = '<div class="hint">Select a surface-to-surface measurement to set an exact distance.</div>';
+    editor.innerHTML = '<div class="hint">Select a measurement to edit it. Exact target distance is available only for surface-to-surface measurements.</div>';
     return;
   }
 
