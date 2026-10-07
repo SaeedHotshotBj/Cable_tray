@@ -2014,6 +2014,7 @@ function routeVisual(obj) {
     for (let i = 1; i < localPoints.length; i++) {
       addTraySegment(routeExits[i - 1], routeEntries[i]);
     }
+  }
 
   const linePoints = routeCurve.getPoints(
     Math.max(isEngineeringTray ? 2 : 16, localPoints.length * (isEngineeringTray ? 2 : 16))
