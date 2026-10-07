@@ -1380,6 +1380,20 @@ export function routeEngineeringNetwork(inputs) {
           return;
         }
 
+        const branchPoints = [];
+        (highRoute.points || []).forEach(function(point){ branchPoints.push(clonePoint(point)); });
+        for (let i = panelDrop.points.length - 2; i >= 0; i--) {
+          const point = clonePoint(panelDrop.points[i]);
+          const previous = branchPoints[branchPoints.length - 1];
+          if (
+            previous &&
+            Math.abs(point.x - previous.x) < 0.001 &&
+            Math.abs(point.y - previous.y) < 0.001 &&
+            Math.abs(point.z - previous.z) < 0.001
+          ) continue;
+          branchPoints.push(point);
+        }
+
         const points = [];
         function pushDistinct(point) {
           if (!point) return;
@@ -1414,7 +1428,7 @@ export function routeEngineeringNetwork(inputs) {
           main_corridor_equipment_id:null,
           standoff_distance_mm:Math.max(entry.startDistanceMm, panelStandoff.distance_mm),
           planning_tray_width_mm:planningTrayWidth,
-          branch_points:(highRoute.points || []).map(clonePoint),
+          branch_points:branchPoints,
           points,
           warning:highRoute.warning || panelDrop.warning || null,
           fallback:!!highRoute.fallback || !!panelDrop.fallback
@@ -1526,12 +1540,18 @@ export function routeEngineeringNetwork(inputs) {
       return;
     }
 
+    const mainTrayPoints = panelDrop.points
+      .slice()
+      .reverse()
+      .concat(corridorPoints.slice(1))
+      .map(clonePoint);
+
     mainCorridors.push({
       panel_id:group.panel.id,
       width_mm:planningTrayWidth,
       height_mm:Number(options.trayHeightMm) || 100,
       cable_ids:prepared.map(function(entry){ return entry.equipment.id; }),
-      points:corridorPoints.map(clonePoint)
+      points:mainTrayPoints
     });
 
     const reuseCells = new Set();
