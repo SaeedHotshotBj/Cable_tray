@@ -1093,7 +1093,7 @@ async function runEngineeringAutoDesign() {
       engineering_panel_id:panel.id,
       engineering_network_id:'network-' + panel.id,
       engineering_tray_width_mm:Number(plan.planning_tray_width_mm) || null,
-      engineering_main_corridor_axis:plan.main_corridor_axis || null,
+      engineering_main_corridor_axis:plan.main_corridor_axis || settings.structurePrimaryAxis || null,
       engineering_main_corridor_y_mm:Number(plan.main_corridor_routing_y_mm)
     });
   });
@@ -1906,7 +1906,7 @@ function engineeringCableDisplayOffset(obj, points, index) {
   return side.multiplyScalar(mmToScene(laneOffsetMm * laneFactor));
 }
 
-function routeVisual(obj) {function routeVisual(obj) {
+function routeVisual(obj) {
   const g = new THREE.Group();
   g.userData.objectId = obj.id;
   g.userData.routeVisual = true;
