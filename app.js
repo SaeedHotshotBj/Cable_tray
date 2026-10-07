@@ -250,6 +250,7 @@ function restoreDesignState(snapshot) {
     const restoredEngineeringSettings = { ...(engineering.settings || {}) };
     delete restoredEngineeringSettings.routingElevationMm;
     state.engineeringSettings = { ...state.engineeringSettings, ...restoredEngineeringSettings };
+    renderEngineeringNamesToggle();
     state.project = { ...state.project, ...(snapshot.project || {}) };
     const selectedExists = state.objects.some(function(o){ return o.id === snapshot.selected; }) ||
       state.equipment.some(function(o){ return o.id === snapshot.selected; }) ||
