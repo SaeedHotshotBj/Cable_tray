@@ -7,6 +7,7 @@ import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
 import { OBJExporter } from 'three/addons/exporters/OBJExporter.js';
 import { STLExporter } from 'three/addons/exporters/STLExporter.js';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
+import { routeEngineeringNetwork } from './engineering_routing.js';
 
 const state = {
   project: { name: 'Factory Cable Routing', units: 'mm', schema_version: 1 },
@@ -18,6 +19,17 @@ const state = {
   selectedMeasurementId: null,
   surfaceAlignStart: null,
   clipboard: null,
+  equipment: [],
+  panels: [],
+  engineeringSettings: {
+    routingElevationMm: 3000,
+    gridStepMm: 250,
+    clearanceMm: 100,
+    mainMinCables: 2,
+    traySideMarginMm: 25,
+    standardTrayWidthsMm: [100,150,200,300,400,500,600,800,1000,1200]
+  },
+  lastEngineeringReport: null,
   undoStack: [], redoStack: [],
   restoringHistory: false
 };
@@ -74,6 +86,10 @@ const autoRoutePreviewRoot = new THREE.Group();
 autoRoutePreviewRoot.name = 'AutoRoutePreview';
 scene.add(autoRoutePreviewRoot);
 state.autoRoutePreviewRoot = autoRoutePreviewRoot;
+const engineeringMarkerRoot = new THREE.Group();
+engineeringMarkerRoot.name = 'EngineeringAnnotations';
+scene.add(engineeringMarkerRoot);
+state.engineeringMarkerRoot = engineeringMarkerRoot;
 const raycaster = new THREE.Raycaster();
 const mouse = new THREE.Vector2();
 
@@ -173,6 +189,11 @@ function cloneRouteData(o) {
 function captureDesignState() {
   return {
     project: { ...state.project },
+    engineering: {
+      equipment: JSON.parse(JSON.stringify(state.equipment)),
+      panels: JSON.parse(JSON.stringify(state.panels)),
+      settings: JSON.parse(JSON.stringify(state.engineeringSettings))
+    },
     routes: state.objects
       .filter(function(o){ return o.kind === 'cable' || o.kind === 'tray'; })
       .map(cloneRouteData),
@@ -215,10 +236,17 @@ function restoreDesignState(snapshot) {
     const modelObjects = state.objects.filter(function(o){ return o.kind === 'model'; });
     const restoredRoutes = (snapshot.routes || []).map(cloneRouteData);
     state.objects = modelObjects.concat(restoredRoutes);
+    const engineering = snapshot.engineering || {};
+    state.equipment = JSON.parse(JSON.stringify(engineering.equipment || []));
+    state.panels = JSON.parse(JSON.stringify(engineering.panels || []));
+    state.engineeringSettings = { ...state.engineeringSettings, ...(engineering.settings || {}) };
     state.project = { ...state.project, ...(snapshot.project || {}) };
-    const selectedExists = state.objects.some(function(o){ return o.id === snapshot.selected; });
+    const selectedExists = state.objects.some(function(o){ return o.id === snapshot.selected; }) ||
+      state.equipment.some(function(o){ return o.id === snapshot.selected; }) ||
+      state.panels.some(function(o){ return o.id === snapshot.selected; });
     state.selected = selectedExists ? snapshot.selected : null;
     rebuildRoutes();
+    rebuildEngineeringMarkers();
     (snapshot.models || []).forEach(function(saved){
       const root = state.modelRoots.get(saved.id);
       if (!root || !saved.transform) return;
@@ -277,6 +305,443 @@ function saveProjectFile() {
   setTimeout(function(){ URL.revokeObjectURL(a.href); }, 1000);
 }
 
+
+function engineeringEntity(idValue) {
+  return state.equipment.find(function(item){ return item.id === idValue; }) ||
+    state.panels.find(function(item){ return item.id === idValue; }) || null;
+}
+
+function engineeringEntityKind(idValue) {
+  if (state.equipment.some(function(item){ return item.id === idValue; })) return 'equipment';
+  if (state.panels.some(function(item){ return item.id === idValue; })) return 'panel';
+  return null;
+}
+
+function engineeringLabel(textValue, fillColor) {
+  const canvas = document.createElement('canvas');
+  canvas.width = 512;
+  canvas.height = 128;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.font = '700 42px Segoe UI, Arial, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = 'rgba(8,13,18,0.92)';
+  ctx.fillRect(8, 8, canvas.width - 16, canvas.height - 16);
+  ctx.strokeStyle = fillColor;
+  ctx.lineWidth = 5;
+  ctx.strokeRect(8, 8, canvas.width - 16, canvas.height - 16);
+  ctx.fillStyle = '#ffffff';
+  ctx.fillText(String(textValue || ''), canvas.width / 2, canvas.height / 2);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  const material = new THREE.SpriteMaterial({ map:texture, transparent:true, depthTest:false });
+  const sprite = new THREE.Sprite(material);
+  sprite.scale.set(90, 22.5, 1);
+  sprite.renderOrder = 60;
+  return sprite;
+}
+
+function resolveEngineeringAnchor(entity) {
+  if (!entity || !entity.anchor) return null;
+  const anchor = entity.anchor;
+  const root = anchor.model_id ? state.modelRoots.get(anchor.model_id) : null;
+
+  if (root && anchor.local_point) {
+    const localPoint = new THREE.Vector3(
+      Number(anchor.local_point.x) || 0,
+      Number(anchor.local_point.y) || 0,
+      Number(anchor.local_point.z) || 0
+    );
+    const worldPoint = root.localToWorld(localPoint);
+    anchor.point = {
+      x:worldPoint.x * 10,
+      y:worldPoint.y * 10,
+      z:worldPoint.z * 10
+    };
+    if (anchor.local_normal) {
+      const normalMatrix = new THREE.Matrix3().getNormalMatrix(root.matrixWorld);
+      const worldNormal = new THREE.Vector3(
+        Number(anchor.local_normal.x) || 0,
+        Number(anchor.local_normal.y) || 1,
+        Number(anchor.local_normal.z) || 0
+      ).applyMatrix3(normalMatrix).normalize();
+      anchor.normal = {x:worldNormal.x,y:worldNormal.y,z:worldNormal.z};
+    }
+  }
+  return anchor;
+}
+
+function syncEngineeringAnchors() {
+  state.equipment.forEach(resolveEngineeringAnchor);
+  state.panels.forEach(resolveEngineeringAnchor);
+}
+
+function rebuildEngineeringMarkers() {
+  if (!state.engineeringMarkerRoot) return;
+  state.engineeringMarkerRoot.clear();
+  syncEngineeringAnchors();
+
+  state.panels.forEach(function(panel){
+    if (!panel.anchor || !panel.anchor.point) return;
+    const p = panel.anchor.point;
+    const root = new THREE.Group();
+    root.userData.objectId = panel.id;
+    root.userData.engineeringEntity = 'panel';
+    const box = new THREE.Mesh(
+      new THREE.BoxGeometry(mmToScene(120), mmToScene(120), mmToScene(120)),
+      new THREE.MeshBasicMaterial({ color:0x54a9ff, transparent:true, opacity:0.9, depthTest:false })
+    );
+    box.userData.objectId = panel.id;
+    box.userData.engineeringEntity = 'panel';
+    root.add(box);
+    const label = engineeringLabel(panel.name, '#54a9ff');
+    label.position.y = mmToScene(140);
+    label.userData.objectId = panel.id;
+    label.userData.engineeringEntity = 'panel';
+    root.add(label);
+    root.position.set(mmToScene(p.x),mmToScene(p.y),mmToScene(p.z));
+    engineeringMarkerRoot.add(root);
+  });
+
+  state.equipment.forEach(function(item){
+    if (!item.anchor || !item.anchor.point) return;
+    const p = item.anchor.point;
+    const root = new THREE.Group();
+    root.userData.objectId = item.id;
+    root.userData.engineeringEntity = 'equipment';
+    const sphere = new THREE.Mesh(
+      new THREE.SphereGeometry(mmToScene(55), 16, 12),
+      new THREE.MeshBasicMaterial({ color:0xffa64d, transparent:true, opacity:0.92, depthTest:false })
+    );
+    sphere.userData.objectId = item.id;
+    sphere.userData.engineeringEntity = 'equipment';
+    root.add(sphere);
+    const label = engineeringLabel(item.name, '#ffa64d');
+    label.position.y = mmToScene(105);
+    label.userData.objectId = item.id;
+    label.userData.engineeringEntity = 'equipment';
+    root.add(label);
+    root.position.set(mmToScene(p.x),mmToScene(p.y),mmToScene(p.z));
+    engineeringMarkerRoot.add(root);
+  });
+}
+
+function pickEngineeringAnchor(event) {
+  pointerRay(event);
+  const roots = Array.from(state.modelRoots.values());
+  if (!roots.length) return null;
+  const hits = raycaster.intersectObjects(roots, true);
+  const hit = hits[0];
+  if (!hit || !hit.point || !hit.object) return null;
+
+  let modelId = hit.object.userData && hit.object.userData.objectId;
+  if (!modelId || !state.modelRoots.has(modelId)) return null;
+  const root = state.modelRoots.get(modelId);
+
+  let normal = new THREE.Vector3(0,1,0);
+  if (hit.face) {
+    normal.copy(hit.face.normal);
+    normal.applyNormalMatrix(new THREE.Matrix3().getNormalMatrix(hit.object.matrixWorld)).normalize();
+  }
+
+  const localPoint = root.worldToLocal(hit.point.clone());
+  const inverseNormalMatrix = new THREE.Matrix3().getNormalMatrix(root.matrixWorld).invert();
+  const localNormal = normal.clone().applyMatrix3(inverseNormalMatrix).normalize();
+
+  return {
+    model_id:modelId,
+    point:{x:hit.point.x * 10,y:hit.point.y * 10,z:hit.point.z * 10},
+    normal:{x:normal.x,y:normal.y,z:normal.z},
+    local_point:{x:localPoint.x,y:localPoint.y,z:localPoint.z},
+    local_normal:{x:localNormal.x,y:localNormal.y,z:localNormal.z}
+  };
+}
+
+function nextEngineeringName(prefix, collection) {
+  const n = collection.length + 1;
+  return prefix + '-' + String(n).padStart(2,'0');
+}
+
+function placeEngineeringEntity(tool, event) {
+  const anchor = pickEngineeringAnchor(event);
+  if (!anchor) {
+    toast('Click a surface on an imported CAD/model.');
+    return;
+  }
+
+  const beforeHistory = captureDesignState();
+
+  if (tool === 'equipment') {
+    const item = {
+      id:id('equipment'),
+      name:nextEngineeringName('Motor', state.equipment),
+      type:'Motor',
+      power_kw:0,
+      current_a:0,
+      voltage_v:400,
+      cable_name:'4C x 6 mm²',
+      cable_diameter_mm:16,
+      destination_panel_id: state.panels.length ? state.panels[0].id : '',
+      anchor:anchor,
+      routing_result:null
+    };
+    state.equipment.push(item);
+    state.selected = item.id;
+    recordHistory(beforeHistory);
+    setTool('select');
+    rebuildEngineeringMarkers();
+    render();
+    toast(item.name + ' placed on surface');
+    return;
+  }
+
+  const panel = {
+    id:id('panel'),
+    name:nextEngineeringName('MCC', state.panels),
+    type:'MCC',
+    anchor:anchor
+  };
+  state.panels.push(panel);
+  state.selected = panel.id;
+  recordHistory(beforeHistory);
+  setTool('select');
+  rebuildEngineeringMarkers();
+  render();
+  toast(panel.name + ' placed on surface');
+}
+
+function parseNumberList(value) {
+  return String(value || '').split(',').map(function(v){ return Number(v.trim()); }).filter(function(v){ return Number.isFinite(v) && v > 0; });
+}
+
+function collectRoutingObstacles(routingElevationMm, clearanceMm) {
+  const obstacles = [];
+  const unique = new Set();
+  const elevation = Number(routingElevationMm) || 0;
+  const clearance = Math.max(0, Number(clearanceMm) || 0);
+
+  state.modelRoots.forEach(function(root){
+    root.updateMatrixWorld(true);
+    root.traverse(function(node){
+      if (!node.isMesh || !node.geometry) return;
+      const box = new THREE.Box3().setFromObject(node);
+      if (box.isEmpty()) return;
+      const minX = box.min.x * 10;
+      const maxX = box.max.x * 10;
+      const minY = box.min.y * 10;
+      const maxY = box.max.y * 10;
+      const minZ = box.min.z * 10;
+      const maxZ = box.max.z * 10;
+      if (minY > elevation + clearance || maxY < elevation - clearance) return;
+      if ((maxX - minX) < 25 || (maxZ - minZ) < 25) return;
+      const key = [
+        Math.round(minX),Math.round(maxX),
+        Math.round(minZ),Math.round(maxZ)
+      ].join('|');
+      if (unique.has(key)) return;
+      unique.add(key);
+      obstacles.push({minX,maxX,minZ,maxZ});
+    });
+  });
+
+  obstacles.sort(function(a,b){
+    return ((b.maxX-b.minX)*(b.maxZ-b.minZ)) - ((a.maxX-a.minX)*(a.maxZ-a.minZ));
+  });
+
+  const reduced = [];
+  obstacles.forEach(function(candidate){
+    const contained = reduced.some(function(existing){
+      return candidate.minX >= existing.minX &&
+        candidate.maxX <= existing.maxX &&
+        candidate.minZ >= existing.minZ &&
+        candidate.maxZ <= existing.maxZ;
+    });
+    if (!contained) reduced.push(candidate);
+    if (reduced.length >= 500) return;
+  });
+  return reduced;
+}
+
+function removeEngineeringGeneratedRoutes() {
+  state.objects = state.objects.filter(function(o){ return !o.engineering_generated; });
+}
+
+function runEngineeringAutoDesign() {
+  if (!state.equipment.length) {
+    toast('Place at least one equipment/load first');
+    return;
+  }
+  if (!state.panels.length) {
+    toast('Place at least one electrical panel first');
+    return;
+  }
+
+  syncEngineeringAnchors();
+  const missing = state.equipment.filter(function(item){ return !item.destination_panel_id || !state.panels.some(function(panel){ return panel.id === item.destination_panel_id; }); });
+  if (missing.length) {
+    toast(missing[0].name + ' has no valid destination panel');
+    state.selected = missing[0].id;
+    render();
+    return;
+  }
+
+  const settings = {
+    routingElevationMm:Number($('defaultElevation').value) || 3000,
+    gridStepMm:Number($('routingGridStep').value) || 250,
+    clearanceMm:Number($('autoTrayClearance').value) || 100,
+    fillLimitPercent:Number($('fillLimit').value) || 80,
+    mainMinCables:Number($('mainTrayMinCables').value) || 2,
+    trayHeightMm:Number($('defaultTrayHeight').value) || 100,
+    traySideMarginMm:25,
+    standardTrayWidthsMm:parseNumberList($('autoTrayStandards').value),
+    turnPenaltyRatio:0.04,
+    reuseBonus:0.45,
+    maxGridCells:40000,
+    routingPaddingMm:1500
+  };
+
+  const obstacles = collectRoutingObstacles(settings.routingElevationMm, settings.clearanceMm);
+  const report = routeEngineeringNetwork({
+    equipment:state.equipment,
+    panels:state.panels,
+    obstacles:obstacles,
+    options:settings
+  });
+
+  const beforeHistory = captureDesignState();
+  removeEngineeringGeneratedRoutes();
+
+  const panelById = new Map(state.panels.map(function(panel){ return [panel.id,panel]; }));
+  const equipmentById = new Map(state.equipment.map(function(item){ return [item.id,item]; }));
+
+  report.cable_plans.forEach(function(plan, index){
+    const item = equipmentById.get(plan.equipment.id);
+    const panel = panelById.get(plan.panel.id);
+    if (!item || !panel) return;
+    createRoute('cable', plan.points, {
+      pointsAreMm:true,
+      name:item.name + ' - ' + (item.cable_name || plan.cable.name),
+      diameter_mm:Number(item.cable_diameter_mm) || plan.cable.diameter_mm,
+      specification:item.cable_name || plan.cable.name,
+      material:'Copper/PVC',
+      engineering_generated:true,
+      engineering_equipment_id:item.id,
+      engineering_panel_id:panel.id,
+      engineering_network_id:'network-' + panel.id
+    });
+  });
+
+  report.tray_runs.forEach(function(run, index){
+    const label = run.classification === 'main' ? 'Main Tray' : 'Branch Tray';
+    createRoute('tray', run.points, {
+      pointsAreMm:true,
+      name:label + ' ' + run.width_mm + 'x' + run.height_mm + ' #' + (index + 1),
+      width_mm:run.width_mm,
+      height_mm:run.height_mm,
+      specification:run.width_mm + 'x' + run.height_mm + ' TRAY - ' + run.classification.toUpperCase(),
+      material:'Galvanized Steel',
+      engineering_generated:true,
+      engineering_classification:run.classification,
+      engineering_cable_ids:run.cable_ids || [],
+      engineering_network_id:run.cable_ids && run.cable_ids.length
+        ? 'network-' + (report.cable_plans.find(function(plan){ return run.cable_ids.indexOf(plan.equipment.id) >= 0; }) || {}).panel?.id
+        : null
+    });
+  });
+
+  const resultByEquipment = new Map(report.equipment_results.map(function(result){ return [result.equipment_id,result]; }));
+  state.equipment.forEach(function(item){
+    const result = resultByEquipment.get(item.id);
+    item.routing_result = result ? { ...result } : null;
+  });
+
+  state.engineeringSettings = {
+    ...state.engineeringSettings,
+    routingElevationMm:settings.routingElevationMm,
+    gridStepMm:settings.gridStepMm,
+    clearanceMm:settings.clearanceMm,
+    mainMinCables:settings.mainMinCables,
+    traySideMarginMm:settings.traySideMarginMm,
+    standardTrayWidthsMm:settings.standardTrayWidthsMm
+  };
+  state.lastEngineeringReport = report;
+
+  recordHistory(beforeHistory);
+  state.selected = null;
+  rebuildRoutes();
+  rebuildEngineeringMarkers();
+  render();
+  status('Engineering routing completed');
+  const warningText = report.warnings.length || report.cable_plans.some(function(plan){ return plan.warning; })
+    ? ' Some routes used warnings/fallbacks.'
+    : '';
+  toast(
+    report.cable_plans.length + ' cable route(s), ' +
+    report.tray_runs.length + ' tray run(s) generated.' + warningText
+  );
+}
+
+function renderEngineeringTakeoff() {
+  const box = $('engineeringTakeoff');
+  if (!box) return;
+
+  const cableRoutes = state.objects.filter(function(o){ return o.kind === 'cable' && o.engineering_generated; });
+  const trayRoutes = state.objects.filter(function(o){ return o.kind === 'tray' && o.engineering_generated; });
+
+  if (!state.equipment.length && !state.panels.length) {
+    box.innerHTML = '<div class="hint">Place equipment and electrical panels on CAD/model surfaces to build an automatic routing design.</div>';
+    return;
+  }
+
+  const panelMap = new Map(state.panels.map(function(panel){ return [panel.id,panel]; }));
+  const cableRows = cableRoutes.map(function(route){
+    const item = state.equipment.find(function(eq){ return eq.id === route.engineering_equipment_id; });
+    const panel = route.engineering_panel_id ? panelMap.get(route.engineering_panel_id) : null;
+    return '<tr><td>' + esc(item ? item.name : route.name) + '</td><td>' +
+      esc(item ? item.cable_name : route.specification) + '</td><td>' +
+      esc(panel ? panel.name : '-') + '</td><td>' +
+      lengthOf(route.points).toFixed(2) + ' m</td></tr>';
+  }).join('');
+
+  const trayGrouped = new Map();
+  trayRoutes.forEach(function(route){
+    const key = (route.engineering_classification || 'branch') + '|' + route.width_mm + '|' + route.height_mm;
+    const entry = trayGrouped.get(key) || {
+      classification:route.engineering_classification || 'branch',
+      width_mm:route.width_mm,
+      height_mm:route.height_mm,
+      length_m:0
+    };
+    entry.length_m += lengthOf(route.points);
+    trayGrouped.set(key,entry);
+  });
+
+  const trayRows = Array.from(trayGrouped.values()).sort(function(a,b){
+    return a.classification.localeCompare(b.classification) || a.width_mm-b.width_mm || a.height_mm-b.height_mm;
+  }).map(function(row){
+    return '<tr><td>' + esc(row.classification === 'main' ? 'Main' : 'Branch') + '</td><td>' +
+      esc(row.width_mm + ' × ' + row.height_mm + ' mm') + '</td><td>' +
+      row.length_m.toFixed(2) + ' m</td></tr>';
+  }).join('');
+
+  const totalCable = cableRoutes.reduce(function(sum,route){ return sum + lengthOf(route.points); },0);
+  const totalTray = trayRoutes.reduce(function(sum,route){ return sum + lengthOf(route.points); },0);
+  const missingCount = state.equipment.filter(function(item){ return !item.destination_panel_id || !panelMap.has(item.destination_panel_id); }).length;
+
+  box.innerHTML =
+    '<div class="boq-summary">' +
+      '<div><span>Loads</span><b>' + state.equipment.length + '</b></div>' +
+      '<div><span>Panels</span><b>' + state.panels.length + '</b></div>' +
+      '<div><span>Auto Cable</span><b>' + totalCable.toFixed(2) + ' m</b></div>' +
+      '<div><span>Auto Tray</span><b>' + totalTray.toFixed(2) + ' m</b></div>' +
+    '</div>' +
+    (missingCount ? '<div class="property-hint">Unassigned loads: ' + missingCount + '</div>' : '') +
+    (cableRows ? '<div class="property-group-title">Cable Schedule</div><div class="table-wrap"><table><thead><tr><th>Load</th><th>Cable</th><th>Panel</th><th>Length</th></tr></thead><tbody>' + cableRows + '</tbody></table></div>' : '') +
+    (trayRows ? '<div class="property-group-title">Tray Schedule</div><div class="table-wrap"><table><thead><tr><th>Class</th><th>Size</th><th>Length</th></tr></thead><tbody>' + trayRows + '</tbody></table></div>' : '') +
+    (!cableRows && !trayRows ? '<div class="hint">Press Auto Design Routing after assigning every load to a panel.</div>' : '');
+}
+
 function setTool(tool) {
   state.surfacePickMode = false;
   state.surfacePick = null;
@@ -292,6 +757,7 @@ function setTool(tool) {
   const autoRouteOffsetAxisRow = $('autoRouteOffsetAxisRow');
   const autoRouteActions = $('autoRouteActions');
   const measureTypeRow = $('measureTypeRow');
+  const engineeringTool = tool === 'equipment' || tool === 'panel';
   if (autoRouteTypeRow) autoRouteTypeRow.classList.toggle('hidden', tool !== 'auto-route');
   if (autoRouteOffsetAxisRow) {
     autoRouteOffsetAxisRow.classList.toggle(
@@ -306,6 +772,8 @@ function setTool(tool) {
     cable: 'Click route points. Press Enter to finish.',
     tray: 'Click route points. Press Enter to finish.',
     model: 'Use Load Model for 3D, SolidWorks, AutoCAD DWG or DXF files.',
+    equipment: 'Click a CAD/model surface to place a motor, pump, fan or other electrical load.',
+    panel: 'Click a CAD/model surface to place an electrical panel destination.',
     measure: state.measureMode === 'surface'
       ? 'Surface to Surface: click two CAD/model surfaces to measure the shortest surface distance.'
       : state.measureMode === 'edge'
@@ -315,7 +783,17 @@ function setTool(tool) {
   };
   $('toolHint').textContent = hint[tool] || '';
   $('routeOverlay').classList.toggle('hidden', tool !== 'cable' && tool !== 'tray');
-  status(tool === 'cable' || tool === 'tray' ? 'Drawing ' + tool + ' route' : tool === 'auto-route' ? 'Auto Route: select start point' : 'Ready');
+  status(
+    tool === 'cable' || tool === 'tray'
+      ? 'Drawing ' + tool + ' route'
+      : tool === 'auto-route'
+        ? 'Auto Route: select start point'
+        : tool === 'equipment'
+          ? 'Place Equipment: select a CAD/model surface'
+          : tool === 'panel'
+            ? 'Place Panel: select a CAD/model surface'
+            : 'Ready'
+  );
 }
 document.querySelectorAll('.tool').forEach(function(b){ b.addEventListener('click', function(){ setTool(b.dataset.tool); }); });
 $('autoRouteType').addEventListener('change', function(){
@@ -341,6 +819,20 @@ $('measureType').addEventListener('change', function(){
 });
 $('projectName').addEventListener('input', function(e){ state.project.name = e.target.value; });
 $('unitSystem').addEventListener('change', function(e){ state.project.units = e.target.value; });
+['routingGridStep','autoTrayClearance','mainTrayMinCables','autoTrayStandards'].forEach(function(idValue){
+  const field = $(idValue);
+  if (!field) return;
+  field.addEventListener('change', function(){
+    state.engineeringSettings = {
+      ...state.engineeringSettings,
+      gridStepMm:Number($('routingGridStep').value) || 250,
+      clearanceMm:Number($('autoTrayClearance').value) || 100,
+      mainMinCables:Number($('mainTrayMinCables').value) || 2,
+      standardTrayWidthsMm:parseNumberList($('autoTrayStandards').value)
+    };
+  });
+});
+$('autoDesignBtn').addEventListener('click', runEngineeringAutoDesign);
 
 function pointerRay(event) {
   const r = renderer.domElement.getBoundingClientRect();
@@ -567,26 +1059,34 @@ function cancelAutoRoute() {
   toast('Auto Route cancelled');
 }
 
-function createRoute(type, points) {
+function createRoute(type, points, options) {
+  const config = options || {};
   const cable = type === 'cable';
-  const dia = Number($('defaultCableDiameter').value) || 24;
-  const width = Number($('defaultTrayWidth').value) || 300;
-  const height = Number($('defaultTrayHeight').value) || 100;
+  const dia = Number.isFinite(Number(config.diameter_mm)) ? Number(config.diameter_mm) : (Number($('defaultCableDiameter').value) || 24);
+  const width = Number.isFinite(Number(config.width_mm)) ? Number(config.width_mm) : (Number($('defaultTrayWidth').value) || 300);
+  const height = Number.isFinite(Number(config.height_mm)) ? Number(config.height_mm) : (Number($('defaultTrayHeight').value) || 100);
   const elevation = Number($('defaultElevation').value) || 3000;
   const p = points.map(function(v){
-    // A point picked on imported CAD geometry already has exact world X/Y/Z.
-    // Points falling back to the ground plane use the configured elevation.
+    if (config.pointsAreMm) {
+      return new THREE.Vector3(mmToScene(v.x), mmToScene(v.y), mmToScene(v.z));
+    }
     return new THREE.Vector3(v.x, v.__routeSnapToModel ? v.y : mmToScene(elevation), v.z);
   });
   const obj = {
     id: id(type), kind: type,
-    name: (cable ? 'Cable-' : 'Tray-') + (state.objects.filter(function(o){ return o.kind === type; }).length + 1),
+    name: config.name || ((cable ? 'Cable-' : 'Tray-') + (state.objects.filter(function(o){ return o.kind === type; }).length + 1)),
     points: p,
     diameter_mm: dia, width_mm: width, height_mm: height,
-    specification: cable ? 'POWER-CABLE' : width + 'x' + height + ' TRAY',
-    material: cable ? 'Copper/PVC' : 'Galvanized Steel',
+    specification: config.specification || (cable ? 'POWER-CABLE' : width + 'x' + height + ' TRAY'),
+    material: config.material || (cable ? 'Copper/PVC' : 'Galvanized Steel'),
     rotation_deg: { x: 0, y: 0, z: 0 },
-    surface_alignment: null
+    surface_alignment: null,
+    engineering_generated: !!config.engineering_generated,
+    engineering_equipment_id: config.engineering_equipment_id || null,
+    engineering_panel_id: config.engineering_panel_id || null,
+    engineering_network_id: config.engineering_network_id || null,
+    engineering_classification: config.engineering_classification || null,
+    engineering_cable_ids: Array.isArray(config.engineering_cable_ids) ? config.engineering_cable_ids.slice() : []
   };
   state.objects.push(obj);
   return obj;
@@ -1065,6 +1565,11 @@ renderer.domElement.addEventListener('click', function(e){
     return;
   }
 
+  if (state.tool === 'equipment' || state.tool === 'panel') {
+    placeEngineeringEntity(state.tool, e);
+    return;
+  }
+
   if (state.tool === 'cable' || state.tool === 'tray') {
     const p = routePoint(e); if (!p) return;
     state.drawing.points.push(p);
@@ -1184,6 +1689,11 @@ function handleKeyboardShortcut(e) {
       e.preventDefault();
       return;
     }
+    if ((state.tool === 'equipment' || state.tool === 'panel')) {
+      setTool('select');
+      e.preventDefault();
+      return;
+    }
     if (state.tool === 'measure' && state.measureStart) {
       state.measureStart = null;
       clearSurfaceSelectionVisuals();
@@ -1234,6 +1744,32 @@ function handleKeyboardShortcut(e) {
 window.addEventListener('keydown', handleKeyboardShortcut, true);
 
 function deleteSelected() {
+  const engineeringId = state.selected;
+  const engineeringKind = engineeringEntityKind(engineeringId);
+  if (engineeringKind) {
+    const beforeHistory = captureDesignState();
+    if (engineeringKind === 'equipment') {
+      state.equipment = state.equipment.filter(function(item){ return item.id !== engineeringId; });
+    } else {
+      state.panels = state.panels.filter(function(item){ return item.id !== engineeringId; });
+      state.equipment.forEach(function(item){
+        if (item.destination_panel_id === engineeringId) {
+          item.destination_panel_id = '';
+          item.routing_result = null;
+        }
+      });
+    }
+    removeEngineeringGeneratedRoutes();
+    state.equipment.forEach(function(item){ item.routing_result = null; });
+    state.selected = null;
+    recordHistory(beforeHistory);
+    rebuildRoutes();
+    rebuildEngineeringMarkers();
+    render();
+    toast('Engineering object deleted; rerun Auto Design Routing');
+    return;
+  }
+
   const idx = state.objects.findIndex(function(o){ return o.id === state.selected; });
   if (idx < 0) return;
   const object = state.objects[idx];
@@ -2387,11 +2923,23 @@ function alignObjectToSurface(reference,source) {
 
 function renderScene() {
   const box = $('sceneList');
-  if (!state.objects.length) { box.innerHTML = '<div class="hint" style="padding:10px">No objects yet.</div>'; return; }
-  box.innerHTML = state.objects.map(function(o){
-    const qty = (o.kind === 'cable' || o.kind === 'tray') ? lengthOf(o.points).toFixed(2) + ' m' : o.format;
+  const entries = state.objects.map(function(o){ return o; })
+    .concat(state.equipment.map(function(item){ return { ...item, kind:'equipment' }; }))
+    .concat(state.panels.map(function(panel){ return { ...panel, kind:'panel' }; }));
+
+  if (!entries.length) {
+    box.innerHTML = '<div class="hint" style="padding:10px">No objects yet.</div>';
+    return;
+  }
+
+  box.innerHTML = entries.map(function(o){
+    let qty = o.format || '';
+    if (o.kind === 'cable' || o.kind === 'tray') qty = lengthOf(o.points).toFixed(2) + ' m';
+    if (o.kind === 'equipment') qty = o.destination_panel_id ? 'Assigned' : 'Unassigned';
+    if (o.kind === 'panel') qty = 'Destination';
     return '<div class="scene-item ' + (o.id === state.selected ? 'active' : '') + '" data-id="' + esc(o.id) + '"><div><div class="scene-name">' + esc(o.name) + '</div><div class="scene-type">' + esc(String(o.kind).toUpperCase()) + '</div></div><div class="scene-type">' + esc(qty) + '</div></div>';
   }).join('');
+
   box.querySelectorAll('.scene-item').forEach(function(n){
     n.addEventListener('click', function(){
       state.selectedMeasurementId = null;
@@ -2413,6 +2961,87 @@ function resizeRouteToLength(o, targetMeters) {
 
 function renderProperties() {
   const el = $('properties');
+  const equipment = state.equipment.find(function(x){ return x.id === state.selected; });
+  const panel = state.panels.find(function(x){ return x.id === state.selected; });
+
+  if (equipment) {
+    const result = equipment.routing_result || {};
+    const panelOptions = '<option value="">Select panel</option>' +
+      state.panels.map(function(item){
+        return '<option value="' + esc(item.id) + '"' + (item.id === equipment.destination_panel_id ? ' selected' : '') + '>' + esc(item.name) + '</option>';
+      }).join('');
+
+    el.className = 'properties';
+    el.innerHTML =
+      '<div class="property-group-title">Equipment</div>' +
+      '<div class="prop-row"><div class="prop-label">Name</div><input class="prop-value" id="e_name" value="' + esc(equipment.name) + '"></div>' +
+      '<div class="prop-row"><div class="prop-label">Type</div><input class="prop-value" id="e_type" value="' + esc(equipment.type) + '"></div>' +
+      '<div class="prop-row"><div class="prop-label">Power (kW)</div><input class="prop-value" id="e_power" type="number" min="0" step="0.1" value="' + Number(equipment.power_kw || 0) + '"></div>' +
+      '<div class="prop-row"><div class="prop-label">Current (A)</div><input class="prop-value" id="e_current" type="number" min="0" step="0.1" value="' + Number(equipment.current_a || 0) + '"></div>' +
+      '<div class="prop-row"><div class="prop-label">Voltage (V)</div><input class="prop-value" id="e_voltage" type="number" min="0" step="1" value="' + Number(equipment.voltage_v || 0) + '"></div>' +
+      '<div class="property-group-title">Cable</div>' +
+      '<div class="prop-row"><div class="prop-label">Cable Name</div><input class="prop-value" id="e_cable_name" value="' + esc(equipment.cable_name) + '"></div>' +
+      '<div class="prop-row"><div class="prop-label">Cable Ø (mm)</div><input class="prop-value" id="e_cable_diameter" type="number" min="0.1" step="0.1" value="' + Number(equipment.cable_diameter_mm || 0) + '"></div>' +
+      '<div class="property-group-title">Destination</div>' +
+      '<div class="prop-row"><div class="prop-label">Panel</div><select class="prop-value" id="e_panel">' + panelOptions + '</select></div>' +
+      '<div class="property-hint">Source is attached to the selected CAD surface. Move the CAD model and the equipment anchor follows its saved local point.</div>' +
+      '<div class="property-group-title">Latest Routing Result</div>' +
+      '<div class="prop-row"><div class="prop-label">Cable Length</div><div class="prop-value">' + (result.cable_length_m != null ? Number(result.cable_length_m).toFixed(2) + ' m' : '-') + '</div></div>' +
+      '<div class="prop-row"><div class="prop-label">Branch Tray</div><div class="prop-value">' + (result.branch_tray_width_mm ? result.branch_tray_width_mm + ' mm' : '-') + '</div></div>' +
+      '<div class="prop-row"><div class="prop-label">Main Tray</div><div class="prop-value">' + (result.main_tray_length_m != null ? Number(result.main_tray_length_m).toFixed(2) + ' m' : '-') + '</div></div>' +
+      (result.route_warning ? '<div class="property-hint">Routing warning: ' + esc(result.route_warning) + '</div>' : '') +
+      '<button class="small danger" id="deleteObjectBtn">Delete Equipment</button>';
+
+    function bindEngineeringField(idValue, key, numeric) {
+      const field = $(idValue);
+      if (!field) return;
+      field.addEventListener(numeric ? 'change' : 'input', function(e){
+        equipment[key] = numeric ? Number(e.target.value) || 0 : e.target.value;
+        if (key !== 'name') equipment.routing_result = null;
+        rebuildEngineeringMarkers();
+        renderScene();
+        renderEngineeringTakeoff();
+      });
+    }
+    bindEngineeringField('e_name','name',false);
+    bindEngineeringField('e_type','type',false);
+    bindEngineeringField('e_power','power_kw',true);
+    bindEngineeringField('e_current','current_a',true);
+    bindEngineeringField('e_voltage','voltage_v',true);
+    bindEngineeringField('e_cable_name','cable_name',false);
+    bindEngineeringField('e_cable_diameter','cable_diameter_mm',true);
+    $('e_panel').addEventListener('change', function(e){
+      equipment.destination_panel_id = e.target.value;
+      equipment.routing_result = null;
+      renderScene();
+      renderEngineeringTakeoff();
+    });
+    $('deleteObjectBtn').addEventListener('click', deleteSelected);
+    return;
+  }
+
+  if (panel) {
+    el.className = 'properties';
+    const assigned = state.equipment.filter(function(item){ return item.destination_panel_id === panel.id; });
+    el.innerHTML =
+      '<div class="property-group-title">Electrical Panel</div>' +
+      '<div class="prop-row"><div class="prop-label">Name</div><input class="prop-value" id="pnl_name" value="' + esc(panel.name) + '"></div>' +
+      '<div class="prop-row"><div class="prop-label">Type</div><input class="prop-value" id="pnl_type" value="' + esc(panel.type) + '"></div>' +
+      '<div class="property-group-title">Connection Point</div>' +
+      '<div class="property-hint">Attached to a CAD/model surface. XYZ is stored in millimeters.</div>' +
+      '<div class="prop-row"><div class="prop-label">X</div><div class="prop-value">' + (panel.anchor && panel.anchor.point ? panel.anchor.point.x.toFixed(1) : '-') + '</div></div>' +
+      '<div class="prop-row"><div class="prop-label">Y</div><div class="prop-value">' + (panel.anchor && panel.anchor.point ? panel.anchor.point.y.toFixed(1) : '-') + '</div></div>' +
+      '<div class="prop-row"><div class="prop-label">Z</div><div class="prop-value">' + (panel.anchor && panel.anchor.point ? panel.anchor.point.z.toFixed(1) : '-') + '</div></div>' +
+      '<div class="property-group-title">Assigned Loads</div>' +
+      '<div class="property-hint">' + (assigned.length ? assigned.map(function(item){ return esc(item.name); }).join(', ') : 'No loads assigned.') + '</div>' +
+      '<button class="small danger" id="deleteObjectBtn">Delete Panel</button>';
+
+    $('pnl_name').addEventListener('input', function(e){ panel.name = e.target.value; rebuildEngineeringMarkers(); renderScene(); });
+    $('pnl_type').addEventListener('input', function(e){ panel.type = e.target.value; });
+    $('deleteObjectBtn').addEventListener('click', deleteSelected);
+    return;
+  }
+
   const o = state.objects.find(function(x){ return x.id === state.selected; });
   if (!o) {
     el.className = 'properties empty';
@@ -2656,7 +3285,14 @@ function renderBoq() {
       '</tbody></table>'
     : '<div class="hint" style="padding:10px">No routing quantities yet.</div>';
 }
-function render() { renderScene(); renderProperties(); renderBoq(); updateRouteSelectionVisuals(); }
+function render() {
+  rebuildEngineeringMarkers();
+  renderScene();
+  renderProperties();
+  renderBoq();
+  renderEngineeringTakeoff();
+  updateRouteSelectionVisuals();
+}
 
 async function importModelFile(fileUrl, displayName, format, nativeFormat, sourcePath) {
   const url = fileUrl;
@@ -2761,6 +3397,12 @@ function projectData() {
           height_mm:o.height_mm,
           specification:o.specification,
           material:o.material,
+          engineering_generated:!!o.engineering_generated,
+          engineering_equipment_id:o.engineering_equipment_id || null,
+          engineering_panel_id:o.engineering_panel_id || null,
+          engineering_network_id:o.engineering_network_id || null,
+          engineering_classification:o.engineering_classification || null,
+          engineering_cable_ids:Array.isArray(o.engineering_cable_ids) ? o.engineering_cable_ids.slice() : [],
           rotation_deg:{x:Number(o.rotation_deg && o.rotation_deg.x) || 0,y:Number(o.rotation_deg && o.rotation_deg.y) || 0,z:Number(o.rotation_deg && o.rotation_deg.z) || 0},
           surface_alignment:o.surface_alignment ? {
             mode:o.surface_alignment.mode || 'parallel',
@@ -2786,7 +3428,12 @@ function projectData() {
         end_anchor:m.end_anchor || null
       };
     }),
-    measurements_visible:state.measurementsVisible
+    measurements_visible:state.measurementsVisible,
+    engineering:{
+      equipment:state.equipment,
+      panels:state.panels,
+      settings:state.engineeringSettings
+    }
   };
 }
 function downloadBlob(blob, filename) {
@@ -2996,6 +3643,10 @@ function loadProject(data) {
   });
 
   state.project = { ...state.project, ...(data.project || {}) };
+  const engineering = data.engineering || {};
+  state.equipment = JSON.parse(JSON.stringify(engineering.equipment || []));
+  state.panels = JSON.parse(JSON.stringify(engineering.panels || []));
+  state.engineeringSettings = { ...state.engineeringSettings, ...(engineering.settings || {}) };
   state.measurementsVisible = data.measurements_visible !== false;
   state.measurements = (data.measurements || []).map(function(m){
     return {
@@ -3014,6 +3665,8 @@ function loadProject(data) {
 
   $('projectName').value = state.project.name || 'Factory Cable Routing';
   $('unitSystem').value = state.project.units || 'mm';
+  syncEngineeringSettingsInputs();
+  rebuildEngineeringMarkers();
   state.selected = null;
   state.measureStart = null;
   state.selectedMeasurementId = null;
@@ -3045,7 +3698,11 @@ $('newProjectBtn').addEventListener('click', function(){
   if (!confirm('Clear the current design?')) return;
   state.modelRoots.forEach(function(root){ scene.remove(root); }); state.modelRoots.clear();
   state.sourceModels = [];
-  state.objects = []; state.selected = null; resetHistory(); state.surfacePick = null; state.surfacePickMode = false;
+  state.objects = [];
+  state.equipment = [];
+  state.panels = [];
+  state.lastEngineeringReport = null;
+  state.selected = null; resetHistory(); state.surfacePick = null; state.surfacePickMode = false;
   state.measureStart = null; state.surfaceAlignStart = null; state.selectedMeasurementId = null; state.measurements = []; clearSurfaceSelectionVisuals(); rebuildMeasurements(); renderMeasurementsToggle(); renderMeasurementList(); render(); toast('New project created');
 });
 $('exportBoqBtn').addEventListener('click', function(){
@@ -3062,6 +3719,15 @@ $('exportBoqBtn').addEventListener('click', function(){
   const csv = rows.map(function(r){ return r.map(function(v){ return '"' + String(v).replace(/"/g,'""') + '"'; }).join(','); }).join('\\n');
   const blob = new Blob([csv], { type:'text/csv;charset=utf-8' }); const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = slug(state.project.name) + '_BOQ.csv'; a.click(); URL.revokeObjectURL(a.href);
 });
+
+function syncEngineeringSettingsInputs() {
+  const settings = state.engineeringSettings || {};
+  if ($('routingGridStep')) $('routingGridStep').value = Number(settings.gridStepMm) || 250;
+  if ($('autoTrayClearance')) $('autoTrayClearance').value = Number(settings.clearanceMm) || 100;
+  if ($('mainTrayMinCables')) $('mainTrayMinCables').value = Number(settings.mainMinCables) || 2;
+  if ($('autoTrayStandards')) $('autoTrayStandards').value = (settings.standardTrayWidthsMm || []).join(',');
+}
+
 function slug(v){ return String(v || 'cable-tray-project').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/(^-|-$)/g,'') || 'cable-tray-project'; }
 function fitObject(root) {
   const box = new THREE.Box3().setFromObject(root); if (box.isEmpty()) return;
