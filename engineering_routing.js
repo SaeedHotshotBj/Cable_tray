@@ -494,13 +494,13 @@ function resolveAnchorStandoff(anchor, obstacles, options) {
     // This handles anchors near an edge/corner where the surface normal alone
     // cannot clear the tray cross-section from the surrounding structure.
     [
-      {x:sx,y:sy,z:sz},
+      {x:sx,y:0,z:0},
+      {x:0,y:sy,z:0},
+      {x:0,y:0,z:sz},
       {x:sx,y:sy,z:0},
       {x:sx,y:0,z:sz},
       {x:0,y:sy,z:sz},
-      {x:sx,y:0,z:0},
-      {x:0,y:sy,z:0},
-      {x:0,y:0,z:sz}
+      {x:sx,y:sy,z:sz}
     ].forEach(function(vector){
       const candidate = new THREEVector3Shim(vector.x, vector.y, vector.z);
       if (candidate.lengthSq() < 1e-12) return;
@@ -559,17 +559,32 @@ function resolveAnchorStandoff(anchor, obstacles, options) {
       if (!pointClear) continue;
 
       const distancePreference = Math.abs(clampedDistance - preferredStandoffDistance);
-      const interiorPreference = directionIndex;
+      const diagonalPenalty =
+        (Math.abs(direction.x) > 1e-6 ? 1 : 0) +
+        (Math.abs(direction.y) > 1e-6 ? 1 : 0) +
+        (Math.abs(direction.z) > 1e-6 ? 1 : 0);
+      const structurePenalty = (
+        options.structurePrimaryAxis &&
+        ((options.structurePrimaryAxis === 'x' && Math.abs(direction.x) < 0.999) ||
+         (options.structurePrimaryAxis === 'z' && Math.abs(direction.z) < 0.999))
+      ) ? 1 : 0;
+
       if (
         !best ||
         distancePreference < best.distancePreference - 0.001 ||
         (
           Math.abs(distancePreference - best.distancePreference) < 0.001 &&
           (
-            interiorPreference < best.interiorPreference ||
+            diagonalPenalty < best.diagonalPenalty ||
             (
-              interiorPreference === best.interiorPreference &&
-              clampedDistance < best.distance
+              diagonalPenalty === best.diagonalPenalty &&
+              (
+                structurePenalty < best.structurePenalty ||
+                (
+                  structurePenalty === best.structurePenalty &&
+                  clampedDistance < best.distance
+                )
+              )
             )
           )
         )
@@ -579,7 +594,8 @@ function resolveAnchorStandoff(anchor, obstacles, options) {
           distance:clampedDistance,
           directionIndex,
           distancePreference,
-          interiorPreference
+          diagonalPenalty,
+          structurePenalty
         };
       }
     }
@@ -786,6 +802,13 @@ function findGridPath3D(start, goal, obstacles, options, reuseCells) {
       if (Number.isFinite(Number(options.preferredRoutingY))) {
         moveCost += Math.abs(nextWorldY - Number(options.preferredRoutingY)) *
           Math.max(0, Number(options.preferredYPenaltyRatio) || 0);
+      }
+
+      if (options.structurePrimaryAxis && (stepDir.dir === 0 || stepDir.dir === 2)) {
+        const stepAxis = stepDir.dir === 0 ? 'x' : 'z';
+        if (stepAxis !== options.structurePrimaryAxis) {
+          moveCost += step * Math.max(0, Number(options.structureAxisPenaltyRatio) || 0);
+        }
       }
 
       if (current.dir >= 0 && current.dir !== stepDir.dir) moveCost += turnPenalty;
@@ -1535,6 +1558,10 @@ export function routeEngineeringNetwork(inputs) {
       ? { ...inputs.options.routingBounds }
       : null,
     preferredYPenaltyRatio:Number(inputs && inputs.options && inputs.options.preferredYPenaltyRatio) || 1,
+    structurePrimaryAxis:(inputs && inputs.options && ['x','z'].indexOf(inputs.options.structurePrimaryAxis) >= 0)
+      ? inputs.options.structurePrimaryAxis
+      : null,
+    structureAxisPenaltyRatio:Number(inputs && inputs.options && inputs.options.structureAxisPenaltyRatio) || 0.35,
     mainCorridorBranchWeight:Number(inputs && inputs.options && inputs.options.mainCorridorBranchWeight) || 1.15,
     mainCorridorTurnPenaltyRatio:Number(inputs && inputs.options && inputs.options.mainCorridorTurnPenaltyRatio) || 0.75,
     mainCorridorCandidateLimit:Number(inputs && inputs.options && inputs.options.mainCorridorCandidateLimit) || 8,
