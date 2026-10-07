@@ -1221,6 +1221,11 @@ function chooseTrayWidth(requiredWidthMm, standardWidths) {
   return Math.ceil(requiredWidthMm / 100) * 100;
 }
 
+function planAxisForParallelMain(plan) {
+  const axis = plan && plan.main_corridor_axis;
+  return axis === 'x' || axis === 'z' ? axis : null;
+}
+
 function buildTrayRuns(cablePlans, options, mainCorridors) {
   const networkWidthByPanel = new Map();
 
@@ -2302,6 +2307,9 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
       );
       if (!plan) return;
 
+      plan.parallel_main_corridor = true;
+      plan.main_corridor_axis = candidate.primaryAxis;
+      plan.main_corridor_secondary_coordinate_mm = candidate.secondary;
       cablePlans.push(plan);
 
       const removeIndex = pending.findIndex(function(entry){
