@@ -151,37 +151,47 @@ function removeEndpointBlocks3D(blocked, startCell, goalCell) {
 
 function segmentIntersectsObstacle3D(a, b, obstacle, clearanceMm) {
   const clearance = Math.max(0, Number(clearanceMm) || 0);
-  const minX = obstacle.minX - clearance;
-  const maxX = obstacle.maxX + clearance;
-  const minY = obstacle.minY - clearance;
-  const maxY = obstacle.maxY + clearance;
-  const minZ = obstacle.minZ - clearance;
-  const maxZ = obstacle.maxZ + clearance;
+  const min = {
+    x:obstacle.minX - clearance,
+    y:obstacle.minY - clearance,
+    z:obstacle.minZ - clearance
+  };
+  const max = {
+    x:obstacle.maxX + clearance,
+    y:obstacle.maxY + clearance,
+    z:obstacle.maxZ + clearance
+  };
 
-  const dx = Math.abs(b.x - a.x);
-  const dy = Math.abs(b.y - a.y);
-  const dz = Math.abs(b.z - a.z);
+  let tMin = 0;
+  let tMax = 1;
 
-  if (dx >= dy && dx >= dz && dx > 0.001) {
-    if (a.y < minY || a.y > maxY || a.z < minZ || a.z > maxZ) return false;
-    return Math.max(a.x, b.x) >= minX && Math.min(a.x, b.x) <= maxX;
-  }
+  ['x','y','z'].forEach(function(axis) {
+    if (tMin > tMax) return;
 
-  if (dy >= dx && dy >= dz && dy > 0.001) {
-    if (a.x < minX || a.x > maxX || a.z < minZ || a.z > maxZ) return false;
-    return Math.max(a.y, b.y) >= minY && Math.min(a.y, b.y) <= maxY;
-  }
+    const start = a[axis];
+    const delta = b[axis] - a[axis];
 
-  if (dz > 0.001) {
-    if (a.x < minX || a.x > maxX || a.y < minY || a.y > maxY) return false;
-    return Math.max(a.z, b.z) >= minZ && Math.min(a.z, b.z) <= maxZ;
-  }
+    if (Math.abs(delta) < 1e-9) {
+      if (start < min[axis] || start > max[axis]) {
+        tMin = 1;
+        tMax = 0;
+      }
+      return;
+    }
 
-  return (
-    a.x >= minX && a.x <= maxX &&
-    a.y >= minY && a.y <= maxY &&
-    a.z >= minZ && a.z <= maxZ
-  );
+    let t1 = (min[axis] - start) / delta;
+    let t2 = (max[axis] - start) / delta;
+    if (t1 > t2) {
+      const swap = t1;
+      t1 = t2;
+      t2 = swap;
+    }
+
+    tMin = Math.max(tMin, t1);
+    tMax = Math.min(tMax, t2);
+  });
+
+  return tMin <= tMax && tMax >= 0 && tMin <= 1;
 }
 
 function segmentClear3D(a, b, obstacles, clearanceMm) {
@@ -536,7 +546,7 @@ function findGridPath3D(start, goal, obstacles, options, reuseCells) {
   });
 
   const goalBridgePoints = goalBridge.bridge;
-  for (let i = 1; i < goalBridgePoints.length; i++) {
+  for (let i = goalBridgePoints.length - 2; i >= 0; i--) {
     points.push(goalBridgePoints[i]);
   }
 
