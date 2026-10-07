@@ -1271,6 +1271,22 @@ function buildTrayRuns(cablePlans, options, mainCorridors) {
         Math.abs(segment.start.y - mainLevelY) < 0.001 &&
         Math.abs(segment.end.y - mainLevelY) < 0.001;
 
+      segment.main_corridor_eligible =
+        Array.isArray(plan.main_corridor_segment_keys) &&
+        plan.main_corridor_segment_keys.indexOf(segment.key) >= 0;
+
+      segment.parallel_main_eligible =
+        plan.parallel_main_corridor === true &&
+        plan.main_corridor_axis === segment.axis &&
+        segment.main_level_eligible &&
+        (
+          !Number.isFinite(Number(plan.main_corridor_secondary_coordinate_mm)) ||
+          Math.abs(
+            Number(segment.start[plan.main_corridor_axis === 'x' ? 'z' : 'x']) -
+            Number(plan.main_corridor_secondary_coordinate_mm)
+          ) < 0.001
+        );
+
       const existing = segments.get(segment.key);
       if (!existing) {
         segments.set(segment.key, segment);
@@ -1282,6 +1298,10 @@ function buildTrayRuns(cablePlans, options, mainCorridors) {
         );
         existing.main_level_eligible =
           existing.main_level_eligible || segment.main_level_eligible;
+        existing.main_corridor_eligible =
+          existing.main_corridor_eligible || segment.main_corridor_eligible;
+        existing.parallel_main_eligible =
+          existing.parallel_main_eligible || segment.parallel_main_eligible;
       }
     }
   });
@@ -1316,9 +1336,13 @@ function buildTrayRuns(cablePlans, options, mainCorridors) {
     const corridorAxisEligible = !parallelAxis || segment.axis === parallelAxis;
 
     const classification = (
-      segment.cableIds.size >= mainMinCables &&
-      segment.main_level_eligible &&
-      corridorAxisEligible
+      segment.main_corridor_eligible ||
+      segment.parallel_main_eligible ||
+      (
+        segment.cableIds.size >= mainMinCables &&
+        segment.main_level_eligible &&
+        corridorAxisEligible
+      )
     ) ? 'main' : 'branch';
 
     classified.push({
@@ -1995,7 +2019,7 @@ function appendDistinctPoints(target, source, startIndex) {
   }
 }
 
-function makeNetworkCablePlan(entry, group, branchPath, tree, attachmentPoint, panelDrop, planningTrayWidth, options) {
+function makeNetworkCablePlan(entry, group, branchPath, tree, attachmentPoint, panelDrop, planningTrayWidth, options, mainCorridorSegmentKeys) {
   const treePath = traceNetworkToRoot(tree, attachmentPoint);
   if (!treePath.length) return null;
 
@@ -2023,6 +2047,9 @@ function makeNetworkCablePlan(entry, group, branchPath, tree, attachmentPoint, p
     standoff_distance_mm:Math.max(entry.startDistanceMm, options.panelStandoffDistanceMm || 0),
     planning_tray_width_mm:planningTrayWidth,
     branch_points:(branchPath || []).map(clonePoint),
+    main_corridor_segment_keys:Array.isArray(mainCorridorSegmentKeys)
+      ? mainCorridorSegmentKeys.slice()
+      : [],
     points,
     warning:null,
     fallback:false
@@ -2613,6 +2640,28 @@ function buildPanelMultiTerminalNetwork(group, prepared, panelStandoff, obstacle
       );
       if (!seedRegistration) continue;
 
+      // Freeze the actual Main Tray network before any branch is registered.
+      // Later motors may attach only to these Main nodes; a previous motor's
+      // perpendicular branch must never become the target of another cable.
+      const mainNetworkPoints = Array.from(tree.nodes.values()).map(clonePoint);
+      const mainCorridorSegmentKeys = new Set();
+      for (let i = 1; i < seedPath.points.length; i++) {
+        const a = seedPath.points[i - 1];
+        const b = seedPath.points[i];
+        if (
+          Math.abs(Number(a.y) - routingY) > 0.001 ||
+          Math.abs(Number(b.y) - routingY) > 0.001
+        ) continue;
+
+        const segment = segmentRecord(
+          a,
+          b,
+          seed.equipment.id,
+          seed.cable.diameter_mm
+        );
+        if (segment) mainCorridorSegmentKeys.add(segment.key);
+      }
+
       const cablePlans = [];
       const connected = new Set([seed.equipment.id]);
 
@@ -2628,7 +2677,8 @@ function buildPanelMultiTerminalNetwork(group, prepared, panelStandoff, obstacle
           ...routeOptions,
           fixedRoutingY:routingY,
           panelStandoffDistanceMm:panelStandoff.distance_mm
-        }
+        },
+        Array.from(mainCorridorSegmentKeys)
       );
       if (!seedPlan) continue;
       cablePlans.push(seedPlan);
@@ -2641,7 +2691,9 @@ function buildPanelMultiTerminalNetwork(group, prepared, panelStandoff, obstacle
       while (pending.length && madeProgress) {
         madeProgress = false;
 
-        const networkPoints = Array.from(tree.nodes.values());
+        // Only the frozen Main Tray nodes are legal attachment targets.
+        // Branch nodes are deliberately excluded to prevent branch-to-branch chaining.
+        const networkPoints = mainNetworkPoints;
         pending.sort(function(a,b){
           return networkDistanceToNodes(a.start, networkPoints) -
             networkDistanceToNodes(b.start, networkPoints) ||
@@ -2711,7 +2763,8 @@ function buildPanelMultiTerminalNetwork(group, prepared, panelStandoff, obstacle
             ...routeOptions,
             fixedRoutingY:routingY,
             panelStandoffDistanceMm:panelStandoff.distance_mm
-          }
+          },
+          Array.from(mainCorridorSegmentKeys)
         );
         if (!plan) break;
 
