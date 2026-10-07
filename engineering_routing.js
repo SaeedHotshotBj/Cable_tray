@@ -459,6 +459,10 @@ function resolveAnchorStandoff(anchor, obstacles, options) {
     ? configuredMaxBodyDistance + halfExtent
     : Math.max(2500, minCenterlineDistance + step * 10);
   const startDistance = Math.max(25, minCenterlineDistance);
+  const preferredStandoffDistance = Math.min(
+    maxCenterlineDistance,
+    Math.max(startDistance, Number(options.preferredStandoffDistanceMm) || startDistance + step)
+  );
 
   if (maxCenterlineDistance < startDistance) {
     return {
@@ -552,16 +556,34 @@ function resolveAnchorStandoff(anchor, obstacles, options) {
         )
         : pointWithinBodyDistanceForRouting(point, options);
 
-      if (pointClear) {
-        if (!best || clampedDistance < best.distance || (Math.abs(clampedDistance - best.distance) < 0.001 && directionIndex === 0)) {
-          best = {point, distance:clampedDistance, directionIndex};
-        }
-        break;
+      if (!pointClear) continue;
+
+      const distancePreference = Math.abs(clampedDistance - preferredStandoffDistance);
+      const interiorPreference = directionIndex;
+      if (
+        !best ||
+        distancePreference < best.distancePreference - 0.001 ||
+        (
+          Math.abs(distancePreference - best.distancePreference) < 0.001 &&
+          (
+            interiorPreference < best.interiorPreference ||
+            (
+              interiorPreference === best.interiorPreference &&
+              clampedDistance < best.distance
+            )
+          )
+        )
+      ) {
+        best = {
+          point,
+          distance:clampedDistance,
+          directionIndex,
+          distancePreference,
+          interiorPreference
+        };
       }
-      if (clampedDistance >= maxCenterlineDistance) break;
     }
   }
-
   if (best) return {point:best.point, warning:null, distance_mm:best.distance, valid:true};
 
   const fallbackDistance = Math.min(maxCenterlineDistance, Math.max(startDistance, minCenterlineDistance));
@@ -1570,7 +1592,11 @@ export function routeEngineeringNetwork(inputs) {
     const routeOptions = {
       ...options,
       centerlineClearanceMm:options.clearanceMm + planningTrayWidth / 2,
-      routingTrayWidthMm:planningTrayWidth
+      routingTrayWidthMm:planningTrayWidth,
+      preferredStandoffDistanceMm:Math.min(
+        options.maxBodyDistanceMm + planningTrayWidth / 2,
+        options.clearanceMm + planningTrayWidth / 2 + options.gridStepMm
+      )
     };
 
     const panelStandoff = resolveAnchorStandoff(group.panel.anchor, obstacles, routeOptions);
