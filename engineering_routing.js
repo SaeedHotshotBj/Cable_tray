@@ -2234,9 +2234,48 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
     const registration = registerNetworkPath(tree, corridorPath, routingY);
     if (!registration) return;
 
-    // Every equipment branch must attach directly to the shared Main Tray.
-    // Never use another motor's branch as a network goal; that would create
-    // a second parallel tray path instead of a perpendicular branch to Main.
+    // A* compresses collinear points, so a long straight Main can otherwise
+    // contain only its two endpoints. Reinsert grid-aligned Main nodes so a
+    // motor in the middle of the corridor has a real direct attachment point.
+    const mainNearPrimary = Number(nearPoint[candidate.primaryAxis]);
+    const mainFarPrimary = Number(farPoint[candidate.primaryAxis]);
+    const mainStep = Math.max(50, Number(options.gridStepMm) || 100);
+    const corridorNodes = [clonePoint(farPoint)];
+
+    if (Math.abs(mainFarPrimary - mainNearPrimary) > 0.001) {
+      const direction = mainNearPrimary >= mainFarPrimary ? 1 : -1;
+      let cursor = mainFarPrimary + direction * mainStep;
+
+      while (
+        direction > 0
+          ? cursor < mainNearPrimary - 0.001
+          : cursor > mainNearPrimary + 0.001
+      ) {
+        const point = candidate.primaryAxis === 'x'
+          ? {x:cursor,y:routingY,z:candidate.secondary}
+          : {x:candidate.secondary,y:routingY,z:cursor};
+        corridorNodes.push(point);
+        cursor += direction * mainStep;
+      }
+    }
+
+    corridorNodes.push(clonePoint(nearPoint));
+
+    for (let i = 0; i < corridorNodes.length - 1; i++) {
+      const point = corridorNodes[i];
+      const next = corridorNodes[i + 1];
+      const pointKey = networkNodeKey(point);
+      const nextKey = networkNodeKey(next);
+
+      if (!tree.nodes.has(pointKey)) {
+        tree.nodes.set(pointKey, clonePoint(point));
+      }
+      if (!tree.nodes.has(nextKey)) {
+        tree.nodes.set(nextKey, clonePoint(next));
+      }
+      tree.parent.set(pointKey, nextKey);
+    }
+
     const mainNetworkGoalPoints = Array.from(tree.nodes.values()).map(clonePoint);
 
     const pending = prepared.slice();
