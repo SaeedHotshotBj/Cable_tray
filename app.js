@@ -1078,6 +1078,73 @@ async function runEngineeringAutoDesign() {
   const panelById = new Map(state.panels.map(function(panel){ return [panel.id,panel]; }));
   const equipmentById = new Map(state.equipment.map(function(item){ return [item.id,item]; }));
 
+  // Build the exact shared-tray segment map once. This includes the common
+  // panel connection tray as well as the long Main Tray. Dedicated motor
+  // branches are excluded because their tray run normally carries one cable.
+  function routeSegmentKey(a, b) {
+    const start = {
+      x:Number(a.x).toFixed(3),
+      y:Number(a.y).toFixed(3),
+      z:Number(a.z).toFixed(3)
+    };
+    const end = {
+      x:Number(b.x).toFixed(3),
+      y:Number(b.y).toFixed(3),
+      z:Number(b.z).toFixed(3)
+    };
+    const axis = (
+      Math.abs(Number(b.x) - Number(a.x)) >= Math.abs(Number(b.z) - Number(a.z)) &&
+      Math.abs(Number(b.x) - Number(a.x)) >= Math.abs(Number(b.y) - Number(a.y))
+    ) ? 'x' : (
+      Math.abs(Number(b.y) - Number(a.y)) >= Math.abs(Number(b.z) - Number(a.z))
+        ? 'y'
+        : 'z'
+    );
+
+    if (axis === 'x') {
+      return [
+        'x',
+        start.y,
+        start.z,
+        Math.min(Number(a.x), Number(b.x)).toFixed(3),
+        Math.max(Number(a.x), Number(b.x)).toFixed(3)
+      ].join('|');
+    }
+    if (axis === 'y') {
+      return [
+        'y',
+        start.x,
+        start.z,
+        Math.min(Number(a.y), Number(b.y)).toFixed(3),
+        Math.max(Number(a.y), Number(b.y)).toFixed(3)
+      ].join('|');
+    }
+    return [
+      'z',
+      start.x,
+      start.y,
+      Math.min(Number(a.z), Number(b.z)).toFixed(3),
+      Math.max(Number(a.z), Number(b.z)).toFixed(3)
+    ].join('|');
+  }
+
+  const sharedSegmentKeysByCable = new Map();
+  report.tray_runs.forEach(function(run){
+    if (!Array.isArray(run.cable_ids) || run.cable_ids.length < 2) return;
+    if (!Array.isArray(run.points) || run.points.length < 2) return;
+
+    const keys = [];
+    for (let i = 1; i < run.points.length; i++) {
+      keys.push(routeSegmentKey(run.points[i - 1], run.points[i]));
+    }
+
+    run.cable_ids.forEach(function(cableId){
+      const set = sharedSegmentKeysByCable.get(cableId) || new Set();
+      keys.forEach(function(key){ set.add(key); });
+      sharedSegmentKeysByCable.set(cableId, set);
+    });
+  });
+
   report.cable_plans.forEach(function(plan, index){
     const item = equipmentById.get(plan.equipment.id);
     const panel = panelById.get(plan.panel.id);
@@ -1095,7 +1162,10 @@ async function runEngineeringAutoDesign() {
       engineering_tray_width_mm:Number(plan.planning_tray_width_mm) || null,
       engineering_main_corridor_axis:plan.main_corridor_axis || settings.structurePrimaryAxis || null,
       engineering_main_corridor_y_mm:Number(plan.main_corridor_routing_y_mm),
-      engineering_main_corridor_secondary_coordinate_mm:Number(plan.main_corridor_secondary_coordinate_mm)
+      engineering_main_corridor_secondary_coordinate_mm:Number(plan.main_corridor_secondary_coordinate_mm),
+      engineering_shared_segment_keys:Array.from(
+        sharedSegmentKeysByCable.get(item.id) || []
+      )
     });
   });
 
@@ -1861,6 +1931,60 @@ function engineeringCableLaneOffsetMm(obj) {
   return cursor + diameters[index] * 0.5;
 }
 
+function engineeringCableSharedSegment(obj, a, b) {
+  if (!obj || obj.kind !== 'cable' || !obj.engineering_generated) return false;
+
+  const sharedKeys = Array.isArray(obj.engineering_shared_segment_keys)
+    ? obj.engineering_shared_segment_keys
+    : [];
+  if (!sharedKeys.length) return false;
+
+  const start = {
+    x:Number(a.x).toFixed(3),
+    y:Number(a.y).toFixed(3),
+    z:Number(a.z).toFixed(3)
+  };
+  const end = {
+    x:Number(b.x).toFixed(3),
+    y:Number(b.y).toFixed(3),
+    z:Number(b.z).toFixed(3)
+  };
+
+  const dx = Math.abs(Number(b.x) - Number(a.x));
+  const dy = Math.abs(Number(b.y) - Number(a.y));
+  const dz = Math.abs(Number(b.z) - Number(a.z));
+  const axis = dx >= dz && dx >= dy ? 'x' : (dy >= dz ? 'y' : 'z');
+
+  let key;
+  if (axis === 'x') {
+    key = [
+      'x',
+      start.y,
+      start.z,
+      Math.min(Number(a.x), Number(b.x)).toFixed(3),
+      Math.max(Number(a.x), Number(b.x)).toFixed(3)
+    ].join('|');
+  } else if (axis === 'y') {
+    key = [
+      'y',
+      start.x,
+      start.z,
+      Math.min(Number(a.y), Number(b.y)).toFixed(3),
+      Math.max(Number(a.y), Number(b.y)).toFixed(3)
+    ].join('|');
+  } else {
+    key = [
+      'z',
+      start.x,
+      start.y,
+      Math.min(Number(a.z), Number(b.z)).toFixed(3),
+      Math.max(Number(a.z), Number(b.z)).toFixed(3)
+    ].join('|');
+  }
+
+  return sharedKeys.indexOf(key) >= 0;
+}
+
 function engineeringCableMainSegment(obj, a, b) {
   if (!obj || obj.kind !== 'cable' || !obj.engineering_generated) return false;
 
@@ -1900,16 +2024,28 @@ function engineeringCableDisplayOffset(obj, points, index) {
     return new THREE.Vector3();
   }
 
-  const previousMain = index > 0 &&
-    engineeringCableMainSegment(obj, points[index - 1], points[index]);
-  const nextMain = index < points.length - 1 &&
-    engineeringCableMainSegment(obj, points[index], points[index + 1]);
+  const previousShared = index > 0 &&
+    engineeringCableSharedSegment(obj, points[index - 1], points[index]);
+  const nextShared = index < points.length - 1 &&
+    engineeringCableSharedSegment(obj, points[index], points[index + 1]);
 
-  const laneFactor = (Number(previousMain) + Number(nextMain)) * 0.5;
+  const laneFactor = (Number(previousShared) + Number(nextShared)) * 0.5;
   if (laneFactor <= 0) return new THREE.Vector3();
 
-  const axis = obj.engineering_main_corridor_axis;
-  const side = axis === 'x'
+  const previousPoint = index > 0 ? points[index - 1] : null;
+  const nextPoint = index < points.length - 1 ? points[index + 1] : null;
+  const dx = nextPoint && previousPoint
+    ? Number(nextPoint.x) - Number(previousPoint.x)
+    : nextPoint
+      ? Number(nextPoint.x) - Number(points[index].x)
+      : Number(points[index].x) - Number(previousPoint.x);
+  const dz = nextPoint && previousPoint
+    ? Number(nextPoint.z) - Number(previousPoint.z)
+    : nextPoint
+      ? Number(nextPoint.z) - Number(points[index].z)
+      : Number(points[index].z) - Number(previousPoint.z);
+
+  const side = Math.abs(dx) >= Math.abs(dz)
     ? new THREE.Vector3(0, 0, 1)
     : new THREE.Vector3(1, 0, 0);
 
@@ -4256,6 +4392,9 @@ function projectData() {
           engineering_network_id:o.engineering_network_id || null,
           engineering_classification:o.engineering_classification || null,
           engineering_cable_ids:Array.isArray(o.engineering_cable_ids) ? o.engineering_cable_ids.slice() : [],
+          engineering_shared_segment_keys:Array.isArray(o.engineering_shared_segment_keys)
+            ? o.engineering_shared_segment_keys.slice()
+            : [],
           rotation_deg:{x:Number(o.rotation_deg && o.rotation_deg.x) || 0,y:Number(o.rotation_deg && o.rotation_deg.y) || 0,z:Number(o.rotation_deg && o.rotation_deg.z) || 0},
           surface_alignment:o.surface_alignment ? {
             mode:o.surface_alignment.mode || 'parallel',
