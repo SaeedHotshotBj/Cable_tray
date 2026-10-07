@@ -179,10 +179,10 @@ function findHorizontalGridPath(start, goal, obstacles, options, reuseCells) {
   const open = new MinHeap();
   const cameFrom = new Map();
   const gScore = new Map();
-  const start = makeCell(startCell.ix, startCell.iz, -1);
-  const startKey = cellKey(start);
+  const startCellState = makeCell(startCell.ix, startCell.iz, -1);
+  const startKey = cellKey(startCellState);
   gScore.set(startKey, 0);
-  open.push({ ix:start.ix, iz:start.iz, dir:-1, g:0, f:distanceXZ(
+  open.push({ ix:startCellState.ix, iz:startCellState.iz, dir:-1, g:0, f:distanceXZ(
     {x:start.ix * step, z:start.iz * step},
     {x:goalCell.ix * step, z:goalCell.iz * step}
   ) });
