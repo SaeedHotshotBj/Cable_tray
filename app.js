@@ -879,7 +879,91 @@ function getEngineeringRoutingBounds() {
   };
 }
 
-function runEngineeringAutoDesign() {
+let engineeringOutsideRoutingPrompt = null;
+
+function askEngineeringOutsideRouting(message) {
+  if (engineeringOutsideRoutingPrompt) return engineeringOutsideRoutingPrompt;
+
+  engineeringOutsideRoutingPrompt = new Promise(function(resolve) {
+    const overlay = document.createElement('div');
+    overlay.id = 'engineeringOutsideRoutingDialog';
+    overlay.style.position = 'fixed';
+    overlay.style.inset = '0';
+    overlay.style.zIndex = '10000';
+    overlay.style.display = 'flex';
+    overlay.style.alignItems = 'center';
+    overlay.style.justifyContent = 'center';
+    overlay.style.padding = '24px';
+    overlay.style.background = 'rgba(0,0,0,0.62)';
+
+    const panel = document.createElement('div');
+    panel.style.width = 'min(560px, calc(100vw - 48px))';
+    panel.style.boxSizing = 'border-box';
+    panel.style.padding = '22px';
+    panel.style.borderRadius = '12px';
+    panel.style.border = '1px solid rgba(255,255,255,0.16)';
+    panel.style.background = '#111820';
+    panel.style.color = '#f4f7fa';
+    panel.style.boxShadow = '0 20px 60px rgba(0,0,0,0.45)';
+    panel.style.fontFamily = 'inherit';
+
+    const text = document.createElement('div');
+    text.textContent = message;
+    text.style.whiteSpace = 'pre-line';
+    text.style.lineHeight = '1.55';
+    text.style.fontSize = '14px';
+    panel.appendChild(text);
+
+    const actions = document.createElement('div');
+    actions.style.display = 'flex';
+    actions.style.justifyContent = 'flex-end';
+    actions.style.gap = '10px';
+    actions.style.marginTop = '18px';
+
+    const noButton = document.createElement('button');
+    noButton.type = 'button';
+    noButton.textContent = 'No';
+    noButton.style.minWidth = '88px';
+
+    const yesButton = document.createElement('button');
+    yesButton.type = 'button';
+    yesButton.textContent = 'Yes';
+    yesButton.style.minWidth = '88px';
+
+    function finish(value) {
+      document.removeEventListener('keydown', onKeyDown);
+      if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+      engineeringOutsideRoutingPrompt = null;
+      resolve(value);
+    }
+
+    function onKeyDown(event) {
+      if (event.key === 'Escape') {
+        finish(false);
+      } else if (event.key === 'Enter') {
+        finish(true);
+      }
+    }
+
+    noButton.addEventListener('click', function(){ finish(false); });
+    yesButton.addEventListener('click', function(){ finish(true); });
+    overlay.addEventListener('click', function(event){
+      if (event.target === overlay) finish(false);
+    });
+    document.addEventListener('keydown', onKeyDown);
+
+    actions.appendChild(noButton);
+    actions.appendChild(yesButton);
+    panel.appendChild(actions);
+    overlay.appendChild(panel);
+    document.body.appendChild(overlay);
+    yesButton.focus();
+  });
+
+  return engineeringOutsideRoutingPrompt;
+}
+
+async function runEngineeringAutoDesign() {
   if (!state.equipment.length) {
     toast('Place at least one equipment/load first');
     return;
@@ -958,7 +1042,7 @@ function runEngineeringAutoDesign() {
   if(missingInternalRoutes.length){
     const names=missingInternalRoutes.slice(0,3).map(function(item){ return item.name; }).join(', ');
     const more=missingInternalRoutes.length>3?' ...':'';
-    const allowOutside=confirm(
+    const allowOutside=await askEngineeringOutsideRouting(
       'No completely internal tray route could be found for: '+names+more+
       '.\\n\\nDo you want to allow the tray route to leave the model envelope?'
     );
@@ -2081,7 +2165,12 @@ function rebuildEngineeringAccessories() {
 
   // A reducer is only a plan-view width transition. Height and elevation stay
   // constant; no vertical taper is generated here.
-  const seen = new Set();
+  const candidates = [];
+
+  function endpointKey(route, index) {
+    return route.id + '|' + index;
+  }
+
   for (let i = 0; i < trays.length; i++) {
     for (let j = i + 1; j < trays.length; j++) {
       const a = trays[i];
@@ -2092,12 +2181,16 @@ function rebuildEngineeringAccessories() {
       const endsA = endpointData(a);
       const endsB = endpointData(b);
       let match = null;
+      let matchAIndex = -1;
+      let matchBIndex = -1;
 
-      endsA.forEach(function(ea){
-        endsB.forEach(function(eb){
+      endsA.forEach(function(ea, eaIndex){
+        endsB.forEach(function(eb, ebIndex){
           const d = ea.point.distanceTo(eb.point);
           if (d < 0.05 && (!match || d < match.distance)) {
             match = {a:ea,b:eb,distance:d};
+            matchAIndex = eaIndex;
+            matchBIndex = ebIndex;
           }
         });
       });
@@ -2105,34 +2198,59 @@ function rebuildEngineeringAccessories() {
       if (!match || match.a.inward.dot(match.b.inward) > -0.95) continue;
       if (Math.abs(match.a.point.y - match.b.point.y) > 0.001) continue;
 
-      const pairKey = [a.id,b.id].sort().join('|');
-      if (seen.has(pairKey)) continue;
-      seen.add(pairKey);
-
-      const aSegment = a.points[a.points.length - 1].distanceTo(a.points[a.points.length - 2]);
-      const bSegment = b.points[b.points.length - 1].distanceTo(b.points[b.points.length - 2]);
+      const aSegment = a.points.length >= 2
+        ? a.points[a.points.length - 1].distanceTo(a.points[a.points.length - 2])
+        : 0;
+      const bSegment = b.points.length >= 2
+        ? b.points[b.points.length - 1].distanceTo(b.points[b.points.length - 2])
+        : 0;
       const aLen = Math.min(mmToScene(200), aSegment * 0.35);
       const bLen = Math.min(mmToScene(200), bSegment * 0.35);
       if (aLen < 0.05 || bLen < 0.05) continue;
 
-      const start = match.a.point.clone().add(match.a.inward.clone().multiplyScalar(aLen));
-      const end = match.b.point.clone().add(match.b.inward.clone().multiplyScalar(bLen));
+      const startPoint = match.a.point.clone().add(match.a.inward.clone().multiplyScalar(aLen));
+      const endPoint = match.b.point.clone().add(match.b.inward.clone().multiplyScalar(bLen));
 
       // Plan-view reducer only: Y is fixed and the tray height remains constant.
-      start.y = match.a.point.y;
-      end.y = match.a.point.y;
+      startPoint.y = match.a.point.y;
+      endPoint.y = match.a.point.y;
 
-      addTaperedTrayTransition(
-        root,
-        start,
-        end,
-        Number(a.width_mm) || 100,
-        Number(b.width_mm) || 100,
-        Math.min(Number(a.height_mm) || 100, Number(b.height_mm) || 100),
-        a.id
-      );
+      candidates.push({
+        a,
+        b,
+        start:startPoint,
+        end:endPoint,
+        aEndpointKey:endpointKey(a, matchAIndex),
+        bEndpointKey:endpointKey(b, matchBIndex),
+        widthDifference:Math.abs(Number(a.width_mm) - Number(b.width_mm)),
+        transitionLength:startPoint.distanceTo(endPoint)
+      });
     }
   }
+
+  candidates.sort(function(a, b){
+    return b.widthDifference - a.widthDifference ||
+      a.transitionLength - b.transitionLength;
+  });
+
+  const usedEndpoints = new Set();
+  candidates.forEach(function(candidate){
+    // Never place two reducers back-to-back at the same physical tray endpoint.
+    if (usedEndpoints.has(candidate.aEndpointKey) || usedEndpoints.has(candidate.bEndpointKey)) return;
+
+    addTaperedTrayTransition(
+      root,
+      candidate.start,
+      candidate.end,
+      Number(candidate.a.width_mm) || 100,
+      Number(candidate.b.width_mm) || 100,
+      Math.min(Number(candidate.a.height_mm) || 100, Number(candidate.b.height_mm) || 100),
+      candidate.a.id
+    );
+
+    usedEndpoints.add(candidate.aEndpointKey);
+    usedEndpoints.add(candidate.bEndpointKey);
+  });
 }
 function rebuildRoutes() {
   state.routeRoots.forEach(function(root){
