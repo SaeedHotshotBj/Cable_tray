@@ -26,6 +26,7 @@ const state = {
     gridStepMm: 100,
     clearanceMm: 100,
     maxBodyDistanceMm: 1500,
+    namesVisible: true,
     mainMinCables: 2,
     traySideMarginMm: 25,
     standardTrayWidthsMm: [100,150,200,300,400,500,600,800,1000,1200]
@@ -346,6 +347,7 @@ function engineeringLabel(textValue, fillColor) {
   texture.colorSpace = THREE.SRGBColorSpace;
   const material = new THREE.SpriteMaterial({ map:texture, transparent:true, depthTest:false });
   const sprite = new THREE.Sprite(material);
+  sprite.userData.engineeringLabel = true;
   sprite.scale.set(90, 22.5, 1);
   sprite.renderOrder = 60;
   return sprite;
@@ -419,6 +421,7 @@ function rebuildEngineeringMarkers() {
     root.add(box);
     const label = engineeringLabel(panel.name, '#54a9ff');
     label.position.y = mmToScene(140);
+    label.visible = state.engineeringSettings.namesVisible !== false;
     label.userData.objectId = panel.id;
     label.userData.engineeringEntity = 'panel';
     root.add(label);
@@ -441,6 +444,7 @@ function rebuildEngineeringMarkers() {
     root.add(sphere);
     const label = engineeringLabel(item.name, '#ffa64d');
     label.position.y = mmToScene(105);
+    label.visible = state.engineeringSettings.namesVisible !== false;
     label.userData.objectId = item.id;
     label.userData.engineeringEntity = 'equipment';
     root.add(label);
@@ -826,6 +830,24 @@ function removeEngineeringGeneratedRoutes() {
   state.objects = state.objects.filter(function(o){ return !o.engineering_generated; });
 }
 
+function getEngineeringModelMaxY() {
+  let maxY = -Infinity;
+  state.modelRoots.forEach(function(root){
+    root.updateMatrixWorld(true);
+    root.traverse(function(node){
+      if (!node.isMesh || !node.geometry || node.visible === false) return;
+      const box = new THREE.Box3().setFromObject(node);
+      if (!box.isEmpty()) maxY = Math.max(maxY, box.max.y * 10);
+    });
+  });
+  if (!Number.isFinite(maxY)) {
+    const anchors = state.equipment.concat(state.panels)
+      .map(function(entity){ return entity.anchor && entity.anchor.point ? Number(entity.anchor.point.y) : -Infinity; });
+    maxY = Math.max.apply(null, anchors.concat([0]));
+  }
+  return maxY;
+}
+
 function runEngineeringAutoDesign() {
   if (!state.equipment.length) {
     toast('Place at least one equipment/load first');
@@ -851,10 +873,14 @@ function runEngineeringAutoDesign() {
     maxBodyDistanceMm:Number.isFinite(Number($('autoTrayMaxDistance').value))
       ? Number($('autoTrayMaxDistance').value)
       : 1500,
+    ceilingY:getEngineeringModelMaxY(),
+    ceilingSafetyGapMm:50,
     fillLimitPercent:Number($('fillLimit').value) || 80,
     mainMinCables:Number($('mainTrayMinCables').value) || 2,
     trayHeightMm:Number($('defaultTrayHeight').value) || 100,
-    mainCorridorTurnPenaltyRatio:0.75,
+    mainCorridorTurnPenaltyRatio:100,
+    turnPenaltyRatio:20,
+    preferredYPenaltyRatio:3,
     routingPaddingMm:Math.max(
       1000,
       (Number.isFinite(Number($('autoTrayMaxDistance').value)) ? Number($('autoTrayMaxDistance').value) : 1500) +
@@ -862,7 +888,6 @@ function runEngineeringAutoDesign() {
     ),
     traySideMarginMm:25,
     standardTrayWidthsMm:parseNumberList($('autoTrayStandards').value),
-    turnPenaltyRatio:0.04,
     verticalPenaltyRatio:0.02,
     verticalRangePenaltyRatio:0.25,
     reuseBonus:0.45,
@@ -941,6 +966,7 @@ function runEngineeringAutoDesign() {
     gridStepMm:settings.gridStepMm,
     clearanceMm:settings.clearanceMm,
     maxBodyDistanceMm:settings.maxBodyDistanceMm,
+    namesVisible:state.engineeringSettings.namesVisible !== false,
     mainMinCables:settings.mainMinCables,
     traySideMarginMm:settings.traySideMarginMm,
     standardTrayWidthsMm:settings.standardTrayWidthsMm
@@ -1099,7 +1125,7 @@ $('measureType').addEventListener('change', function(){
 });
 $('projectName').addEventListener('input', function(e){ state.project.name = e.target.value; });
 $('unitSystem').addEventListener('change', function(e){ state.project.units = e.target.value; });
-['routingGridStep','autoTrayClearance','mainTrayMinCables','autoTrayStandards'].forEach(function(idValue){
+['routingGridStep','autoTrayClearance','autoTrayMaxDistance','mainTrayMinCables','autoTrayStandards'].forEach(function(idValue){
   const field = $(idValue);
   if (!field) return;
   field.addEventListener('change', function(){
@@ -1107,6 +1133,7 @@ $('unitSystem').addEventListener('change', function(e){ state.project.units = e.
       ...state.engineeringSettings,
       gridStepMm:Number($('routingGridStep').value) || 100,
       clearanceMm:Number.isFinite(Number($('autoTrayClearance').value)) ? Number($('autoTrayClearance').value) : 100,
+      maxBodyDistanceMm:Number.isFinite(Number($('autoTrayMaxDistance').value)) ? Number($('autoTrayMaxDistance').value) : 1500,
       mainMinCables:Number($('mainTrayMinCables').value) || 2,
       standardTrayWidthsMm:parseNumberList($('autoTrayStandards').value)
     };
@@ -2968,6 +2995,30 @@ function addMeasurement(first,second) {
   toast((m.kind==='surface'?'Surface distance: ':'Distance: ')+formatDistance(m.distance_m));
 }
 
+function toggleEngineeringNames() {
+  state.engineeringSettings = {
+    ...state.engineeringSettings,
+    namesVisible:!state.engineeringSettings.namesVisible
+  };
+  setEngineeringNamesVisible(state.engineeringSettings.namesVisible);
+  renderEngineeringNamesToggle();
+}
+
+function setEngineeringNamesVisible(visible) {
+  const show = visible !== false;
+  engineeringMarkerRoot.traverse(function(node){
+    if (node.userData && node.userData.engineeringLabel) node.visible = show;
+  });
+}
+
+function renderEngineeringNamesToggle() {
+  const button = $('toggleEngineeringNamesBtn');
+  if (!button) return;
+  const visible = state.engineeringSettings.namesVisible !== false;
+  button.textContent = visible ? 'Hide Names' : 'Show Names';
+  button.title = visible ? 'Hide motor and panel names' : 'Show motor and panel names';
+}
+
 function toggleMeasurements() {
   state.measurementsVisible=!state.measurementsVisible;
   measurementRoot.visible=state.measurementsVisible;
@@ -4116,12 +4167,13 @@ $('topBtn').addEventListener('click', function(){ camera.position.set(0,18000,0.
 $('frontBtn').addEventListener('click', function(){ camera.position.set(0,5000,18000); controls.target.set(0,0,0); controls.update(); });
 $('isoBtn').addEventListener('click', function(){ camera.position.set(12000,9500,12000); controls.target.set(0,1500,0); controls.update(); });
 $('toggleMeasurementsBtn').addEventListener('click', toggleMeasurements);
+$('toggleEngineeringNamesBtn').addEventListener('click', toggleEngineeringNames);
 $('clearMeasurementsBtn').addEventListener('click', function(){
   if (!state.measurements.length) return;
   if (!confirm('Delete all dimensions?')) return;
   clearAllMeasurements();
 });
-setTool('select'); rebuildMeasurements(); renderMeasurementsToggle(); renderMeasurementList(); render(); animate();
+setTool('select'); rebuildMeasurements(); renderMeasurementsToggle(); renderEngineeringNamesToggle(); renderMeasurementList(); render(); animate();
 
 function animate(){
   requestAnimationFrame(animate);
