@@ -7,6 +7,7 @@ import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
 import { OBJExporter } from 'three/addons/exporters/OBJExporter.js';
 import { STLExporter } from 'three/addons/exporters/STLExporter.js';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
+import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast } from 'three-mesh-bvh';
 import { routeEngineeringNetwork } from './engineering_routing.js';
 
 const state = {
@@ -90,6 +91,8 @@ engineeringMarkerRoot.name = 'EngineeringAnnotations';
 scene.add(engineeringMarkerRoot);
 state.engineeringMarkerRoot = engineeringMarkerRoot;
 const raycaster = new THREE.Raycaster();
+const engineeringCollisionRaycaster = new THREE.Raycaster();
+engineeringCollisionRaycaster.firstHitOnly = true;
 const mouse = new THREE.Vector2();
 
 function resize() {
