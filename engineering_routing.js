@@ -2231,6 +2231,11 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
     const registration = registerNetworkPath(tree, corridorPath, routingY);
     if (!registration) return;
 
+    // Every equipment branch must attach directly to the shared Main Tray.
+    // Never use another motor's branch as a network goal; that would create
+    // a second parallel tray path instead of a perpendicular branch to Main.
+    const mainNetworkGoalPoints = Array.from(tree.nodes.values()).map(clonePoint);
+
     const pending = prepared.slice();
     const cablePlans = [];
 
@@ -2263,7 +2268,7 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
               Number(options.turnPenaltyRatio) || 20,
               Number(options.mainCorridorTurnPenaltyRatio) || 100
             ),
-            networkGoalPoints:networkPoints
+            networkGoalPoints:mainNetworkGoalPoints
           },
           new Set()
         );
