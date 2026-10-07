@@ -1510,6 +1510,16 @@ function approximateCorridorBranchDistance(corridor, entries) {
   return total;
 }
 
+function approximateCorridorCoverageCount(corridor, entries, thresholdMm) {
+  const threshold = Math.max(1, Number(thresholdMm) || 0);
+  let count = 0;
+  entries.forEach(function(entry){
+    const nearest = closestPointOnPolyline3D(entry.start, corridor);
+    if (nearest && nearest.distance <= threshold) count++;
+  });
+  return count;
+}
+
 function resolveHighestValidRoutingY(points, options) {
   const ceilingY = Number(options.ceilingY);
   if (!Number.isFinite(ceilingY) || !Array.isArray(points) || !points.length) return null;
@@ -1843,21 +1853,15 @@ export function routeEngineeringNetwork(inputs) {
         manhattanDistance3D(b.start, panelStandoff.point);
     }).slice(0, candidateLimit);
 
-    const commonMainRoutingY = resolveCommonMainRoutingY(
-      [panelStandoff.point].concat(prepared.map(function(entry){ return entry.start; })),
-      routeOptions
-    );
-
-    if (!Number.isFinite(commonMainRoutingY)) {
-      warnings.push(
-        group.panel.name + ': no common horizontal main-tray level was found inside the model envelope.'
-      );
-      return;
-    }
-
     let bestCorridor = null;
     candidates.forEach(function(candidate){
-      const routingY = commonMainRoutingY;
+      // The common level belongs to the actual main corridor endpoints.
+      // A second/third motor only needs a collision-free branch to that corridor;
+      // its own standoff must not make an otherwise valid main corridor fail.
+      const routingY = resolveCommonMainRoutingY(
+        [panelStandoff.point, candidate.start],
+        routeOptions
+      );
       if (!Number.isFinite(routingY)) return;
 
       const corridorResult = findGridPath3D(
@@ -1885,10 +1889,23 @@ export function routeEngineeringNetwork(inputs) {
         Number(options.gridStepMm) * 100,
         1
       );
+      const coverageThreshold = Math.max(
+        Number(options.gridStepMm) * 1.5,
+        Number(routeOptions.routingTrayWidthMm) + Number(options.clearanceMm)
+      );
+      const coverageCount = approximateCorridorCoverageCount(
+        corridorResult.points,
+        prepared,
+        coverageThreshold
+      );
+      // One additional load physically covered by the main run is preferable
+      // to stopping the main tray at the first motor and creating a long branch.
+      const coverageBonus = Math.max(0, coverageCount - 1) * turnPriorityWeight;
       const score =
         turns * turnPriorityWeight +
         corridorLength +
-        branchEstimate * Math.max(0.1, Number(options.mainCorridorBranchWeight) || 1.15);
+        branchEstimate * Math.max(0.1, Number(options.mainCorridorBranchWeight) || 1.15) -
+        coverageBonus;
 
       if (!bestCorridor || score < bestCorridor.score) {
         bestCorridor = {
@@ -1897,6 +1914,7 @@ export function routeEngineeringNetwork(inputs) {
           score,
           length_mm:corridorLength,
           turns,
+          coverage_count:coverageCount,
           routingY
         };
       }
@@ -1940,13 +1958,32 @@ export function routeEngineeringNetwork(inputs) {
 
     const mainTrayPoints = corridorPoints.map(clonePoint);
 
+    const panelConnectionPoints = [];
+    function pushPanelConnectionPoint(point) {
+      if (!point) return;
+      const candidate = clonePoint(point);
+      const previous = panelConnectionPoints[panelConnectionPoints.length - 1];
+      if (
+        previous &&
+        Math.abs(candidate.x - previous.x) < 0.001 &&
+        Math.abs(candidate.y - previous.y) < 0.001 &&
+        Math.abs(candidate.z - previous.z) < 0.001
+      ) return;
+      panelConnectionPoints.push(candidate);
+    }
+
+    // The dedicated panel connection is allowed to leave the fixed main level
+    // only for the final connection to the electrical panel itself.
+    pushPanelConnectionPoint(group.panel.anchor && group.panel.anchor.point);
+    panelDrop.points.forEach(pushPanelConnectionPoint);
+
     mainCorridors.push({
       panel_id:group.panel.id,
       width_mm:planningTrayWidth,
       height_mm:Number(options.trayHeightMm) || 100,
       cable_ids:prepared.map(function(entry){ return entry.equipment.id; }),
       points:mainTrayPoints,
-      panel_drop_points:panelDrop.points.map(clonePoint),
+      panel_drop_points:panelConnectionPoints,
       main_level_y_mm:bestCorridor.routingY
     });
 
@@ -1978,6 +2015,21 @@ export function routeEngineeringNetwork(inputs) {
           mainRouteOptions,
           reuseCells
         );
+
+        if (!branchResult.points || !branchResult.points.length) {
+          // A shared main tray must not become unreachable merely because the
+          // current reuse preference distorted this individual branch search.
+          branchResult = findGridPath3D(
+            entry.start,
+            attachment.point,
+            obstacles,
+            {
+              ...mainRouteOptions,
+              reuseBonus:0
+            },
+            new Set()
+          );
+        }
       }
 
       if (!branchResult.points || !branchResult.points.length) {
