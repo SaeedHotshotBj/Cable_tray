@@ -238,7 +238,9 @@ function restoreDesignState(snapshot) {
     const engineering = snapshot.engineering || {};
     state.equipment = JSON.parse(JSON.stringify(engineering.equipment || []));
     state.panels = JSON.parse(JSON.stringify(engineering.panels || []));
-    state.engineeringSettings = { ...state.engineeringSettings, ...(engineering.settings || {}) };
+    const restoredEngineeringSettings = { ...(engineering.settings || {}) };
+    delete restoredEngineeringSettings.routingElevationMm;
+    state.engineeringSettings = { ...state.engineeringSettings, ...restoredEngineeringSettings };
     state.project = { ...state.project, ...(snapshot.project || {}) };
     const selectedExists = state.objects.some(function(o){ return o.id === snapshot.selected; }) ||
       state.equipment.some(function(o){ return o.id === snapshot.selected; }) ||
@@ -3676,7 +3678,9 @@ function loadProject(data) {
   const engineering = data.engineering || {};
   state.equipment = JSON.parse(JSON.stringify(engineering.equipment || []));
   state.panels = JSON.parse(JSON.stringify(engineering.panels || []));
-  state.engineeringSettings = { ...state.engineeringSettings, ...(engineering.settings || {}) };
+  const loadedEngineeringSettings = { ...(engineering.settings || {}) };
+  delete loadedEngineeringSettings.routingElevationMm;
+  state.engineeringSettings = { ...state.engineeringSettings, ...loadedEngineeringSettings };
   state.measurementsVisible = data.measurements_visible !== false;
   state.measurements = (data.measurements || []).map(function(m){
     return {
