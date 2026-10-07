@@ -294,9 +294,7 @@ function findHorizontalGridPath(start, goal, obstacles, options, reuseCells) {
 
     if (compressed.length >= 2) {
       const before = compressed[compressed.length - 2];
-      const sameX = Math.abs(before.x - previous.x) < 0.001 && Math.abs(previous.x - point.x) < 0.001;
-      const sameZ = Math.abs(before.z - previous.z) < 0.001 && Math.abs(previous.z - point.z) < 0.001;
-      if (sameX || sameZ) {
+      if (areCollinearForward(before, previous, point)) {
         compressed[compressed.length - 1] = point;
         return;
       }
@@ -340,10 +338,7 @@ function buildCablePoints(equipment, panel, horizontalPoints, trayElevationMm) {
     if (dx < 0.001 && dy < 0.001 && dz < 0.001) return;
     if (compressed.length >= 2) {
       const before = compressed[compressed.length - 2];
-      const sameX = Math.abs(before.x - previous.x) < 0.001 && Math.abs(previous.x - point.x) < 0.001;
-      const sameY = Math.abs(before.y - previous.y) < 0.001 && Math.abs(previous.y - point.y) < 0.001;
-      const sameZ = Math.abs(before.z - previous.z) < 0.001 && Math.abs(previous.z - point.z) < 0.001;
-      if (sameX || sameY || sameZ) {
+      if (areCollinearForward(before, previous, point)) {
         compressed[compressed.length - 1] = point;
         return;
       }
@@ -351,6 +346,21 @@ function buildCablePoints(equipment, panel, horizontalPoints, trayElevationMm) {
     compressed.push(point);
   });
   return compressed;
+}
+
+function areCollinearForward(a, b, c) {
+  const abx = b.x - a.x;
+  const aby = b.y - a.y;
+  const abz = b.z - a.z;
+  const bcx = c.x - b.x;
+  const bcy = c.y - b.y;
+  const bcz = c.z - b.z;
+  const crossX = aby * bcz - abz * bcy;
+  const crossY = abz * bcx - abx * bcz;
+  const crossZ = abx * bcy - aby * bcx;
+  const crossSq = crossX * crossX + crossY * crossY + crossZ * crossZ;
+  const dot = abx * bcx + aby * bcy + abz * bcz;
+  return crossSq < 1e-6 && dot >= -1e-6;
 }
 
 function segmentAxis(a, b) {
