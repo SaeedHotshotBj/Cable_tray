@@ -1094,7 +1094,8 @@ async function runEngineeringAutoDesign() {
       engineering_network_id:'network-' + panel.id,
       engineering_tray_width_mm:Number(plan.planning_tray_width_mm) || null,
       engineering_main_corridor_axis:plan.main_corridor_axis || settings.structurePrimaryAxis || null,
-      engineering_main_corridor_y_mm:Number(plan.main_corridor_routing_y_mm)
+      engineering_main_corridor_y_mm:Number(plan.main_corridor_routing_y_mm),
+      engineering_main_corridor_secondary_coordinate_mm:Number(plan.main_corridor_secondary_coordinate_mm)
     });
   });
 
@@ -1875,6 +1876,15 @@ function engineeringCableMainSegment(obj, a, b) {
     Math.abs(Number(b.y) - routingY) > 0.001
   ) {
     return false;
+  }
+
+  // For the parallel-row topology, lane offsets are allowed only on the
+  // actual shared Main corridor. A horizontal branch at the same elevation
+  // must remain a single dedicated cable path to its own equipment.
+  const secondary = Number(obj.engineering_main_corridor_secondary_coordinate_mm);
+  if (Number.isFinite(secondary)) {
+    const secondaryValue = axis === 'x' ? Number(a.z) : Number(a.x);
+    if (Math.abs(secondaryValue - secondary) > 0.001) return false;
   }
 
   const dx = Math.abs(Number(b.x) - Number(a.x));
