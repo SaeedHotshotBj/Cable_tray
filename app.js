@@ -22,7 +22,6 @@ const state = {
   equipment: [],
   panels: [],
   engineeringSettings: {
-    routingElevationMm: 3000,
     gridStepMm: 250,
     clearanceMm: 100,
     mainMinCables: 2,
@@ -528,38 +527,51 @@ function parseNumberList(value) {
   return String(value || '').split(',').map(function(v){ return Number(v.trim()); }).filter(function(v){ return Number.isFinite(v) && v > 0; });
 }
 
-function collectRoutingObstacles(routingElevationMm, clearanceMm) {
+function collectRoutingObstacles(clearanceMm) {
   const obstacles = [];
   const unique = new Set();
-  const elevation = Number(routingElevationMm) || 0;
-  const clearance = Math.max(0, Number(clearanceMm) || 0);
 
   state.modelRoots.forEach(function(root){
     root.updateMatrixWorld(true);
     root.traverse(function(node){
-      if (!node.isMesh || !node.geometry) return;
+      if (!node.isMesh || !node.geometry || node.visible === false) return;
+
       const box = new THREE.Box3().setFromObject(node);
       if (box.isEmpty()) return;
+
       const minX = box.min.x * 10;
       const maxX = box.max.x * 10;
       const minY = box.min.y * 10;
       const maxY = box.max.y * 10;
       const minZ = box.min.z * 10;
       const maxZ = box.max.z * 10;
-      if (minY > elevation + clearance || maxY < elevation - clearance) return;
-      if ((maxX - minX) < 25 || (maxZ - minZ) < 25) return;
+
+      if (
+        (maxX - minX) < 1 ||
+        (maxY - minY) < 1 ||
+        (maxZ - minZ) < 1
+      ) return;
+
       const key = [
-        Math.round(minX),Math.round(maxX),
-        Math.round(minZ),Math.round(maxZ)
+        Math.round(minX * 10),
+        Math.round(maxX * 10),
+        Math.round(minY * 10),
+        Math.round(maxY * 10),
+        Math.round(minZ * 10),
+        Math.round(maxZ * 10)
       ].join('|');
+
       if (unique.has(key)) return;
       unique.add(key);
-      obstacles.push({minX,maxX,minZ,maxZ});
+      obstacles.push({minX,maxX,minY,maxY,minZ,maxZ});
     });
   });
 
   obstacles.sort(function(a,b){
-    return ((b.maxX-b.minX)*(b.maxZ-b.minZ)) - ((a.maxX-a.minX)*(a.maxZ-a.minZ));
+    return (
+      ((b.maxX-b.minX)*(b.maxY-b.minY)*(b.maxZ-b.minZ)) -
+      ((a.maxX-a.minX)*(a.maxY-a.minY)*(a.maxZ-a.minZ))
+    );
   });
 
   const reduced = [];
@@ -567,12 +579,16 @@ function collectRoutingObstacles(routingElevationMm, clearanceMm) {
     const contained = reduced.some(function(existing){
       return candidate.minX >= existing.minX &&
         candidate.maxX <= existing.maxX &&
+        candidate.minY >= existing.minY &&
+        candidate.maxY <= existing.maxY &&
         candidate.minZ >= existing.minZ &&
         candidate.maxZ <= existing.maxZ;
     });
+
     if (!contained) reduced.push(candidate);
     if (reduced.length >= 500) return;
   });
+
   return reduced;
 }
 
@@ -600,7 +616,6 @@ function runEngineeringAutoDesign() {
   }
 
   const settings = {
-    routingElevationMm:Number($('defaultElevation').value) || 3000,
     gridStepMm:Number($('routingGridStep').value) || 250,
     clearanceMm:Number.isFinite(Number($('autoTrayClearance').value)) ? Number($('autoTrayClearance').value) : 100,
     fillLimitPercent:Number($('fillLimit').value) || 80,
@@ -609,12 +624,13 @@ function runEngineeringAutoDesign() {
     traySideMarginMm:25,
     standardTrayWidthsMm:parseNumberList($('autoTrayStandards').value),
     turnPenaltyRatio:0.04,
+    verticalPenaltyRatio:0.02,
     reuseBonus:0.45,
-    maxGridCells:40000,
-    routingPaddingMm:1500
+    maxGridCells:120000,
+    routingPaddingMm:1000
   };
 
-  const obstacles = collectRoutingObstacles(settings.routingElevationMm, settings.clearanceMm);
+  const obstacles = collectRoutingObstacles(settings.clearanceMm);
   const report = routeEngineeringNetwork({
     equipment:state.equipment,
     panels:state.panels,
@@ -671,7 +687,6 @@ function runEngineeringAutoDesign() {
 
   state.engineeringSettings = {
     ...state.engineeringSettings,
-    routingElevationMm:settings.routingElevationMm,
     gridStepMm:settings.gridStepMm,
     clearanceMm:settings.clearanceMm,
     mainMinCables:settings.mainMinCables,
