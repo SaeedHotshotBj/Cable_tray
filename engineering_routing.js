@@ -149,6 +149,124 @@ function removeEndpointBlocks3D(blocked, startCell, goalCell) {
   blocked.delete(pointKey3D(goalCell.ix, goalCell.iy, goalCell.iz));
 }
 
+function segmentIntersectsObstacle3D(a, b, obstacle, clearanceMm) {
+  const clearance = Math.max(0, Number(clearanceMm) || 0);
+  const minX = obstacle.minX - clearance;
+  const maxX = obstacle.maxX + clearance;
+  const minY = obstacle.minY - clearance;
+  const maxY = obstacle.maxY + clearance;
+  const minZ = obstacle.minZ - clearance;
+  const maxZ = obstacle.maxZ + clearance;
+
+  const dx = Math.abs(b.x - a.x);
+  const dy = Math.abs(b.y - a.y);
+  const dz = Math.abs(b.z - a.z);
+
+  if (dx >= dy && dx >= dz && dx > 0.001) {
+    if (a.y < minY || a.y > maxY || a.z < minZ || a.z > maxZ) return false;
+    return Math.max(a.x, b.x) >= minX && Math.min(a.x, b.x) <= maxX;
+  }
+
+  if (dy >= dx && dy >= dz && dy > 0.001) {
+    if (a.x < minX || a.x > maxX || a.z < minZ || a.z > maxZ) return false;
+    return Math.max(a.y, b.y) >= minY && Math.min(a.y, b.y) <= maxY;
+  }
+
+  if (dz > 0.001) {
+    if (a.x < minX || a.x > maxX || a.y < minY || a.y > maxY) return false;
+    return Math.max(a.z, b.z) >= minZ && Math.min(a.z, b.z) <= maxZ;
+  }
+
+  return (
+    a.x >= minX && a.x <= maxX &&
+    a.y >= minY && a.y <= maxY &&
+    a.z >= minZ && a.z <= maxZ
+  );
+}
+
+function segmentClear3D(a, b, obstacles, clearanceMm) {
+  for (let i = 0; i < obstacles.length; i++) {
+    if (segmentIntersectsObstacle3D(a, b, obstacles[i], clearanceMm)) return false;
+  }
+  return true;
+}
+
+function bridgePath3D(from, to, obstacles, clearanceMm) {
+  const axes = ['x','y','z'];
+  const permutations = [
+    ['x','y','z'], ['x','z','y'],
+    ['y','x','z'], ['y','z','x'],
+    ['z','x','y'], ['z','y','x']
+  ];
+
+  let best = null;
+  permutations.forEach(function(order) {
+    const points = [clonePoint(from)];
+    let cursor = clonePoint(from);
+    let valid = true;
+
+    order.forEach(function(axis) {
+      if (!valid) return;
+      const target = clonePoint(cursor);
+      target[axis] = to[axis];
+      if (
+        Math.abs(target.x - cursor.x) < 0.001 &&
+        Math.abs(target.y - cursor.y) < 0.001 &&
+        Math.abs(target.z - cursor.z) < 0.001
+      ) return;
+
+      if (!segmentClear3D(cursor, target, obstacles, clearanceMm)) {
+        valid = false;
+        return;
+      }
+
+      points.push(target);
+      cursor = target;
+    });
+
+    if (!valid) return;
+
+    if (!best || points.length < best.length) best = points;
+  });
+
+  return best;
+}
+
+function findBridgeCell(point, blocked, bounds, step, obstacles, clearanceMm) {
+  const center = {
+    ix:Math.round(point.x / step),
+    iy:Math.round(point.y / step),
+    iz:Math.round(point.z / step)
+  };
+
+  const candidates = [];
+  for (let dx = -1; dx <= 1; dx++) {
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dz = -1; dz <= 1; dz++) {
+        const ix = center.ix + dx;
+        const iy = center.iy + dy;
+        const iz = center.iz + dz;
+        if (!cellInsideBounds3D(ix, iy, iz, bounds)) continue;
+        if (blocked.has(pointKey3D(ix, iy, iz))) continue;
+
+        const target = {x:ix*step,y:iy*step,z:iz*step};
+        const bridge = bridgePath3D(point, target, obstacles, clearanceMm);
+        if (!bridge) continue;
+
+        let length = 0;
+        for (let i = 1; i < bridge.length; i++) {
+          length += manhattanDistance3D(bridge[i-1], bridge[i]);
+        }
+
+        candidates.push({ix,iy,iz,target,bridge,length});
+      }
+    }
+  }
+
+  candidates.sort(function(a,b){ return a.length - b.length; });
+  return candidates[0] || null;
+}
+
 function cellInsideBounds3D(ix, iy, iz, bounds) {
   return ix >= bounds.minIx && ix <= bounds.maxIx &&
     iy >= bounds.minIy && iy <= bounds.maxIy &&
@@ -271,18 +389,28 @@ function findGridPath3D(start, goal, obstacles, options, reuseCells) {
   const step = adapted.step;
   const bounds = adapted.bounds;
 
-  const startCell = {
-    ix: Math.round(start.x / step),
-    iy: Math.round(start.y / step),
-    iz: Math.round(start.z / step)
-  };
-  const goalCell = {
-    ix: Math.round(goal.x / step),
-    iy: Math.round(goal.y / step),
-    iz: Math.round(goal.z / step)
-  };
-
   const blocked = buildBlockedSet3D(obstacles, step, bounds, Number(options.clearanceMm) || 0);
+  const startBridge = findBridgeCell(
+    start, blocked, bounds, step, obstacles, Number(options.clearanceMm) || 0
+  );
+  const goalBridge = findBridgeCell(
+    goal, blocked, bounds, step, obstacles, Number(options.clearanceMm) || 0
+  );
+
+  if (!startBridge || !goalBridge) {
+    return {
+      step,
+      points:[
+        {x:start.x,y:start.y,z:start.z},
+        {x:goal.x,y:goal.y,z:goal.z}
+      ],
+      fallback:true,
+      warning:'A collision-free orthogonal bridge to the routing grid could not be found.'
+    };
+  }
+
+  const startCell = {ix:startBridge.ix,iy:startBridge.iy,iz:startBridge.iz};
+  const goalCell = {ix:goalBridge.ix,iy:goalBridge.iy,iz:goalBridge.iz};
   removeEndpointBlocks3D(blocked, startCell, goalCell);
 
   const turnPenalty = step * Math.max(0, Number(options.turnPenaltyRatio) || 0.04);
@@ -387,7 +515,7 @@ function findGridPath3D(start, goal, obstacles, options, reuseCells) {
   }
 
   const cells = reconstructPath3D(cameFrom, goalState);
-  const points = cells.map(function(cell) {
+  const gridPoints = cells.map(function(cell) {
     return {
       x:cell.ix * step,
       y:cell.iy * step,
@@ -395,8 +523,22 @@ function findGridPath3D(start, goal, obstacles, options, reuseCells) {
     };
   });
 
-  points[0] = {x:start.x,y:start.y,z:start.z};
-  points[points.length - 1] = {x:goal.x,y:goal.y,z:goal.z};
+  const points = [];
+  startBridge.bridge.forEach(function(point){ points.push(point); });
+  gridPoints.forEach(function(point){
+    const previous = points[points.length - 1];
+    if (
+      Math.abs(previous.x - point.x) < 0.001 &&
+      Math.abs(previous.y - point.y) < 0.001 &&
+      Math.abs(previous.z - point.z) < 0.001
+    ) return;
+    points.push(point);
+  });
+
+  const goalBridgePoints = goalBridge.bridge;
+  for (let i = 1; i < goalBridgePoints.length; i++) {
+    points.push(goalBridgePoints[i]);
+  }
 
   const compressed = [];
   points.forEach(function(point) {
