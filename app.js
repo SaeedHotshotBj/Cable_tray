@@ -849,6 +849,33 @@ function getEngineeringModelMaxY() {
   return maxY;
 }
 
+function getEngineeringRoutingBounds() {
+  const bounds = new THREE.Box3();
+  let hasGeometry = false;
+
+  state.modelRoots.forEach(function(root){
+    root.updateMatrixWorld(true);
+    root.traverse(function(node){
+      if (!node.isMesh || !node.geometry || node.visible === false) return;
+      const box = new THREE.Box3().setFromObject(node);
+      if (box.isEmpty()) return;
+      bounds.union(box);
+      hasGeometry = true;
+    });
+  });
+
+  if (!hasGeometry || bounds.isEmpty()) return null;
+
+  return {
+    minX:bounds.min.x * 10,
+    maxX:bounds.max.x * 10,
+    minY:bounds.min.y * 10,
+    maxY:bounds.max.y * 10,
+    minZ:bounds.min.z * 10,
+    maxZ:bounds.max.z * 10
+  };
+}
+
 function runEngineeringAutoDesign() {
   if (!state.equipment.length) {
     toast('Place at least one equipment/load first');
@@ -868,14 +895,16 @@ function runEngineeringAutoDesign() {
     return;
   }
 
+  const routingBounds = getEngineeringRoutingBounds();
   const settings = {
     gridStepMm:Number($('routingGridStep').value) || 100,
     clearanceMm:Number.isFinite(Number($('autoTrayClearance').value)) ? Number($('autoTrayClearance').value) : 100,
     maxBodyDistanceMm:Number.isFinite(Number($('autoTrayMaxDistance').value))
       ? Number($('autoTrayMaxDistance').value)
       : 1500,
-    ceilingY:getEngineeringModelMaxY(),
+    ceilingY:routingBounds ? routingBounds.maxY : getEngineeringModelMaxY(),
     ceilingSafetyGapMm:50,
+    routingBounds:routingBounds,
     fillLimitPercent:Number($('fillLimit').value) || 80,
     mainMinCables:Number($('mainTrayMinCables').value) || 2,
     trayHeightMm:Number($('defaultTrayHeight').value) || 100,
