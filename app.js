@@ -25,6 +25,7 @@ const state = {
   engineeringSettings: {
     gridStepMm: 100,
     clearanceMm: 100,
+    maxBodyDistanceMm: 1500,
     mainMinCables: 2,
     traySideMarginMm: 25,
     standardTrayWidthsMm: [100,150,200,300,400,500,600,800,1000,1200]
@@ -97,6 +98,7 @@ THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
 THREE.BufferGeometry.prototype.disposeBoundsTree = disposeBoundsTree;
 const mouse = new THREE.Vector2();
 let engineeringCollisionCache = new Map();
+let engineeringBodyDistanceCache = new Map();
 
 function resize() {
   const r = viewport.getBoundingClientRect();
@@ -560,53 +562,68 @@ function engineeringPointToScene(point) {
   );
 }
 
-function engineeringSegmentHitsModel(a, b) {
+function engineeringSegmentHitsModel(a, b, context) {
   const start = engineeringPointToScene(a);
   const end = engineeringPointToScene(b);
-  const direction = end.clone().sub(start);
-  const length = direction.length();
+  const delta = end.clone().sub(start);
+  const length = delta.length();
   if (length < 1e-9) return false;
-  direction.multiplyScalar(1 / length);
 
-  const epsilon = Math.min(0.25, length * 0.25);
-  const origin = start.clone().add(direction.clone().multiplyScalar(epsilon));
-  const usableLength = length - epsilon * 2;
-  if (usableLength <= 1e-9) return false;
+  const width = Math.max(1, Number(context && context.trayWidthMm) || 100);
+  const height = Math.max(1, Number(context && context.trayHeightMm) || 100);
+  const clearance = Math.max(0, Number(context && context.bodyClearanceMm) || 0);
 
-  engineeringCollisionRaycaster.set(origin, direction);
-  engineeringCollisionRaycaster.near = 0;
-  engineeringCollisionRaycaster.far = usableLength;
+  const direction = delta.clone().multiplyScalar(1 / length);
+  const endpointInset = Math.min(0.1, length * 0.2);
+  const aSafe = start.clone().add(direction.clone().multiplyScalar(endpointInset));
+  const bSafe = end.clone().add(direction.clone().multiplyScalar(-endpointInset));
+  if (aSafe.distanceTo(bSafe) <= 1e-9) return false;
 
+  const halfWidthScene = (width / 2 + clearance) / 10;
+  const halfHeightScene = (height / 2 + clearance) / 10;
+
+  const min = new THREE.Vector3(
+    Math.min(aSafe.x, bSafe.x),
+    Math.min(aSafe.y, bSafe.y),
+    Math.min(aSafe.z, bSafe.z)
+  );
+  const max = new THREE.Vector3(
+    Math.max(aSafe.x, bSafe.x),
+    Math.max(aSafe.y, bSafe.y),
+    Math.max(aSafe.z, bSafe.z)
+  );
+
+  const dx = Math.abs(delta.x);
+  const dy = Math.abs(delta.y);
+  const dz = Math.abs(delta.z);
+  if (dx >= dy && dx >= dz) {
+    min.y -= halfHeightScene; max.y += halfHeightScene;
+    min.z -= halfWidthScene;  max.z += halfWidthScene;
+  } else if (dy >= dx && dy >= dz) {
+    min.x -= halfWidthScene;  max.x += halfWidthScene;
+    min.z -= halfHeightScene; max.z += halfHeightScene;
+  } else {
+    min.x -= halfWidthScene;  max.x += halfWidthScene;
+    min.y -= halfHeightScene; max.y += halfHeightScene;
+  }
+
+  const volume = new THREE.Box3(min, max);
   const roots = Array.from(state.modelRoots.values());
   if (!roots.length) return false;
 
   for (let i = 0; i < roots.length; i++) {
-    roots[i].updateMatrixWorld(true);
-  }
-
-  const hits = engineeringCollisionRaycaster.intersectObject(
-    roots[0],
-    true
-  );
-
-  if (roots.length === 1) {
-    return hits.some(function(hit){
-      return hit && hit.distance > 0.01 && hit.distance < usableLength - 0.01;
+    const root = roots[i];
+    root.updateMatrixWorld(true);
+    let hit = false;
+    root.traverse(function(node){
+      if (hit || !node.isMesh || !node.geometry || !node.geometry.boundsTree || node.visible === false) return;
+      const inverseWorld = new THREE.Matrix4().copy(node.matrixWorld).invert();
+      if (node.geometry.boundsTree.intersectsBox(volume, inverseWorld)) hit = true;
     });
+    if (hit) return true;
   }
 
-  // The common case is one imported model, but preserve support for multiple
-  // imported roots without changing routing semantics.
-  for (let i = 1; i < roots.length; i++) {
-    const more = engineeringCollisionRaycaster.intersectObject(roots[i], true);
-    if (more.some(function(hit){
-      return hit && hit.distance > 0.01 && hit.distance < usableLength - 0.01;
-    })) return true;
-  }
-
-  return hits.some(function(hit){
-    return hit && hit.distance > 0.01 && hit.distance < usableLength - 0.01;
-  });
+  return false;
 }
 
 function engineeringSegmentClear(a, b, context) {
@@ -619,80 +636,114 @@ function engineeringSegmentClear(a, b, context) {
   const dz = Math.abs(Number(b.z) - Number(a.z));
   if (dx < 0.001 && dy < 0.001 && dz < 0.001) return true;
 
-  const halfWidth = width / 2 + clearance;
-  const halfHeight = height / 2 + clearance;
-  let offsets;
+  const key = [
+    Math.round(Number(a.x)), Math.round(Number(a.y)), Math.round(Number(a.z)),
+    Math.round(Number(b.x)), Math.round(Number(b.y)), Math.round(Number(b.z)),
+    Math.round(width), Math.round(height), Math.round(clearance)
+  ].join('|');
 
-  if (dx >= dy && dx >= dz) {
-    const valuesY = [-halfHeight, 0, halfHeight];
-    const valuesZ = [-halfWidth, 0, halfWidth];
-    offsets = [];
-    valuesY.forEach(function(oy){
-      valuesZ.forEach(function(oz){
-        offsets.push({x:0,y:oy,z:oz});
-      });
-    });
-  } else if (dy >= dx && dy >= dz) {
-    const valuesX = [-halfWidth, 0, halfWidth];
-    const valuesZ = [-halfHeight, 0, halfHeight];
-    offsets = [];
-    valuesX.forEach(function(ox){
-      valuesZ.forEach(function(oz){
-        offsets.push({x:ox,y:0,z:oz});
-      });
-    });
-  } else {
-    const valuesX = [-halfWidth, 0, halfWidth];
-    const valuesY = [-halfHeight, 0, halfHeight];
-    offsets = [];
-    valuesX.forEach(function(ox){
-      valuesY.forEach(function(oy){
-        offsets.push({x:ox,y:oy,z:0});
-      });
-    });
-  }
+  if (engineeringCollisionCache.has(key)) return engineeringCollisionCache.get(key);
 
-  for (let i = 0; i < offsets.length; i++) {
-    const offset = offsets[i];
-    const start = {
-      x:Number(a.x) + offset.x,
-      y:Number(a.y) + offset.y,
-      z:Number(a.z) + offset.z
-    };
-    const end = {
-      x:Number(b.x) + offset.x,
-      y:Number(b.y) + offset.y,
-      z:Number(b.z) + offset.z
-    };
-
-    const key = [
-      Math.round(start.x),
-      Math.round(start.y),
-      Math.round(start.z),
-      Math.round(end.x),
-      Math.round(end.y),
-      Math.round(end.z),
-      Math.round(width),
-      Math.round(height),
-      Math.round(clearance)
-    ].join('|');
-
-    if (engineeringCollisionCache.has(key)) {
-      if (!engineeringCollisionCache.get(key)) return false;
-      continue;
-    }
-
-    const clear = !engineeringSegmentHitsModel(start, end);
-    engineeringCollisionCache.set(key, clear);
-    if (!clear) return false;
-  }
-
-  return true;
+  const clear = !engineeringSegmentHitsModel(a, b, {
+    trayWidthMm:width,
+    trayHeightMm:height,
+    bodyClearanceMm:clearance
+  });
+  engineeringCollisionCache.set(key, clear);
+  return clear;
 }
 
 function engineeringStandoffClear(base, point, context) {
-  return engineeringSegmentClear(base, point, context);
+  const width = Math.max(1, Number(context && context.trayWidthMm) || 100);
+  const height = Math.max(1, Number(context && context.trayHeightMm) || 100);
+  const clearance = Math.max(0, Number(context && context.bodyClearanceMm) || 0);
+
+  const direction = new THREE.Vector3(
+    Number(point.x) - Number(base.x),
+    Number(point.y) - Number(base.y),
+    Number(point.z) - Number(base.z)
+  );
+  const length = direction.length();
+  if (length < 1e-9) return true;
+  direction.multiplyScalar(1 / length);
+
+  const safeOffset = Math.min(
+    length * 0.8,
+    Math.max(width, height) / 2 + clearance
+  );
+  const safeStart = {
+    x:Number(base.x) + direction.x * safeOffset,
+    y:Number(base.y) + direction.y * safeOffset,
+    z:Number(base.z) + direction.z * safeOffset
+  };
+
+  return engineeringSegmentClear(safeStart, point, {
+    trayWidthMm:width,
+    trayHeightMm:height,
+    bodyClearanceMm:clearance
+  });
 }
+
+function engineeringPointBodyDistanceClear(point, context) {
+  const width = Math.max(1, Number(context && context.trayWidthMm) || 100);
+  const height = Math.max(1, Number(context && context.trayHeightMm) || 100);
+  const clearance = Math.max(0, Number(context && context.bodyClearanceMm) || 0);
+  const maxDistance = Number(context && context.maxBodyDistanceMm);
+
+  const key = [
+    Math.round(Number(point.x) / 25),
+    Math.round(Number(point.y) / 25),
+    Math.round(Number(point.z) / 25),
+    Math.round(width),
+    Math.round(height),
+    Math.round(clearance),
+    Number.isFinite(maxDistance) ? Math.round(maxDistance) : 0
+  ].join('|');
+
+  if (engineeringBodyDistanceCache.has(key)) {
+    return engineeringBodyDistanceCache.get(key);
+  }
+
+  const query = engineeringPointToScene(point);
+  let bodyDistance = Infinity;
+  const roots = Array.from(state.modelRoots.values());
+
+  for (let i = 0; i < roots.length; i++) {
+    const root = roots[i];
+    root.updateMatrixWorld(true);
+    root.traverse(function(node){
+      if (!node.isMesh || !node.geometry || !node.geometry.boundsTree || node.visible === false) return;
+
+      const inverseWorld = new THREE.Matrix4().copy(node.matrixWorld).invert();
+      const localPoint = query.clone().applyMatrix4(inverseWorld);
+      const hit = node.geometry.boundsTree.closestPointToPoint(localPoint);
+      if (!hit) return;
+
+      let distanceScene = Number(hit.distance);
+      if (hit.point) {
+        const worldClosest = hit.point.clone().applyMatrix4(node.matrixWorld);
+        distanceScene = query.distanceTo(worldClosest);
+      }
+      if (Number.isFinite(distanceScene)) bodyDistance = Math.min(bodyDistance, distanceScene * 10);
+    });
+  }
+
+  let allowed = true;
+  if (Number.isFinite(bodyDistance)) {
+    const halfExtent = Math.max(width, height) / 2;
+    const minCenterlineDistance = clearance + halfExtent;
+    const maxCenterlineDistance = Number.isFinite(maxDistance) && maxDistance > 0
+      ? maxDistance + halfExtent
+      : Infinity;
+    allowed =
+      bodyDistance >= minCenterlineDistance - 0.5 &&
+      bodyDistance <= maxCenterlineDistance + 0.5;
+  }
+
+  engineeringBodyDistanceCache.set(key, allowed);
+  return allowed;
+}
+
 
 function collectRoutingObstacles(clearanceMm) {
   const obstacles = [];
@@ -785,6 +836,9 @@ function runEngineeringAutoDesign() {
   const settings = {
     gridStepMm:Number($('routingGridStep').value) || 100,
     clearanceMm:Number.isFinite(Number($('autoTrayClearance').value)) ? Number($('autoTrayClearance').value) : 100,
+    maxBodyDistanceMm:Number.isFinite(Number($('autoTrayMaxDistance').value))
+      ? Number($('autoTrayMaxDistance').value)
+      : 1500,
     fillLimitPercent:Number($('fillLimit').value) || 80,
     mainMinCables:Number($('mainTrayMinCables').value) || 2,
     trayHeightMm:Number($('defaultTrayHeight').value) || 100,
@@ -799,6 +853,7 @@ function runEngineeringAutoDesign() {
   };
 
   engineeringCollisionCache = new Map();
+  engineeringBodyDistanceCache = new Map();
   state.modelRoots.forEach(function(root){ root.updateMatrixWorld(true); });
 
   const obstacles = collectRoutingObstacles(settings.clearanceMm);
@@ -806,7 +861,8 @@ function runEngineeringAutoDesign() {
     ...settings,
     exactCollisionRouting:true,
     segmentClear:engineeringSegmentClear,
-    standoffClear:engineeringStandoffClear
+    standoffClear:engineeringStandoffClear,
+    pointBodyDistanceClear:engineeringPointBodyDistanceClear
   };
 
   const report = routeEngineeringNetwork({
@@ -867,6 +923,7 @@ function runEngineeringAutoDesign() {
     ...state.engineeringSettings,
     gridStepMm:settings.gridStepMm,
     clearanceMm:settings.clearanceMm,
+    maxBodyDistanceMm:settings.maxBodyDistanceMm,
     mainMinCables:settings.mainMinCables,
     traySideMarginMm:settings.traySideMarginMm,
     standardTrayWidthsMm:settings.standardTrayWidthsMm
@@ -4019,6 +4076,7 @@ function syncEngineeringSettingsInputs() {
   const settings = state.engineeringSettings || {};
   if ($('routingGridStep')) $('routingGridStep').value = Number(settings.gridStepMm) || 100;
   if ($('autoTrayClearance')) $('autoTrayClearance').value = Number(settings.clearanceMm) || 100;
+  if ($('autoTrayMaxDistance')) $('autoTrayMaxDistance').value = Number(settings.maxBodyDistanceMm) || 1500;
   if ($('mainTrayMinCables')) $('mainTrayMinCables').value = Number(settings.mainMinCables) || 2;
   if ($('autoTrayStandards')) $('autoTrayStandards').value = (settings.standardTrayWidthsMm || []).join(',');
 }
