@@ -203,6 +203,8 @@ function segmentClear3D(a, b, obstacles, clearanceMm) {
 }
 
 function segmentClearForRouting(a, b, obstacles, options) {
+  if (!segmentWithinBodyDistanceForRouting(a, b, options)) return false;
+
   if (typeof options.segmentClear === 'function') {
     return options.segmentClear(
       a,
@@ -221,6 +223,34 @@ function segmentClearForRouting(a, b, obstacles, options) {
     obstacles,
     Number(options.centerlineClearanceMm) || Number(options.clearanceMm) || 0
   );
+}
+
+function pointWithinBodyDistanceForRouting(point, options) {
+  if (typeof options.pointBodyDistanceClear !== 'function') return true;
+  return options.pointBodyDistanceClear(
+    point,
+    {
+      trayWidthMm:Number(options.routingTrayWidthMm) || Number(options.trayHeightMm) || 100,
+      trayHeightMm:Number(options.trayHeightMm) || 100,
+      bodyClearanceMm:Number(options.clearanceMm) || 0,
+      maxBodyDistanceMm:Number(options.maxBodyDistanceMm) || 0
+    }
+  ) !== false;
+}
+
+function segmentWithinBodyDistanceForRouting(a, b, options) {
+  if (typeof options.pointBodyDistanceClear !== 'function') return true;
+  const samples = [0, 0.25, 0.5, 0.75, 1];
+  for (let i = 0; i < samples.length; i++) {
+    const t = samples[i];
+    const point = {
+      x:a.x + (b.x - a.x) * t,
+      y:a.y + (b.y - a.y) * t,
+      z:a.z + (b.z - a.z) * t
+    };
+    if (!pointWithinBodyDistanceForRouting(point, options)) return false;
+  }
+  return true;
 }
 
 function bridgePath3D(from, to, obstacles, options) {
@@ -282,6 +312,7 @@ function findBridgeCell(point, otherPoint, blocked, bounds, step, obstacles, opt
         if (blocked.has(pointKey3D(ix, iy, iz))) continue;
 
         const target = {x:ix*step,y:iy*step,z:iz*step};
+        if (!pointWithinBodyDistanceForRouting(target, options)) continue;
         const bridge = bridgePath3D(point, target, obstacles, options);
         if (!bridge) continue;
 
@@ -355,58 +386,80 @@ function resolveAnchorStandoff(anchor, obstacles, options) {
   if (normal.lengthSq() < 1e-12) normal.set(0, 1, 0);
   normal.normalize();
 
-  const clearance = Math.max(0, Number(options.centerlineClearanceMm) || Number(options.clearanceMm) || 0);
+  const trayWidth = Math.max(1, Number(options.routingTrayWidthMm) || Number(options.trayHeightMm) || 100);
+  const trayHeight = Math.max(1, Number(options.trayHeightMm) || 100);
+  const halfExtent = Math.max(trayWidth, trayHeight) / 2;
+  const clearance = Math.max(0, Number(options.clearanceMm) || 0);
+  const minCenterlineDistance = clearance + halfExtent;
   const step = Math.max(10, Number(options.gridStepMm) || 250);
   const probeStep = Math.max(10, Math.min(step / 4, 50));
-  const startDistance = Math.max(25, clearance);
-  const maxDistance = Math.max(2500, startDistance + step * 10);
+  const configuredMaxBodyDistance = Number(options.maxBodyDistanceMm);
+  const maxCenterlineDistance = Number.isFinite(configuredMaxBodyDistance) && configuredMaxBodyDistance > 0
+    ? configuredMaxBodyDistance + halfExtent
+    : Math.max(2500, minCenterlineDistance + step * 10);
+  const startDistance = Math.max(25, minCenterlineDistance);
+
+  if (maxCenterlineDistance < startDistance) {
+    return {
+      point:{
+        x:base.x + normal.x * startDistance,
+        y:base.y + normal.y * startDistance,
+        z:base.z + normal.z * startDistance
+      },
+      warning:'Maximum tray distance from body is smaller than the required minimum clearance plus tray half-size.',
+      distance_mm:startDistance
+    };
+  }
 
   const directions = [normal, normal.clone().multiplyScalar(-1)];
   let best = null;
 
   for (let directionIndex = 0; directionIndex < directions.length; directionIndex++) {
     const direction = directions[directionIndex];
-    for (let distance = startDistance; distance <= maxDistance; distance += probeStep) {
+    for (let distance = startDistance; distance <= maxCenterlineDistance + 0.001; distance += probeStep) {
+      const clampedDistance = Math.min(distance, maxCenterlineDistance);
       const point = {
-        x: base.x + direction.x * distance,
-        y: base.y + direction.y * distance,
-        z: base.z + direction.z * distance
+        x:base.x + direction.x * clampedDistance,
+        y:base.y + direction.y * clampedDistance,
+        z:base.z + direction.z * clampedDistance
       };
+
       const pointClear = typeof options.standoffClear === 'function'
         ? options.standoffClear(
           base,
           point,
           {
-            trayWidthMm:Number(options.routingTrayWidthMm) || Number(options.trayHeightMm) || 100,
-            trayHeightMm:Number(options.trayHeightMm) || 100,
-            bodyClearanceMm:Number(options.clearanceMm) || 0
+            trayWidthMm:trayWidth,
+            trayHeightMm:trayHeight,
+            bodyClearanceMm:clearance,
+            maxBodyDistanceMm:Number.isFinite(configuredMaxBodyDistance) ? configuredMaxBodyDistance : 0
           }
         )
-        : !pointInsideObstacle3D(point, obstacles, Number(options.centerlineClearanceMm) || clearance);
+        : pointWithinBodyDistanceForRouting(point, options);
 
       if (pointClear) {
-        if (!best || distance < best.distance || (distance === best.distance && directionIndex === 0)) {
-          best = { point, distance, directionIndex };
+        if (!best || clampedDistance < best.distance || (Math.abs(clampedDistance - best.distance) < 0.001 && directionIndex === 0)) {
+          best = {point, distance:clampedDistance, directionIndex};
         }
         break;
       }
+      if (clampedDistance >= maxCenterlineDistance) break;
     }
   }
 
-  if (best) return { point:best.point, warning:null, distance_mm:best.distance };
+  if (best) return {point:best.point, warning:null, distance_mm:best.distance};
 
-  const fallbackDistance = maxDistance;
+  const fallbackDistance = Math.min(maxCenterlineDistance, Math.max(startDistance, minCenterlineDistance));
   return {
     point:{
       x:base.x + normal.x * fallbackDistance,
       y:base.y + normal.y * fallbackDistance,
       z:base.z + normal.z * fallbackDistance
     },
-    warning:'Could not find a full clearance standoff from the selected surface; maximum standoff distance was used.',
+    warning:'Could not find a valid tray standoff within the configured body-distance corridor.',
     distance_mm:fallbackDistance
   };
 }
-
 // Tiny local vector helper keeps the routing module independent of the Three.js runtime.
 function THREEVector3Shim(x, y, z) {
   this.x = Number(x) || 0;
