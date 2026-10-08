@@ -393,7 +393,13 @@ function normalizeRoutingBounds(bounds, options) {
   const trayWidth = Math.max(1, Number(options && options.routingTrayWidthMm) || Number(options && options.trayHeightMm) || 100);
   const trayHeight = Math.max(1, Number(options && options.trayHeightMm) || 100);
   const clearance = Math.max(0, Number(options && options.clearanceMm) || 0);
-  const inset = Math.max(trayWidth, trayHeight) / 2 + clearance;
+
+  // Tray width is the horizontal cross-section and must only reduce the
+  // available X/Z envelope. Tray height is the vertical cross-section and
+  // must only reduce the Y envelope. Applying the full tray width to Y
+  // incorrectly makes the routing envelope collapse as cable count grows.
+  const horizontalInset = trayWidth / 2 + clearance;
+  const verticalInset = trayHeight / 2 + clearance;
 
   const minX = Number(bounds.minX);
   const maxX = Number(bounds.maxX);
@@ -405,12 +411,12 @@ function normalizeRoutingBounds(bounds, options) {
   if (![minX,maxX,minY,maxY,minZ,maxZ].every(Number.isFinite)) return null;
 
   const normalized = {
-    minX:minX + inset,
-    maxX:maxX - inset,
-    minY:minY + inset,
-    maxY:maxY - inset,
-    minZ:minZ + inset,
-    maxZ:maxZ - inset,
+    minX:minX + horizontalInset,
+    maxX:maxX - horizontalInset,
+    minY:minY + verticalInset,
+    maxY:maxY - verticalInset,
+    minZ:minZ + horizontalInset,
+    maxZ:maxZ - horizontalInset,
     valid:true
   };
 
