@@ -2991,9 +2991,8 @@ function buildPanelMultiTerminalNetwork(group, prepared, panelStandoff, obstacle
   }
 
   // For larger equipment groups, build a global Main backbone before the
-  // legacy seed-and-branch network. The old network is sensitive to a limited
-  // seed corridor; this topology gives every motor a real attachment target
-  // without ever using another motor branch as Main.
+  // legacy seed-and-branch network. This gives every equipment item a real
+  // attachment target and prevents one branch from becoming another branch's Main.
   const backboneThreshold = Math.max(
     5,
     attachLimit + 1
@@ -3001,6 +3000,60 @@ function buildPanelMultiTerminalNetwork(group, prepared, panelStandoff, obstacle
 
   if (prepared.length >= backboneThreshold) {
     for (let levelIndex = 0; levelIndex < levels.length; levelIndex++) {
+      const routingY = levels[levelIndex];
+      const panelHighPoint = pointAtRoutingY(panelStandoff.point, routingY);
+      const panelDrop = findGridPath3D(
+        panelStandoff.point,
+        panelHighPoint,
+        obstacles,
+        {
+          ...routeOptions,
+          fixedRoutingY:routingY,
+          preferredRoutingY:routingY,
+          routeTurnPenaltyRatio:Math.max(
+            Number(options.turnPenaltyRatio) || 20,
+            Number(options.mainCorridorTurnPenaltyRatio) || 100
+          )
+        },
+        new Set()
+      );
+
+      if (!panelDrop.points || panelDrop.points.length < 1) continue;
+
+      const backboneResult = buildGlobalMainBackboneNetwork(
+        group,
+        prepared,
+        panelStandoff,
+        obstacles,
+        routeOptions,
+        options,
+        routingY,
+        panelDrop
+      );
+
+      if (!backboneResult) continue;
+
+      if (
+        !bestPartial ||
+        backboneResult.connectedCount > bestPartial.connectedCount ||
+        (
+          backboneResult.connectedCount === bestPartial.connectedCount &&
+          backboneResult.score < bestPartial.partialScore
+        )
+      ) {
+        bestPartial = {
+          ...backboneResult,
+          partialScore:backboneResult.score
+        };
+      }
+
+      if (backboneResult.unresolved.length === 0) {
+        return backboneResult;
+      }
+    }
+  }
+
+  for (let levelIndex = 0; levelIndex < levels.length; levelIndex++) {
     const routingY = levels[levelIndex];
     const panelHighPoint = pointAtRoutingY(panelStandoff.point, routingY);
 
