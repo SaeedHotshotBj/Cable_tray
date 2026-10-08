@@ -3980,7 +3980,7 @@ export function routeEngineeringNetwork(inputs) {
 
     batches.forEach(function(batch, batchIndex){
       routingGroups.push({
-        panel:(entry.panel || group.panel),
+        panel:group.panel,
         panels:group.panels,
         equipment:batch,
         floor_zone:group.floor_zone,
