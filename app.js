@@ -111,6 +111,7 @@ THREE.BufferGeometry.prototype.disposeBoundsTree = disposeBoundsTree;
 const mouse = new THREE.Vector2();
 let engineeringCollisionCache = new Map();
 let engineeringBodyDistanceCache = new Map();
+let engineeringCollisionMeshCache = [];
 
 function resize() {
   const r = viewport.getBoundingClientRect();
@@ -562,7 +563,37 @@ function prepareEngineeringCollisionGeometry(root) {
   });
 }
 
+function rebuildEngineeringCollisionMeshCache() {
+  const entries = [];
+
+  state.modelRoots.forEach(function(root){
+    root.updateMatrixWorld(true);
+
+    root.traverse(function(node){
+      if (
+        !node.isMesh ||
+        !node.geometry ||
+        !node.geometry.boundsTree ||
+        node.visible === false
+      ) return;
+
+      const worldBox = new THREE.Box3().setFromObject(node);
+      if (worldBox.isEmpty()) return;
+
+      entries.push({
+        node:node,
+        worldBox:worldBox,
+        inverseWorld:new THREE.Matrix4().copy(node.matrixWorld).invert()
+      });
+    });
+  });
+
+  engineeringCollisionMeshCache = entries;
+  return entries;
+}
+
 function disposeEngineeringCollisionGeometry(root) {
+  engineeringCollisionMeshCache = [];
   if (!root) return;
   root.traverse(function(node){
     if (!node.isMesh || !node.geometry || !node.geometry.boundsTree) return;
@@ -632,19 +663,26 @@ function engineeringSegmentHitsModel(a, b, context) {
   }
 
   const volume = new THREE.Box3(min, max);
-  const roots = Array.from(state.modelRoots.values());
-  if (!roots.length) return false;
+  const meshEntries = engineeringCollisionMeshCache.length
+    ? engineeringCollisionMeshCache
+    : rebuildEngineeringCollisionMeshCache();
 
-  for (let i = 0; i < roots.length; i++) {
-    const root = roots[i];
-    root.updateMatrixWorld(true);
-    let hit = false;
-    root.traverse(function(node){
-      if (hit || !node.isMesh || !node.geometry || !node.geometry.boundsTree || node.visible === false) return;
-      const inverseWorld = new THREE.Matrix4().copy(node.matrixWorld).invert();
-      if (node.geometry.boundsTree.intersectsBox(volume, inverseWorld)) hit = true;
-    });
-    if (hit) return true;
+  if (!meshEntries.length) return false;
+
+  for (let i = 0; i < meshEntries.length; i++) {
+    const entry = meshEntries[i];
+
+    // World-space AABB is a broadphase filter only. Passing this test does
+    // not prove a collision; the exact BVH intersection below remains the
+    // final authority.
+    if (!entry.worldBox.intersectsBox(volume)) continue;
+
+    if (entry.node.geometry.boundsTree.intersectsBox(
+      volume,
+      entry.inverseWorld
+    )) {
+      return true;
+    }
   }
 
   return false;
@@ -725,27 +763,34 @@ function engineeringPointBodyDistanceClear(point, context) {
   }
 
   const query = engineeringPointToScene(point);
+  const meshEntries = engineeringCollisionMeshCache.length
+    ? engineeringCollisionMeshCache
+    : rebuildEngineeringCollisionMeshCache();
+
   let bodyDistance = Infinity;
-  const roots = Array.from(state.modelRoots.values());
 
-  for (let i = 0; i < roots.length; i++) {
-    const root = roots[i];
-    root.updateMatrixWorld(true);
-    root.traverse(function(node){
-      if (!node.isMesh || !node.geometry || !node.geometry.boundsTree || node.visible === false) return;
+  for (let i = 0; i < meshEntries.length; i++) {
+    const entry = meshEntries[i];
 
-      const inverseWorld = new THREE.Matrix4().copy(node.matrixWorld).invert();
-      const localPoint = query.clone().applyMatrix4(inverseWorld);
-      const hit = node.geometry.boundsTree.closestPointToPoint(localPoint);
-      if (!hit) return;
+    // The world-space box distance is a mathematically safe lower bound for
+    // the true mesh distance. It can therefore skip BVH closest-point work
+    // once another mesh is already known to be closer.
+    const lowerBoundScene = entry.worldBox.distanceToPoint(query);
+    if (lowerBoundScene * 10 > bodyDistance) continue;
 
-      let distanceScene = Number(hit.distance);
-      if (hit.point) {
-        const worldClosest = hit.point.clone().applyMatrix4(node.matrixWorld);
-        distanceScene = query.distanceTo(worldClosest);
-      }
-      if (Number.isFinite(distanceScene)) bodyDistance = Math.min(bodyDistance, distanceScene * 10);
-    });
+    const localPoint = query.clone().applyMatrix4(entry.inverseWorld);
+    const hit = entry.node.geometry.boundsTree.closestPointToPoint(localPoint);
+    if (!hit) continue;
+
+    let distanceScene = Number(hit.distance);
+    if (hit.point) {
+      const worldClosest = hit.point.clone().applyMatrix4(entry.node.matrixWorld);
+      distanceScene = query.distanceTo(worldClosest);
+    }
+
+    if (Number.isFinite(distanceScene)) {
+      bodyDistance = Math.min(bodyDistance, distanceScene * 10);
+    }
   }
 
   let allowed = true;
@@ -1017,7 +1062,9 @@ async function runEngineeringAutoDesign() {
 
   engineeringCollisionCache = new Map();
   engineeringBodyDistanceCache = new Map();
+  engineeringCollisionMeshCache = [];
   state.modelRoots.forEach(function(root){ root.updateMatrixWorld(true); });
+  rebuildEngineeringCollisionMeshCache();
 
   const obstacles = collectRoutingObstacles(settings.clearanceMm);
   let routingOptions = {
