@@ -22,6 +22,8 @@ const state = {
   clipboard: null,
   equipment: [],
   panels: [],
+  engineeringFloors: [],
+  engineeringFloorPoints: [],
   engineeringSettings: {
     gridStepMm: 100,
     clearanceMm: 100,
@@ -212,6 +214,7 @@ function captureDesignState() {
     engineering: {
       equipment: JSON.parse(JSON.stringify(state.equipment)),
       panels: JSON.parse(JSON.stringify(state.panels)),
+      floors: JSON.parse(JSON.stringify(state.engineeringFloors)),
       settings: JSON.parse(JSON.stringify(state.engineeringSettings))
     },
     routes: state.objects
@@ -259,6 +262,8 @@ function restoreDesignState(snapshot) {
     const engineering = snapshot.engineering || {};
     state.equipment = JSON.parse(JSON.stringify(engineering.equipment || []));
     state.panels = JSON.parse(JSON.stringify(engineering.panels || []));
+    state.engineeringFloors = JSON.parse(JSON.stringify(engineering.floors || []));
+    state.engineeringFloorPoints = [];
     const restoredEngineeringSettings = { ...(engineering.settings || {}) };
     delete restoredEngineeringSettings.routingElevationMm;
     state.engineeringSettings = { ...state.engineeringSettings, ...restoredEngineeringSettings };
@@ -1766,6 +1771,8 @@ function createRoute(type, points, options) {
     engineering_equipment_id: config.engineering_equipment_id || null,
     engineering_panel_id: config.engineering_panel_id || null,
     engineering_network_id: config.engineering_network_id || null,
+    engineering_floor_id: config.engineering_floor_id || null,
+    engineering_floor_name: config.engineering_floor_name || null,
     engineering_classification: config.engineering_classification || null,
     engineering_cable_ids: Array.isArray(config.engineering_cable_ids) ? config.engineering_cable_ids.slice() : [],
     engineering_shared_segment_keys: Array.isArray(config.engineering_shared_segment_keys)
@@ -4463,6 +4470,8 @@ function projectData() {
           engineering_equipment_id:o.engineering_equipment_id || null,
           engineering_panel_id:o.engineering_panel_id || null,
           engineering_network_id:o.engineering_network_id || null,
+          engineering_floor_id:o.engineering_floor_id || null,
+          engineering_floor_name:o.engineering_floor_name || null,
           engineering_classification:o.engineering_classification || null,
           engineering_cable_ids:Array.isArray(o.engineering_cable_ids) ? o.engineering_cable_ids.slice() : [],
           engineering_shared_segment_keys:Array.isArray(o.engineering_shared_segment_keys)
@@ -4497,6 +4506,7 @@ function projectData() {
     engineering:{
       equipment:state.equipment,
       panels:state.panels,
+      floors:state.engineeringFloors,
       settings:state.engineeringSettings
     }
   };
@@ -4715,6 +4725,8 @@ function loadProject(data) {
   const engineering = data.engineering || {};
   state.equipment = JSON.parse(JSON.stringify(engineering.equipment || []));
   state.panels = JSON.parse(JSON.stringify(engineering.panels || []));
+  state.engineeringFloors = JSON.parse(JSON.stringify(engineering.floors || []));
+  state.engineeringFloorPoints = [];
   const loadedEngineeringSettings = { ...(engineering.settings || {}) };
   delete loadedEngineeringSettings.routingElevationMm;
   state.engineeringSettings = { ...state.engineeringSettings, ...loadedEngineeringSettings };
@@ -4777,6 +4789,8 @@ $('newProjectBtn').addEventListener('click', function(){
   state.objects = [];
   state.equipment = [];
   state.panels = [];
+  state.engineeringFloors = [];
+  state.engineeringFloorPoints = [];
   state.lastEngineeringReport = null;
   state.selected = null; resetHistory(); state.surfacePick = null; state.surfacePickMode = false;
   state.measureStart = null; state.surfaceAlignStart = null; state.selectedMeasurementId = null; state.measurements = []; clearSurfaceSelectionVisuals(); rebuildMeasurements(); renderMeasurementsToggle(); renderMeasurementList(); render(); toast('New project created');
