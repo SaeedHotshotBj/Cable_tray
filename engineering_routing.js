@@ -2388,7 +2388,12 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
 
             let directClear = true;
             for (let i = 1; i < directPath.length; i++) {
-              if (!segmentClearForRouting(directPath[i - 1], directPath[i], obstacles, routeOptions)) {
+              if (!segmentClearForRouting(
+                directPath[i - 1],
+                directPath[i],
+                obstacles,
+                entry.branchRouteOptions || routeOptions
+              )) {
                 directClear = false;
                 break;
               }
@@ -2410,7 +2415,7 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
               target,
               obstacles,
               {
-                ...routeOptions,
+                ...(candidate.branchRouteOptions || routeOptions),
                 fixedRoutingY:routingY,
                 preferredRoutingY:routingY,
                 routeTurnPenaltyRatio:Math.max(
@@ -2750,7 +2755,7 @@ function buildGlobalMainBackboneNetwork(group, prepared, panelStandoff, obstacle
           null,
           obstacles,
           {
-            ...routeOptions,
+            ...(entry.branchRouteOptions || routeOptions),
             fixedRoutingY:routingY,
             preferredRoutingY:routingY,
             networkGoalPoints:mainNetworkPoints,
@@ -3047,7 +3052,7 @@ function buildPanelMultiTerminalNetwork(group, prepared, panelStandoff, obstacle
           a,
           b,
           seed.equipment.id,
-          seed.cable.diameter_mm
+          Number(seed.equipment.cable_diameter_mm) || 0
         );
         if (segment) mainCorridorSegmentKeys.add(segment.key);
       }
@@ -3101,7 +3106,7 @@ function buildPanelMultiTerminalNetwork(group, prepared, panelStandoff, obstacle
             null,
             obstacles,
             {
-              ...routeOptions,
+              ...(candidate.branchRouteOptions || routeOptions),
               fixedRoutingY:routingY,
               preferredRoutingY:routingY,
               routeTurnPenaltyRatio:Math.max(
@@ -3365,7 +3370,7 @@ export function routeEngineeringNetwork(inputs) {
           highPanelPoint,
           obstacles,
           {
-            ...routeOptions,
+            ...(entry.branchRouteOptions || routeOptions),
             preferredRoutingY:routingY
           },
           new Set()
