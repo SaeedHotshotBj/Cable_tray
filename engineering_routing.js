@@ -2730,7 +2730,7 @@ function buildGlobalMainBackboneNetwork(group, prepared, panelStandoff, obstacle
           denseMainNodes[i - 1],
           denseMainNodes[i],
           prepared[0].equipment.id,
-          prepared[0].cable.diameter_mm
+          Number(prepared[0].equipment.cable_diameter_mm) || 0
         );
         if (segment) mainCorridorSegmentKeys.add(segment.key);
       }
