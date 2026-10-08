@@ -2122,15 +2122,27 @@ function makeNetworkCablePlan(entry, group, branchPath, tree, attachmentPoint, p
   const treePath = traceNetworkToRoot(tree, attachmentPoint);
   if (!treePath.length) return null;
 
+  const targetPanel = entry.panel || group.panel;
+  const targetPanelDrop = entry.panelDrop || panelDrop;
+  const targetPanelConnector = entry.panelConnector && entry.panelConnector.points
+    ? entry.panelConnector.points
+    : [];
+  if (!targetPanel || !targetPanelDrop || !targetPanelDrop.points) return null;
+
   const points = [];
   appendDistinctPoints(points, [entry.equipment.anchor.point]);
   appendDistinctPoints(points, [entry.start]);
   appendDistinctPoints(points, branchPath, 0);
   appendDistinctPoints(points, treePath, 1);
-  for (let i = (panelDrop.points || []).length - 2; i >= 0; i--) {
-    appendDistinctPoints(points, [panelDrop.points[i]]);
+
+  if (targetPanelConnector.length > 1) {
+    appendDistinctPoints(points, targetPanelConnector, 1);
   }
-  appendDistinctPoints(points, [group.panel.anchor.point]);
+
+  for (let i = (targetPanelDrop.points || []).length - 2; i >= 0; i--) {
+    appendDistinctPoints(points, [targetPanelDrop.points[i]]);
+  }
+  appendDistinctPoints(points, [targetPanel.anchor.point]);
 
   return {
     equipment:entry.equipment,
@@ -2150,6 +2162,10 @@ function makeNetworkCablePlan(entry, group, branchPath, tree, attachmentPoint, p
       ? mainCorridorSegmentKeys.slice()
       : [],
     engineering_network_id:group.network_id || String(group.panel.id),
+    engineering_floor_id:group.floor_id || null,
+    engineering_floor_name:group.floor_name || null,
+    engineering_floor_id:group.floor_id || null,
+    engineering_floor_name:group.floor_name || null,
     points,
     warning:null,
     fallback:false
@@ -3102,6 +3118,16 @@ function buildPanelMultiTerminalNetwork(group, prepared, panelStandoff, obstacle
 
     if (!panelDrop.points || panelDrop.points.length < 1) continue;
 
+    prepareFloorPanelConnections(
+      group,
+      prepared,
+      panelStandoff,
+      panelHighPoint,
+      obstacles,
+      routeOptions,
+      routingY
+    );
+
     const parallelResult = buildParallelMainCorridorNetwork(
       group,
       prepared,
@@ -3143,6 +3169,16 @@ function buildPanelMultiTerminalNetwork(group, prepared, panelStandoff, obstacle
       );
 
       if (!panelDrop.points || panelDrop.points.length < 1) continue;
+
+      prepareFloorPanelConnections(
+        group,
+        prepared,
+        panelStandoff,
+        panelHighPoint,
+        obstacles,
+        routeOptions,
+        routingY
+      );
 
       const backboneResult = buildGlobalMainBackboneNetwork(
         group,
@@ -3200,6 +3236,16 @@ function buildPanelMultiTerminalNetwork(group, prepared, panelStandoff, obstacle
     );
 
     if (!panelDrop.points || panelDrop.points.length < 1) continue;
+
+    prepareFloorPanelConnections(
+      group,
+      prepared,
+      panelStandoff,
+      panelHighPoint,
+      obstacles,
+      routeOptions,
+      routingY
+    );
 
     for (let seedIndex = 0; seedIndex < seedLimit; seedIndex++) {
       const seed = seedCandidates[seedIndex];
@@ -3408,8 +3454,10 @@ function buildPanelMultiTerminalNetwork(group, prepared, panelStandoff, obstacle
 }
 
 function buildDirectFallbackCablePlan(entry, group, panelStandoff, obstacles, routeOptions, planningTrayWidth) {
+  const targetPanel = entry.panel || group.panel;
+  const targetStandoff = entry.panelStandoff || panelStandoff;
   const routingY = resolveHighestValidRoutingY(
-    [entry.start, panelStandoff.point],
+    [entry.start, targetStandoff.point],
     routeOptions
   );
 
@@ -3433,14 +3481,14 @@ function buildDirectFallbackCablePlan(entry, group, panelStandoff, obstacles, ro
   const panelDrop = highPanelPoint.y === panelStandoff.point.y
     ? {
         points:[
-          clonePoint(panelStandoff.point),
+          clonePoint(targetStandoff.point),
           clonePoint(highPanelPoint)
         ],
         warning:null,
         fallback:false
       }
     : findGridPath3D(
-        panelStandoff.point,
+        targetStandoff.point,
         highPanelPoint,
         obstacles,
         {
@@ -3465,7 +3513,7 @@ function buildDirectFallbackCablePlan(entry, group, panelStandoff, obstacles, ro
   for (let i = panelDrop.points.length - 2; i >= 0; i--) {
     appendDistinctPoints(points, [panelDrop.points[i]]);
   }
-  appendDistinctPoints(points, [group.panel.anchor.point]);
+  appendDistinctPoints(points, [targetPanel.anchor.point]);
 
   return {
     equipment:entry.equipment,
@@ -3475,10 +3523,10 @@ function buildDirectFallbackCablePlan(entry, group, panelStandoff, obstacles, ro
       diameter_mm:Number(entry.equipment.cable_diameter_mm) || 0
     },
     routing_start:entry.start,
-    routing_goal:panelStandoff.point,
+    routing_goal:targetStandoff.point,
     main_corridor_equipment_id:null,
     main_corridor_routing_y_mm:Number.isFinite(Number(routingY)) ? Number(routingY) : null,
-    standoff_distance_mm:Math.max(entry.startDistanceMm, panelStandoff.distance_mm),
+    standoff_distance_mm:Math.max(entry.startDistanceMm, targetStandoff.distance_mm),
     planning_tray_width_mm:planningTrayWidth,
     engineering_network_id:group.network_id || String(group.panel.id),
     branch_points:branchPoints,
@@ -3487,6 +3535,218 @@ function buildDirectFallbackCablePlan(entry, group, panelStandoff, obstacles, ro
     warning:'Shared Main Tray attachment was unavailable for this equipment; a direct branch route was used.',
     fallback:true
   };
+}
+
+function floorZoneContainsPoint(zone, point) {
+  if (!zone || !Array.isArray(zone.points) || zone.points.length < 3 || !point) return false;
+
+  const x = Number(point.x);
+  const z = Number(point.z);
+  if (!Number.isFinite(x) || !Number.isFinite(z)) return false;
+
+  const polygon = zone.points.map(function(p){
+    return {x:Number(p.x) || 0, z:Number(p.z) || 0};
+  });
+
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const xi = polygon[i].x;
+    const zi = polygon[i].z;
+    const xj = polygon[j].x;
+    const zj = polygon[j].z;
+
+    const intersects = ((zi > z) !== (zj > z)) &&
+      (x < (xj - xi) * (z - zi) / ((zj - zi) || 1e-12) + xi);
+    if (intersects) inside = !inside;
+  }
+  return inside;
+}
+
+function normalizeFloorZones(floorZones, globalBounds) {
+  const source = Array.isArray(floorZones) ? floorZones : [];
+  return source.map(function(zone, index){
+    const points = Array.isArray(zone && zone.points)
+      ? zone.points
+          .filter(function(point){
+            return point &&
+              Number.isFinite(Number(point.x)) &&
+              Number.isFinite(Number(point.y)) &&
+              Number.isFinite(Number(point.z));
+          })
+          .map(clonePoint)
+      : [];
+
+    if (points.length < 4) return null;
+
+    const yValues = points.map(function(point){ return point.y; });
+    const baseY = Number.isFinite(Number(zone.base_y_mm))
+      ? Number(zone.base_y_mm)
+      : yValues.reduce(function(sum, value){ return sum + value; }, 0) / yValues.length;
+
+    const xs = points.map(function(point){ return point.x; });
+    const zs = points.map(function(point){ return point.z; });
+
+    return {
+      id:zone.id || 'floor-' + String(index + 1),
+      name:zone.name || 'Floor ' + String(index + 1),
+      points,
+      base_y_mm:baseY,
+      min_x_mm:Math.min.apply(null, xs),
+      max_x_mm:Math.max.apply(null, xs),
+      min_z_mm:Math.min.apply(null, zs),
+      max_z_mm:Math.max.apply(null, zs),
+      routing_bounds:zone.routing_bounds || null,
+      source_bounds:globalBounds || null
+    };
+  }).filter(Boolean);
+}
+
+function clusterEquipmentFloorLevels(equipment, toleranceMm) {
+  const tolerance = Math.max(50, Number(toleranceMm) || 500);
+  const sorted = (equipment || [])
+    .slice()
+    .sort(function(a,b){
+      return Number(a.anchor && a.anchor.point ? a.anchor.point.y : 0) -
+        Number(b.anchor && b.anchor.point ? b.anchor.point.y : 0);
+    });
+
+  const clusters = [];
+  sorted.forEach(function(item){
+    const y = Number(item.anchor && item.anchor.point ? item.anchor.point.y : 0);
+    const last = clusters[clusters.length - 1];
+    if (!last || Math.abs(y - last.meanY) > tolerance) {
+      clusters.push({
+        key:'auto-floor-' + String(clusters.length + 1),
+        meanY:y,
+        equipmentIds:[item.id]
+      });
+      return;
+    }
+
+    last.equipmentIds.push(item.id);
+    last.meanY = (
+      last.meanY * (last.equipmentIds.length - 1) + y
+    ) / last.equipmentIds.length;
+  });
+
+  return clusters;
+}
+
+function resolveEquipmentFloorZone(item, floorZones) {
+  if (!item || !item.anchor || !item.anchor.point || !floorZones.length) return null;
+
+  const y = Number(item.anchor.point.y);
+  const candidates = floorZones.filter(function(zone){
+    if (!floorZoneContainsPoint(zone, item.anchor.point)) return false;
+    return Math.abs(y - Number(zone.base_y_mm)) <=
+      Math.max(50, Number(zone.height_tolerance_mm) || 1000);
+  });
+
+  candidates.sort(function(a,b){
+    return Math.abs(y - Number(a.base_y_mm)) - Math.abs(y - Number(b.base_y_mm));
+  });
+
+  return candidates[0] || null;
+}
+
+function choosePrimaryPanelForFloor(equipmentItems, panels) {
+  if (!Array.isArray(panels) || !panels.length) return null;
+
+  let cx = 0;
+  let cz = 0;
+  let count = 0;
+  equipmentItems.forEach(function(item){
+    if (!item || !item.anchor || !item.anchor.point) return;
+    cx += Number(item.anchor.point.x) || 0;
+    cz += Number(item.anchor.point.z) || 0;
+    count++;
+  });
+  if (!count) return panels[0];
+
+  cx /= count;
+  cz /= count;
+
+  return panels.slice().sort(function(a,b){
+    const ap = a && a.anchor && a.anchor.point ? a.anchor.point : {};
+    const bp = b && b.anchor && b.anchor.point ? b.anchor.point : {};
+    const adx = (Number(ap.x) || 0) - cx;
+    const adz = (Number(ap.z) || 0) - cz;
+    const bdx = (Number(bp.x) || 0) - cx;
+    const bdz = (Number(bp.z) || 0) - cz;
+    return adx * adx + adz * adz - (bdx * bdx + bdz * bdz);
+  })[0];
+}
+
+function prepareFloorPanelConnections(group, prepared, panelStandoff, panelHighPoint, obstacles, routeOptions, routingY) {
+  const cache = new Map();
+
+  prepared.forEach(function(entry){
+    const panel = entry.panel || group.panel;
+    if (!panel || !panel.anchor || !panel.anchor.point) return;
+
+    const panelId = String(panel.id);
+    if (!cache.has(panelId)) {
+      const standoff = panel.id === group.panel.id
+        ? panelStandoff
+        : resolveAnchorStandoff(panel.anchor, obstacles, routeOptions);
+
+      const highPoint = pointAtRoutingY(standoff.point, routingY);
+      let connector = {
+        points:[clonePoint(panelHighPoint), clonePoint(highPoint)],
+        warning:null,
+        fallback:false
+      };
+
+      if (
+        Math.abs(panelHighPoint.x - highPoint.x) > 0.001 ||
+        Math.abs(panelHighPoint.z - highPoint.z) > 0.001
+      ) {
+        connector = findGridPath3D(
+          panelHighPoint,
+          highPoint,
+          obstacles,
+          {
+            ...routeOptions,
+            fixedRoutingY:routingY,
+            preferredRoutingY:routingY
+          },
+          new Set()
+        );
+      }
+
+      const drop = Math.abs(highPoint.y - standoff.point.y) < 0.001
+        ? {
+            points:[clonePoint(standoff.point), clonePoint(highPoint)],
+            warning:null,
+            fallback:false
+          }
+        : findGridPath3D(
+            standoff.point,
+            highPoint,
+            obstacles,
+            {
+              ...routeOptions,
+              preferredRoutingY:routingY
+            },
+            new Set()
+          );
+
+      cache.set(panelId, {
+        standoff,
+        highPoint,
+        connector,
+        drop
+      });
+    }
+
+    const connection = cache.get(panelId);
+    entry.panelStandoff = connection.standoff;
+    entry.panelHighPoint = connection.highPoint;
+    entry.panelConnector = connection.connector;
+    entry.panelDrop = connection.drop;
+  });
+
+  return cache;
 }
 
 export function routeEngineeringNetwork(inputs) {
@@ -3542,6 +3802,12 @@ export function routeEngineeringNetwork(inputs) {
       ? Number(inputs.options.trayStopBeforeEquipmentMm)
       : 1000,
     exactCollisionRouting:inputs && inputs.options && inputs.options.exactCollisionRouting === true,
+    floorZones:Array.isArray(inputs && inputs.options && inputs.options.floorZones)
+      ? inputs.options.floorZones
+      : [],
+    floorLevelToleranceMm:Number.isFinite(Number(inputs && inputs.options && inputs.options.floorLevelToleranceMm))
+      ? Number(inputs.options.floorLevelToleranceMm)
+      : 500,
     segmentClear:inputs && inputs.options && typeof inputs.options.segmentClear === 'function'
       ? inputs.options.segmentClear
       : null,
@@ -3556,6 +3822,20 @@ export function routeEngineeringNetwork(inputs) {
 
   const groups = new Map();
   const warnings = [];
+  const normalizedFloorZones = normalizeFloorZones(
+    options.floorZones,
+    options.routingBounds
+  );
+  const autoFloorClusters = clusterEquipmentFloorLevels(
+    equipment,
+    options.floorLevelToleranceMm
+  );
+  const autoFloorByEquipmentId = new Map();
+  autoFloorClusters.forEach(function(cluster){
+    cluster.equipmentIds.forEach(function(id){
+      autoFloorByEquipmentId.set(id, cluster);
+    });
+  });
 
   equipment.forEach(function(item) {
     const panel = validPanels.get(item.destination_panel_id);
@@ -3564,9 +3844,34 @@ export function routeEngineeringNetwork(inputs) {
       return;
     }
 
-    const group = groups.get(panel.id) || {panel, equipment:[]};
-    group.equipment.push(item);
-    groups.set(panel.id, group);
+    const floorZone = resolveEquipmentFloorZone(item, normalizedFloorZones);
+    const autoFloor = autoFloorByEquipmentId.get(item.id) || null;
+    const floorKey = floorZone
+      ? 'floor:' + String(floorZone.id)
+      : (autoFloor ? 'auto:' + autoFloor.key : 'auto-floor-unknown');
+
+    const group = groups.get(floorKey) || {
+      panel:null,
+      panels:new Map(),
+      equipment:[],
+      floor_zone:floorZone,
+      floor_id:floorZone ? String(floorZone.id) : (autoFloor ? String(autoFloor.key) : null),
+      floor_name:floorZone ? floorZone.name : (autoFloor ? 'Auto Floor' : 'Unassigned Floor')
+    };
+
+    group.equipment.push({
+      ...item,
+      __engineering_panel:panel.id
+    });
+    group.panels.set(panel.id, panel);
+    groups.set(floorKey, group);
+  });
+
+  groups.forEach(function(group){
+    group.panel = choosePrimaryPanelForFloor(
+      group.equipment.map(function(item){ return validPanels.get(item.__engineering_panel); }),
+      Array.from(group.panels.values())
+    );
   });
 
   const cablePlans = [];
@@ -3625,8 +3930,12 @@ export function routeEngineeringNetwork(inputs) {
     batches.forEach(function(batch, batchIndex){
       routingGroups.push({
         panel:group.panel,
+        panels:group.panels,
         equipment:batch,
-        network_id:String(group.panel.id) + '::network-' + String(routingGroups.length + 1),
+        floor_zone:group.floor_zone,
+        floor_id:group.floor_id,
+        floor_name:group.floor_name,
+        network_id:String(group.floor_id || group.panel.id) + '::network-' + String(routingGroups.length + 1),
         source_batch_index:batchIndex
       });
     });
@@ -3683,6 +3992,7 @@ export function routeEngineeringNetwork(inputs) {
       if (equipmentStandoff.warning) warnings.push(item.name + ': ' + equipmentStandoff.warning);
       return {
         equipment:item,
+        panel:validPanels.get(item.__engineering_panel || item.destination_panel_id) || group.panel,
         start:equipmentStandoff.point,
         startDistanceMm:equipmentStandoff.distance_mm,
         branchTrayWidthMm:branchTrayWidth,
