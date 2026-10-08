@@ -3531,7 +3531,7 @@ function buildDirectFallbackCablePlan(entry, group, panelStandoff, obstacles, ro
 
   return {
     equipment:entry.equipment,
-    panel:group.panel,
+    panel:(entry.panel || group.panel),
     cable:{
       name:entry.equipment.cable_name || 'Power Cable',
       diameter_mm:Number(entry.equipment.cable_diameter_mm) || 0
@@ -3980,7 +3980,7 @@ export function routeEngineeringNetwork(inputs) {
 
     batches.forEach(function(batch, batchIndex){
       routingGroups.push({
-        panel:group.panel,
+        panel:(entry.panel || group.panel),
         panels:group.panels,
         equipment:batch,
         floor_zone:group.floor_zone,
@@ -4159,7 +4159,7 @@ export function routeEngineeringNetwork(inputs) {
 
         cablePlans.push({
           equipment:entry.equipment,
-          panel:group.panel,
+          panel:(entry.panel || group.panel),
           cable:{
             name:entry.equipment.cable_name || 'Power Cable',
             diameter_mm:Number(entry.equipment.cable_diameter_mm) || 0
