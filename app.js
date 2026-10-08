@@ -274,7 +274,7 @@ function restoreDesignState(snapshot) {
       state.panels.some(function(o){ return o.id === snapshot.selected; });
     state.selected = selectedExists ? snapshot.selected : null;
     rebuildRoutes();
-    rebuildEngineeringFloorsList();
+    renderEngineeringFloorsList();
     rebuildEngineeringMarkers();
     (snapshot.models || []).forEach(function(saved){
       const root = state.modelRoots.get(saved.id);
