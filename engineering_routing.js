@@ -2212,7 +2212,7 @@ function resolveParallelMainCorridorCandidates(prepared, options) {
   // more long, parallel rows. It must not replace ordinary network routing.
   if (
     secondaryLevels.length < 2 ||
-    primarySpan < Math.max(gridStep * 3, secondarySpan * 1.25)
+    primarySpan < gridStep * 3
   ) {
     return [];
   }
