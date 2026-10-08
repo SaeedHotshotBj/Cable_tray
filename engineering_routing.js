@@ -2901,17 +2901,7 @@ function buildPanelMultiTerminalNetwork(group, prepared, panelStandoff, obstacle
   // network. This prevents two parallel cable paths from becoming two
   // independent Main Trays when the open space between them is usable.
 
-  // For larger equipment groups, build a global Main backbone before the
-  // legacy seed-and-branch network. The old network is sensitive to a limited
-  // seed corridor; this topology gives every motor a real attachment target
-  // without ever using another motor branch as Main.
-  const backboneThreshold = Math.max(
-    5,
-    attachLimit + 1
-  );
-
-  if (prepared.length >= backboneThreshold) {
-    for (let levelIndex = 0; levelIndex < levels.length; levelIndex++) {
+  for (let levelIndex = 0; levelIndex < levels.length; levelIndex++) {
       const routingY = levels[levelIndex];
       const panelHighPoint = pointAtRoutingY(panelStandoff.point, routingY);
       const panelDrop = findGridPath3D(
@@ -3000,7 +2990,17 @@ function buildPanelMultiTerminalNetwork(group, prepared, panelStandoff, obstacle
     }
   }
 
-  for (let levelIndex = 0; levelIndex < levels.length; levelIndex++) {
+  // For larger equipment groups, build a global Main backbone before the
+  // legacy seed-and-branch network. The old network is sensitive to a limited
+  // seed corridor; this topology gives every motor a real attachment target
+  // without ever using another motor branch as Main.
+  const backboneThreshold = Math.max(
+    5,
+    attachLimit + 1
+  );
+
+  if (prepared.length >= backboneThreshold) {
+    for (let levelIndex = 0; levelIndex < levels.length; levelIndex++) {
     const routingY = levels[levelIndex];
     const panelHighPoint = pointAtRoutingY(panelStandoff.point, routingY);
 
@@ -3336,8 +3336,6 @@ export function routeEngineeringNetwork(inputs) {
     if (panelStandoff.valid === false) return;
 
     const prepared = group.equipment.map(function(item) {
-      const equipmentStandoff = resolveAnchorStandoff(item.anchor, obstacles, routeOptions);
-      if (equipmentStandoff.warning) warnings.push(item.name + ': ' + equipmentStandoff.warning);
       const cableDiameter = Math.max(0, Number(item.cable_diameter_mm) || 0);
       const branchRequiredWidth = (
         cableDiameter + options.traySideMarginMm * 2
