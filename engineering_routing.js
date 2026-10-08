@@ -1401,13 +1401,21 @@ function buildTrayRuns(cablePlans, options, mainCorridors) {
     const parallelAxis = planAxisForParallelMain(parallelPlan);
     const corridorAxisEligible = !parallelAxis || segment.axis === parallelAxis;
 
+    // A shared segment becomes physical Main only when it is a real
+    // corridor section. Very short shared pieces near the panel are final
+    // connection geometry and must remain outside the Main Tray body.
+    const sharedMainMinimumLength = Math.max(
+      1,
+      Number(options.gridStepMm) || 100
+    );
     const classification = (
       segment.main_corridor_eligible ||
       segment.parallel_main_eligible ||
       (
         segment.cableIds.size >= mainMinCables &&
         segment.main_level_eligible &&
-        corridorAxisEligible
+        corridorAxisEligible &&
+        segment.length + 0.001 >= sharedMainMinimumLength
       )
     ) ? 'main' : 'branch';
 
