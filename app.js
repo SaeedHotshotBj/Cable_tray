@@ -274,6 +274,7 @@ function restoreDesignState(snapshot) {
       state.panels.some(function(o){ return o.id === snapshot.selected; });
     state.selected = selectedExists ? snapshot.selected : null;
     rebuildRoutes();
+    rebuildEngineeringFloorsList();
     rebuildEngineeringMarkers();
     (snapshot.models || []).forEach(function(saved){
       const root = state.modelRoots.get(saved.id);
@@ -500,7 +501,12 @@ function finishEngineeringFloor() {
     'Floor name',
     'Floor ' + String(state.engineeringFloors.length + 1)
   );
-  if (name === null) return;
+  if (name === null) {
+    state.engineeringFloorPoints = [];
+    autoRoutePreviewRoot.clear();
+    setTool('select');
+    return;
+  }
 
   const baseY = yValues.reduce(function(sum, value){ return sum + value; }, 0) / yValues.length;
   const areaMm2 = floorPolygonArea(points);
@@ -5134,7 +5140,6 @@ $('fitBtn').addEventListener('click', fitAllScene);
 $('topBtn').addEventListener('click', function(){ camera.position.set(0,18000,0.01); controls.target.set(0,0,0); controls.update(); });
 $('frontBtn').addEventListener('click', function(){ camera.position.set(0,5000,18000); controls.target.set(0,0,0); controls.update(); });
 $('isoBtn').addEventListener('click', function(){ camera.position.set(12000,9500,12000); controls.target.set(0,1500,0); controls.update(); });
-$('autoDesignBtn').addEventListener('click', function(){ renderEngineeringFloorsList(); });
 $('toggleMeasurementsBtn').addEventListener('click', toggleMeasurements);
 $('toggleEngineeringNamesBtn').addEventListener('click', toggleEngineeringNames);
 $('clearMeasurementsBtn').addEventListener('click', function(){
