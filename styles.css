@@ -5,3 +5,5 @@
 .engineering-takeoff{display:grid;gap:7px}
 .engineering-takeoff .table-wrap{max-height:180px}
 .engineering-takeoff .boq-summary{margin-bottom:5px}
+
+.engineering-floors{display:grid;gap:5px;margin-top:7px}.engineering-floor-item{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px;align-items:center;padding:6px 7px;border:1px solid var(--border);border-radius:5px;background:#0e141b}.engineering-floor-item b{display:block;font-size:11px}.engineering-floor-item span{display:block;color:var(--muted);font-size:10px;margin-top:2px}
