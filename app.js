@@ -419,10 +419,196 @@ function disposeEngineeringMarkers() {
   state.engineeringMarkerRoot.clear();
 }
 
+function floorPolygonArea(points) {
+  if (!Array.isArray(points) || points.length < 3) return 0;
+  let area = 0;
+  for (let i = 0; i < points.length; i++) {
+    const a = points[i];
+    const b = points[(i + 1) % points.length];
+    area += Number(a.x) * Number(b.z) - Number(b.x) * Number(a.z);
+  }
+  return Math.abs(area) * 0.5;
+}
+
+function floorPointFromEvent(event) {
+  pointerRay(event);
+  const roots = Array.from(state.modelRoots.values());
+  if (roots.length) {
+    const hit = raycaster.intersectObjects(roots, true)[0];
+    if (hit && hit.point) {
+      return {x:hit.point.x * 10,y:hit.point.y * 10,z:hit.point.z * 10};
+    }
+  }
+  const hit = raycaster.intersectObject(ground, false)[0];
+  if (!hit) return null;
+  return {x:hit.point.x * 10,y:hit.point.y * 10,z:hit.point.z * 10};
+}
+
+function renderEngineeringFloorsList() {
+  const box = $('engineeringFloors');
+  if (!box) return;
+  if (!state.engineeringFloors.length) {
+    box.innerHTML = '<div class="hint">No floor definitions. Auto Design will group equipment by height automatically.</div>';
+    return;
+  }
+
+  box.innerHTML = state.engineeringFloors.map(function(floor, index){
+    const areaM2 = Number(floor.area_m2) ||
+      (Number(floor.area_mm2) > 0 ? Number(floor.area_mm2) / 1000000 : 0);
+    return '<div class="engineering-floor-item">' +
+      '<div><b>' + esc(floor.name || ('Floor ' + (index + 1))) + '</b>' +
+      '<span>Y ' + Number(floor.base_y_mm || 0).toFixed(0) + ' mm · ' +
+      areaM2.toFixed(2) + ' m²</span></div>' +
+      '<button class="small danger engineering-floor-delete" data-floor-id="' +
+      esc(floor.id) + '">Delete</button></div>';
+  }).join('');
+
+  box.querySelectorAll('.engineering-floor-delete').forEach(function(button){
+    button.addEventListener('click', function(){
+      const floorId = button.dataset.floorId;
+      const before = captureDesignState();
+      state.engineeringFloors = state.engineeringFloors.filter(function(item){
+        return item.id !== floorId;
+      });
+      recordHistory(before);
+      rebuildEngineeringMarkers();
+      renderEngineeringFloorsList();
+      toast('Floor definition deleted');
+    });
+  });
+}
+
+function finishEngineeringFloor() {
+  const points = state.engineeringFloorPoints.map(function(point){ return {...point}; });
+  if (points.length !== 4) {
+    toast('Select exactly four corner points for the floor');
+    return;
+  }
+
+  const yValues = points.map(function(point){ return Number(point.y) || 0; });
+  const yRange = Math.max.apply(null, yValues) - Math.min.apply(null, yValues);
+  if (yRange > 250) {
+    toast('The four floor points must lie on the same floor level');
+    return;
+  }
+  if (floorPolygonArea(points) <= 1) {
+    toast('The four floor points must enclose a valid area');
+    return;
+  }
+
+  const name = window.prompt(
+    'Floor name',
+    'Floor ' + String(state.engineeringFloors.length + 1)
+  );
+  if (name === null) return;
+
+  const baseY = yValues.reduce(function(sum, value){ return sum + value; }, 0) / yValues.length;
+  const areaMm2 = floorPolygonArea(points);
+  const before = captureDesignState();
+
+  state.engineeringFloors.push({
+    id:id('floor'),
+    name:String(name || ('Floor ' + String(state.engineeringFloors.length + 1))),
+    points:points,
+    base_y_mm:baseY,
+    area_mm2:areaMm2,
+    area_m2:areaMm2 / 1000000,
+    height_tolerance_mm:1000
+  });
+
+  state.engineeringFloorPoints = [];
+  autoRoutePreviewRoot.clear();
+  recordHistory(before);
+  rebuildEngineeringMarkers();
+  renderEngineeringFloorsList();
+  setTool('select');
+  toast('Floor definition saved');
+}
+
+function addEngineeringFloorPoint(event) {
+  const point = floorPointFromEvent(event);
+  if (!point) {
+    toast('Click a valid point on the CAD/model floor');
+    return;
+  }
+
+  state.engineeringFloorPoints.push(point);
+  autoRoutePreviewRoot.clear();
+
+  state.engineeringFloorPoints.forEach(function(item, index){
+    const marker = new THREE.Mesh(
+      new THREE.SphereGeometry(Math.max(2, mmToScene(45)), 16, 16),
+      new THREE.MeshBasicMaterial({
+        color:index === 0 ? 0xffd45a : 0x66d9ff,
+        depthTest:false
+      })
+    );
+    marker.position.set(mmToScene(item.x),mmToScene(item.y),mmToScene(item.z));
+    marker.renderOrder = 70;
+    autoRoutePreviewRoot.add(marker);
+  });
+
+  if (state.engineeringFloorPoints.length >= 2) {
+    const points = state.engineeringFloorPoints.map(function(item){
+      return new THREE.Vector3(mmToScene(item.x),mmToScene(item.y),mmToScene(item.z));
+    });
+    if (state.engineeringFloorPoints.length === 4) points.push(points[0].clone());
+    const line = new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints(points),
+      new THREE.LineBasicMaterial({color:0x66d9ff,depthTest:false})
+    );
+    line.renderOrder = 69;
+    autoRoutePreviewRoot.add(line);
+  }
+
+  status('Define Floor: ' + state.engineeringFloorPoints.length + '/4 corner points');
+  if (state.engineeringFloorPoints.length === 4) finishEngineeringFloor();
+}
+
+function rebuildEngineeringFloorMarkers() {
+  if (!state.engineeringMarkerRoot) return;
+  state.engineeringFloors.forEach(function(floor){
+    if (!Array.isArray(floor.points) || floor.points.length < 4) return;
+    const linePoints = floor.points.map(function(point){
+      return new THREE.Vector3(mmToScene(point.x),mmToScene(point.y),mmToScene(point.z));
+    });
+    linePoints.push(linePoints[0].clone());
+
+    const line = new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints(linePoints),
+      new THREE.LineBasicMaterial({
+        color:0x4da3ff,
+        transparent:true,
+        opacity:0.78,
+        depthTest:false
+      })
+    );
+    line.renderOrder = 55;
+    line.userData.engineeringFloor = floor.id;
+    state.engineeringMarkerRoot.add(line);
+
+    const center = floor.points.reduce(function(sum, point){
+      sum.add(new THREE.Vector3(mmToScene(point.x),mmToScene(point.y),mmToScene(point.z)));
+      return sum;
+    }, new THREE.Vector3()).multiplyScalar(1 / floor.points.length);
+
+    const label = engineeringLabel(
+      floor.name + '  (' + Number(floor.base_y_mm || 0).toFixed(0) + ' mm)',
+      '#4da3ff'
+    );
+    label.position.copy(center);
+    label.position.y += mmToScene(180);
+    label.scale.set(110, 27.5, 1);
+    label.userData.engineeringFloor = floor.id;
+    state.engineeringMarkerRoot.add(label);
+  });
+}
+
 function rebuildEngineeringMarkers() {
   if (!state.engineeringMarkerRoot) return;
   disposeEngineeringMarkers();
   syncEngineeringAnchors();
+  rebuildEngineeringFloorMarkers();
 
   state.panels.forEach(function(panel){
     if (!panel.anchor || !panel.anchor.point) return;
