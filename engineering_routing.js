@@ -1921,15 +1921,22 @@ function resolveHighestValidRoutingY(points, options) {
   const desiredY = routingBounds
     ? Math.min(
         ceilingY - safetyGap - trayHeight / 2 - clearance,
-        routingBounds.maxY
+        routingBounds.maxY,
+        Number.isFinite(Number(options.floorMaxY)) ? Number(options.floorMaxY) : Infinity
       )
-    : ceilingY - safetyGap - trayHeight / 2 - clearance;
+    : Math.min(
+        ceilingY - safetyGap - trayHeight / 2 - clearance,
+        Number.isFinite(Number(options.floorMaxY)) ? Number(options.floorMaxY) : Infinity
+      );
 
   const step = Math.max(10, Number(options.gridStepMm) || 100);
   const probeStep = Math.max(10, Math.min(step / 2, 50));
-  const lowerY = Math.min.apply(
-    null,
-    points.map(function(point){ return Number(point.y) || 0; }).concat([desiredY - Math.max(1000, Number(options.maxBodyDistanceMm) || 1500)])
+  const lowerY = Math.max(
+    Number.isFinite(Number(options.floorMinY)) ? Number(options.floorMinY) : -Infinity,
+    Math.min.apply(
+      null,
+      points.map(function(point){ return Number(point.y) || 0; }).concat([desiredY - Math.max(1000, Number(options.maxBodyDistanceMm) || 1500)])
+    )
   );
 
   for (let y = desiredY; y >= lowerY - 0.001; y -= probeStep) {
@@ -2013,15 +2020,22 @@ function resolveNetworkRoutingLevels(panelPoint, options, levelLimit) {
   const step = Math.max(50, Number(options.gridStepMm) || 100);
   const desiredY = Math.min(
     ceilingY - safetyGap - trayHeight / 2 - clearance,
-    bounds ? bounds.maxY : ceilingY
+    bounds ? bounds.maxY : ceilingY,
+    Number.isFinite(Number(options.floorMaxY)) ? Number(options.floorMaxY) : Infinity
   );
   const alignedStart = Math.floor(desiredY / step) * step;
-  const lowerY = bounds
+  const globalLowerY = bounds
     ? Math.ceil(bounds.minY / step) * step
     : Math.min(
         alignedStart - Math.max(1000, Number(options.maxBodyDistanceMm) || 1500),
         Number(panelPoint.y) || alignedStart
       );
+  const lowerY = Math.max(
+    globalLowerY,
+    Number.isFinite(Number(options.floorMinY))
+      ? Math.ceil(Number(options.floorMinY) / step) * step
+      : -Infinity
+  );
 
   // A non-positive limit means "search every usable horizontal level".
   // The previous fixed three-level search could reject a perfectly valid
@@ -3874,6 +3888,43 @@ export function routeEngineeringNetwork(inputs) {
     );
   });
 
+  const groupedFloorLevels = Array.from(groups.values())
+    .map(function(group){
+      const values = group.equipment.map(function(item){
+        return Number(item.anchor && item.anchor.point ? item.anchor.point.y : 0);
+      }).filter(Number.isFinite);
+      const zoneY = group.floor_zone ? Number(group.floor_zone.base_y_mm) : NaN;
+      const meanY = Number.isFinite(zoneY)
+        ? zoneY
+        : (values.length
+          ? values.reduce(function(sum, value){ return sum + value; }, 0) / values.length
+          : 0);
+      return {group, meanY};
+    })
+    .sort(function(a,b){ return a.meanY - b.meanY; });
+
+  groupedFloorLevels.forEach(function(item, index){
+    const previous = groupedFloorLevels[index - 1];
+    const next = groupedFloorLevels[index + 1];
+    const globalMinY = options.routingBounds && Number.isFinite(Number(options.routingBounds.minY))
+      ? Number(options.routingBounds.minY)
+      : -Infinity;
+    const globalMaxY = options.routingBounds && Number.isFinite(Number(options.routingBounds.maxY))
+      ? Number(options.routingBounds.maxY)
+      : Number(options.ceilingY);
+
+    const floorMinY = previous
+      ? (previous.meanY + item.meanY) * 0.5
+      : globalMinY;
+    const floorMaxY = next
+      ? (item.meanY + next.meanY) * 0.5
+      : globalMaxY;
+
+    item.group.floor_base_y_mm = item.meanY;
+    item.group.floor_min_y_mm = floorMinY;
+    item.group.floor_max_y_mm = floorMaxY;
+  });
+
   const cablePlans = [];
   const mainCorridors = [];
 
@@ -3935,6 +3986,9 @@ export function routeEngineeringNetwork(inputs) {
         floor_zone:group.floor_zone,
         floor_id:group.floor_id,
         floor_name:group.floor_name,
+        floor_base_y_mm:group.floor_base_y_mm,
+        floor_min_y_mm:group.floor_min_y_mm,
+        floor_max_y_mm:group.floor_max_y_mm,
         network_id:String(group.floor_id || group.panel.id) + '::network-' + String(routingGroups.length + 1),
         source_batch_index:batchIndex
       });
@@ -3954,6 +4008,15 @@ export function routeEngineeringNetwork(inputs) {
 
     const routeOptions = {
       ...options,
+      ceilingY:Number.isFinite(Number(group.floor_max_y_mm))
+        ? Number(group.floor_max_y_mm)
+        : options.ceilingY,
+      floorMinY:Number.isFinite(Number(group.floor_min_y_mm))
+        ? Number(group.floor_min_y_mm)
+        : null,
+      floorMaxY:Number.isFinite(Number(group.floor_max_y_mm))
+        ? Number(group.floor_max_y_mm)
+        : null,
       centerlineClearanceMm:options.clearanceMm + planningTrayWidth / 2,
       routingTrayWidthMm:planningTrayWidth,
       preferredStandoffDistanceMm:Math.min(
