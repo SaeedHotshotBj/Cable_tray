@@ -1245,6 +1245,8 @@ async function runEngineeringAutoDesign() {
     ),
     traySideMarginMm:25,
     standardTrayWidthsMm:parseNumberList($('autoTrayStandards').value),
+    floorZones:state.engineeringFloors.map(function(floor){ return JSON.parse(JSON.stringify(floor)); }),
+    floorLevelToleranceMm:500,
     verticalPenaltyRatio:0.02,
     verticalRangePenaltyRatio:0.25,
     reuseBonus:0.45,
@@ -1412,6 +1414,8 @@ async function runEngineeringAutoDesign() {
       engineering_network_id:plan.engineering_network_id
         ? String(plan.engineering_network_id)
         : 'network-' + panel.id,
+      engineering_floor_id:plan.engineering_floor_id ? String(plan.engineering_floor_id) : null,
+      engineering_floor_name:plan.engineering_floor_name || null,
       engineering_tray_width_mm:Number(plan.planning_tray_width_mm) || null,
       engineering_main_corridor_axis:plan.main_corridor_axis || settings.structurePrimaryAxis || null,
       engineering_main_corridor_y_mm:Number(plan.main_corridor_routing_y_mm),
@@ -1448,6 +1452,10 @@ async function runEngineeringAutoDesign() {
               : 'network-' + matchingPlan.panel.id
           )
           : null),
+      engineering_floor_id:matchingPlan && matchingPlan.engineering_floor_id
+        ? String(matchingPlan.engineering_floor_id)
+        : null,
+      engineering_floor_name:matchingPlan ? (matchingPlan.engineering_floor_name || null) : null,
       panel_connection:!!run.panel_connection
     });
   });
@@ -1560,7 +1568,7 @@ function setTool(tool) {
   const autoRouteOffsetAxisRow = $('autoRouteOffsetAxisRow');
   const autoRouteActions = $('autoRouteActions');
   const measureTypeRow = $('measureTypeRow');
-  const engineeringTool = tool === 'equipment' || tool === 'panel';
+  const engineeringTool = tool === 'equipment' || tool === 'panel' || tool === 'floor';
   if (autoRouteTypeRow) autoRouteTypeRow.classList.toggle('hidden', tool !== 'auto-route');
   if (autoRouteOffsetAxisRow) {
     autoRouteOffsetAxisRow.classList.toggle(
@@ -1577,6 +1585,7 @@ function setTool(tool) {
     model: 'Use Load Model for 3D, SolidWorks, AutoCAD DWG or DXF files.',
     equipment: 'Click a CAD/model surface to place a motor, pump, fan or other electrical load.',
     panel: 'Click a CAD/model surface to place an electrical panel destination.',
+    floor: 'Click four corner points around one floor in order. The fourth point saves the floor definition.',
     measure: state.measureMode === 'surface'
       ? 'Surface to Surface: click two CAD/model surfaces to measure the shortest surface distance.'
       : state.measureMode === 'edge'
@@ -1595,7 +1604,9 @@ function setTool(tool) {
           ? 'Place Equipment: select a CAD/model surface'
           : tool === 'panel'
             ? 'Place Panel: select a CAD/model surface'
-            : 'Ready'
+            : tool === 'floor'
+              ? 'Define Floor: select corner 1 of 4'
+              : 'Ready'
   );
 }
 document.querySelectorAll('.tool').forEach(function(b){ b.addEventListener('click', function(){ setTool(b.dataset.tool); }); });
@@ -2361,7 +2372,7 @@ function routeVisual(obj) {
       new THREE.TubeGeometry(
         routeCurve,
         Math.max(24, localPoints.length * 20),
-        Math.max(0.2, mmToScene(obj.diameter_mm) / 2),
+        Math.max(0.01, mmToScene(Math.max(0.1, Number(obj.diameter_mm) || 0.1)) / 2),
         12,
         false
       ),
@@ -2795,6 +2806,11 @@ renderer.domElement.addEventListener('click', function(e){
     return;
   }
 
+  if (state.tool === 'floor') {
+    addEngineeringFloorPoint(e);
+    return;
+  }
+
   if (state.tool === 'cable' || state.tool === 'tray') {
     const p = routePoint(e); if (!p) return;
     state.drawing.points.push(p);
@@ -2916,6 +2932,14 @@ function handleKeyboardShortcut(e) {
     }
     if ((state.tool === 'equipment' || state.tool === 'panel')) {
       setTool('select');
+      e.preventDefault();
+      return;
+    }
+    if (state.tool === 'floor' && state.engineeringFloorPoints.length) {
+      state.engineeringFloorPoints = [];
+      autoRoutePreviewRoot.clear();
+      setTool('select');
+      toast('Floor definition cancelled');
       e.preventDefault();
       return;
     }
@@ -4263,6 +4287,21 @@ function renderProperties() {
     bindEngineeringField('e_voltage','voltage_v',true);
     bindEngineeringField('e_cable_name','cable_name',false);
     bindEngineeringField('e_cable_diameter','cable_diameter_mm',true);
+    $('e_cable_diameter').addEventListener('change', function(e){
+      const diameter = Math.max(0.1, Number(e.target.value) || 0.1);
+      equipment.cable_diameter_mm = diameter;
+      state.objects.forEach(function(route){
+        if (
+          route.kind === 'cable' &&
+          route.engineering_generated === true &&
+          route.engineering_equipment_id === equipment.id
+        ) {
+          route.diameter_mm = diameter;
+        }
+      });
+      rebuildRoutes();
+      renderEngineeringTakeoff();
+    });
     $('e_panel').addEventListener('change', function(e){
       equipment.destination_panel_id = e.target.value;
       equipment.routing_result = null;
@@ -4936,6 +4975,7 @@ function loadProject(data) {
   $('unitSystem').value = state.project.units || 'mm';
   syncEngineeringSettingsInputs();
   renderEngineeringNamesToggle();
+  renderEngineeringFloorsList();
   rebuildEngineeringMarkers();
   state.selected = null;
   state.measureStart = null;
@@ -4979,7 +5019,7 @@ $('newProjectBtn').addEventListener('click', function(){
   state.engineeringFloorPoints = [];
   state.lastEngineeringReport = null;
   state.selected = null; resetHistory(); state.surfacePick = null; state.surfacePickMode = false;
-  state.measureStart = null; state.surfaceAlignStart = null; state.selectedMeasurementId = null; state.measurements = []; clearSurfaceSelectionVisuals(); rebuildMeasurements(); renderMeasurementsToggle(); renderMeasurementList(); render(); toast('New project created');
+  state.measureStart = null; state.surfaceAlignStart = null; state.selectedMeasurementId = null; state.measurements = []; clearSurfaceSelectionVisuals(); rebuildMeasurements(); renderMeasurementsToggle(); renderMeasurementList(); renderEngineeringFloorsList(); rebuildEngineeringMarkers(); render(); toast('New project created');
 });
 $('exportBoqBtn').addEventListener('click', function(){
   const rows = [['Item','Size','Total Quantity','Unit','Elbows']];
@@ -5094,6 +5134,7 @@ $('fitBtn').addEventListener('click', fitAllScene);
 $('topBtn').addEventListener('click', function(){ camera.position.set(0,18000,0.01); controls.target.set(0,0,0); controls.update(); });
 $('frontBtn').addEventListener('click', function(){ camera.position.set(0,5000,18000); controls.target.set(0,0,0); controls.update(); });
 $('isoBtn').addEventListener('click', function(){ camera.position.set(12000,9500,12000); controls.target.set(0,1500,0); controls.update(); });
+$('autoDesignBtn').addEventListener('click', function(){ renderEngineeringFloorsList(); });
 $('toggleMeasurementsBtn').addEventListener('click', toggleMeasurements);
 $('toggleEngineeringNamesBtn').addEventListener('click', toggleEngineeringNames);
 $('clearMeasurementsBtn').addEventListener('click', function(){
@@ -5101,7 +5142,7 @@ $('clearMeasurementsBtn').addEventListener('click', function(){
   if (!confirm('Delete all dimensions?')) return;
   clearAllMeasurements();
 });
-setTool('select'); rebuildMeasurements(); renderMeasurementsToggle(); renderEngineeringNamesToggle(); renderMeasurementList(); render(); animate();
+setTool('select'); renderEngineeringFloorsList(); rebuildMeasurements(); renderMeasurementsToggle(); renderEngineeringNamesToggle(); renderMeasurementList(); render(); animate();
 
 function animate(){
   requestAnimationFrame(animate);
