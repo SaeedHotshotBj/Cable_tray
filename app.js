@@ -1171,7 +1171,9 @@ async function runEngineeringAutoDesign() {
       engineering_generated:true,
       engineering_equipment_id:item.id,
       engineering_panel_id:panel.id,
-      engineering_network_id:'network-' + panel.id,
+      engineering_network_id:plan.engineering_network_id
+        ? String(plan.engineering_network_id)
+        : 'network-' + panel.id,
       engineering_tray_width_mm:Number(plan.planning_tray_width_mm) || null,
       engineering_main_corridor_axis:plan.main_corridor_axis || settings.structurePrimaryAxis || null,
       engineering_main_corridor_y_mm:Number(plan.main_corridor_routing_y_mm),
@@ -1199,7 +1201,15 @@ async function runEngineeringAutoDesign() {
       engineering_generated:true,
       engineering_classification:run.classification,
       engineering_cable_ids:run.cable_ids || [],
-      engineering_network_id:matchingPlan ? 'network-' + matchingPlan.panel.id : null,
+      engineering_network_id:run.network_id
+        ? String(run.network_id)
+        : (matchingPlan
+          ? (
+            matchingPlan.engineering_network_id
+              ? String(matchingPlan.engineering_network_id)
+              : 'network-' + matchingPlan.panel.id
+          )
+          : null),
       panel_connection:!!run.panel_connection
     });
   });
