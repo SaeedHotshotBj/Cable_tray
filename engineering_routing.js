@@ -1395,13 +1395,32 @@ function buildTrayRuns(cablePlans, options, mainCorridors) {
 
     const networkWidthId = segment.network_id || panelId;
     const networkWidth = Number(networkWidthById.get(networkWidthId));
-    const width = Number.isFinite(networkWidth) && networkWidth > 0
+
+    // Only the actual shared Main Tray uses the full network width.
+    // A branch serving one equipment item must be sized from the cables that
+    // physically remain on that branch; otherwise every motor gets a full-width
+    // copy of the Main Tray and the tree topology becomes visually misleading.
+    const segmentRequiredWidth = (
+      Array.from(segment.diameterByCable.values()).reduce(function(sum, value) {
+        return sum + (Number(value) || 0);
+      }, Math.max(0, Number(options.traySideMarginMm) || 25) * 2) /
+      (Math.min(100, Math.max(1, Number(options.fillLimitPercent) || 80)) / 100)
+    );
+
+    const isSharedMainSegment = segment.main_corridor_eligible ||
+      segment.parallel_main_eligible ||
+      (
+        segment.cableIds.size >= mainMinCables &&
+        segment.main_level_eligible &&
+        corridorAxisEligible
+      );
+
+    const width = isSharedMainSegment &&
+      Number.isFinite(networkWidth) &&
+      networkWidth > 0
       ? networkWidth
       : chooseTrayWidth(
-          Array.from(segment.diameterByCable.values()).reduce(function(sum, value) {
-            return sum + (Number(value) || 0);
-          }, Math.max(0, Number(options.traySideMarginMm) || 25) * 2) /
-          (Math.min(100, Math.max(1, Number(options.fillLimitPercent) || 80)) / 100),
+          segmentRequiredWidth,
           options.standardTrayWidthsMm
         );
 
