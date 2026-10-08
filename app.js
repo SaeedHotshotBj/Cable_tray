@@ -2159,7 +2159,7 @@ function routeVisual(obj) {
   const curveRadius = obj.kind === 'cable'
     ? Math.max(0.8, mmToScene(obj.diameter_mm * 3))
     : Math.max(1.0, mmToScene(Math.min(obj.width_mm, obj.height_mm) * 0.8));
-  const routeCurve = isEngineeringTray
+  const routeCurve = (isEngineeringTray || (isCable && obj.engineering_generated === true))
     ? straightRouteCurve(localPoints)
     : roundedRouteCurve(localPoints, curveRadius);
 
