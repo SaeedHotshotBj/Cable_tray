@@ -2516,7 +2516,6 @@ function buildGlobalMainBackboneNetwork(group, prepared, panelStandoff, obstacle
   const preferredAxis = options.structurePrimaryAxis === 'x' || options.structurePrimaryAxis === 'z'
     ? options.structurePrimaryAxis
     : null;
-
   const axisOrder = preferredAxis
     ? [preferredAxis, preferredAxis === 'x' ? 'z' : 'x']
     : ['x', 'z'];
@@ -2534,26 +2533,25 @@ function buildGlobalMainBackboneNetwork(group, prepared, panelStandoff, obstacle
     return result;
   }
 
-  function pushMainNode(tree, points, point) {
+  function appendMainNode(tree, nodes, point) {
     const candidate = clonePoint(point);
-    const previous = points[points.length - 1];
+    const previous = nodes[nodes.length - 1];
     if (
       previous &&
       Math.abs(previous.x - candidate.x) < 0.001 &&
       Math.abs(previous.y - candidate.y) < 0.001 &&
       Math.abs(previous.z - candidate.z) < 0.001
     ) {
-      return previous;
+      return;
     }
 
     const key = networkNodeKey(candidate);
     if (!tree.nodes.has(key)) tree.nodes.set(key, candidate);
     if (previous) tree.parent.set(key, networkNodeKey(previous));
-    points.push(candidate);
-    return candidate;
+    nodes.push(candidate);
   }
 
-  function buildDenseMainNodes(tree, spinePath, nearPoint, mainAxis) {
+  function buildDenseMainNodes(tree, spinePath, nearPoint) {
     const fixed = (spinePath.points || [])
       .filter(function(point){
         return Math.abs(Number(point.y) - Number(routingY)) < 0.001;
@@ -2577,39 +2575,23 @@ function buildGlobalMainBackboneNetwork(group, prepared, panelStandoff, obstacle
       fixed.unshift(clonePoint(nearPoint));
     }
 
-    const dense = [];
-    const nearKey = networkNodeKey(fixed[0]);
-    if (!tree.nodes.has(nearKey)) tree.nodes.set(nearKey, clonePoint(fixed[0]));
-    dense.push(clonePoint(fixed[0]));
+    const dense = [clonePoint(fixed[0])];
+    const firstKey = networkNodeKey(dense[0]);
+    if (!tree.nodes.has(firstKey)) tree.nodes.set(firstKey, clonePoint(dense[0]));
 
     for (let i = 1; i < fixed.length; i++) {
       const a = dense[dense.length - 1];
       const b = fixed[i];
-
-      const deltaPrimary = Number(b[mainAxis]) - Number(a[mainAxis]);
-      const deltaSecondary = Number(b[mainAxis === 'x' ? 'z' : 'x']) - Number(a[mainAxis === 'x' ? 'z' : 'x']);
-
-      if (
-        Math.abs(deltaSecondary) > 0.001 &&
-        Math.abs(deltaPrimary) > 0.001
-      ) {
-        const previous = dense[dense.length - 1];
-        pushMainNode(tree, dense, b);
-        tree.parent.set(networkNodeKey(b), networkNodeKey(previous));
-        continue;
-      }
-
-      const length = Math.abs(deltaPrimary) + Math.abs(deltaSecondary);
+      const length = manhattanDistance3D(a, b);
       const count = Math.max(1, Math.ceil(length / gridStep));
 
       for (let stepIndex = 1; stepIndex <= count; stepIndex++) {
         const t = stepIndex / count;
-        const point = {
+        appendMainNode(tree, dense, {
           x:a.x + (b.x - a.x) * t,
           y:routingY,
           z:a.z + (b.z - a.z) * t
-        };
-        pushMainNode(tree, dense, point);
+        });
       }
     }
 
@@ -2625,19 +2607,20 @@ function buildGlobalMainBackboneNetwork(group, prepared, panelStandoff, obstacle
 
     if (!values.length) return [];
 
-    const quantile = function(position) {
-      const index = Math.max(0, Math.min(values.length - 1, Math.round(position * (values.length - 1))));
+    function quantile(position) {
+      const index = Math.max(
+        0,
+        Math.min(values.length - 1, Math.round(position * (values.length - 1)))
+      );
       return values[index];
-    };
+    }
 
-    const raw = [
+    return uniqueSnappedValues([
       quantile(0.25),
       quantile(0.5),
       quantile(0.75),
       Number(panelStandoff.point[secondaryAxis])
-    ];
-
-    return uniqueSnappedValues(raw).filter(function(value){
+    ]).filter(function(value){
       const testPoint = axis === 'x'
         ? {x:Number(prepared[0].start.x), y:routingY, z:value}
         : {x:value, y:routingY, z:Number(prepared[0].start.z)};
@@ -2666,22 +2649,24 @@ function buildGlobalMainBackboneNetwork(group, prepared, panelStandoff, obstacle
 
     for (let secondaryIndex = 0; secondaryIndex < secondaryCoordinates.length; secondaryIndex++) {
       const secondary = secondaryCoordinates[secondaryIndex];
-
       const panelPrimary = Number(panelStandoff.point[axis]);
       const nearPrimary = Math.max(primaryMin, Math.min(primaryMax, panelPrimary));
       const nearPoint = axis === 'x'
         ? {x:nearPrimary, y:routingY, z:secondary}
         : {x:secondary, y:routingY, z:nearPrimary};
 
-      const distanceToMin = Math.abs(panelPrimary - primaryMin);
-      const distanceToMax = Math.abs(panelPrimary - primaryMax);
-      const farPrimary = distanceToMin >= distanceToMax ? primaryMin : primaryMax;
+      const farPrimary =
+        Math.abs(panelPrimary - primaryMin) >= Math.abs(panelPrimary - primaryMax)
+          ? primaryMin
+          : primaryMax;
       const farPoint = axis === 'x'
         ? {x:farPrimary, y:routingY, z:secondary}
         : {x:secondary, y:routingY, z:farPrimary};
 
-      if (!pointWithinRoutingBounds(nearPoint, routeOptions) ||
-          !pointWithinRoutingBounds(farPoint, routeOptions)) {
+      if (
+        !pointWithinRoutingBounds(nearPoint, routeOptions) ||
+        !pointWithinRoutingBounds(farPoint, routeOptions)
+      ) {
         continue;
       }
 
@@ -2732,16 +2717,9 @@ function buildGlobalMainBackboneNetwork(group, prepared, panelStandoff, obstacle
       appendDistinctPoints(corridorPath, spinePath.points, 0);
       appendDistinctPoints(corridorPath, panelConnector.points, 1);
 
-      const registration = registerNetworkPath(tree, corridorPath, routingY);
-      if (!registration) continue;
+      if (!registerNetworkPath(tree, corridorPath, routingY)) continue;
 
-      const denseMainNodes = buildDenseMainNodes(
-        tree,
-        spinePath,
-        nearPoint,
-        axis
-      );
-
+      const denseMainNodes = buildDenseMainNodes(tree, spinePath, nearPoint);
       if (denseMainNodes.length < 2) continue;
 
       const mainNetworkPoints = denseMainNodes.map(clonePoint);
@@ -2752,7 +2730,7 @@ function buildGlobalMainBackboneNetwork(group, prepared, panelStandoff, obstacle
           denseMainNodes[i - 1],
           denseMainNodes[i],
           prepared[0].equipment.id,
-          prepared[0].equipment.cable_diameter_mm
+          prepared[0].cable.diameter_mm
         );
         if (segment) mainCorridorSegmentKeys.add(segment.key);
       }
@@ -2761,20 +2739,18 @@ function buildGlobalMainBackboneNetwork(group, prepared, panelStandoff, obstacle
       const connected = new Set();
 
       const rankedEquipment = prepared.slice().sort(function(a,b){
-        const da = networkDistanceToNodes(a.start, mainNetworkPoints);
-        const db = networkDistanceToNodes(b.start, mainNetworkPoints);
-        return da - db || b.densityScore - a.densityScore;
+        return networkDistanceToNodes(a.start, mainNetworkPoints) -
+          networkDistanceToNodes(b.start, mainNetworkPoints) ||
+          b.densityScore - a.densityScore;
       });
 
-      for (let equipmentIndex = 0; equipmentIndex < rankedEquipment.length; equipmentIndex++) {
-        const entry = rankedEquipment[equipmentIndex];
-
+      rankedEquipment.forEach(function(entry){
         const branchResult = findGridPath3D(
           entry.start,
           null,
           obstacles,
           {
-            ...(entry.branchRouteOptions || routeOptions),
+            ...routeOptions,
             fixedRoutingY:routingY,
             preferredRoutingY:routingY,
             networkGoalPoints:mainNetworkPoints,
@@ -2787,7 +2763,7 @@ function buildGlobalMainBackboneNetwork(group, prepared, panelStandoff, obstacle
         );
 
         if (!branchResult.points || branchResult.points.length < 1 || !branchResult.attachment_point) {
-          continue;
+          return;
         }
 
         const plan = makeNetworkCablePlan(
@@ -2806,13 +2782,13 @@ function buildGlobalMainBackboneNetwork(group, prepared, panelStandoff, obstacle
           Array.from(mainCorridorSegmentKeys)
         );
 
-        if (!plan) continue;
+        if (!plan) return;
 
         plan.main_corridor_axis = axis;
         plan.main_corridor_secondary_coordinate_mm = secondary;
         cablePlans.push(plan);
         connected.add(entry.equipment.id);
-      }
+      });
 
       const unresolved = prepared.filter(function(entry){
         return !connected.has(entry.equipment.id);
@@ -2830,7 +2806,7 @@ function buildGlobalMainBackboneNetwork(group, prepared, panelStandoff, obstacle
         totalTurns * Math.max(1, gridStep) * 0.001 +
         Math.abs(secondary - Number(panelStandoff.point[secondaryAxis])) * 0.01;
 
-      const candidateResult = {
+      const result = {
         routingY,
         panelHighPoint:rootPoint,
         panelDrop,
@@ -2843,16 +2819,16 @@ function buildGlobalMainBackboneNetwork(group, prepared, panelStandoff, obstacle
 
       if (
         !best ||
-        candidateResult.connectedCount > best.connectedCount ||
+        result.connectedCount > best.connectedCount ||
         (
-          candidateResult.connectedCount === best.connectedCount &&
-          candidateResult.score < best.score
+          result.connectedCount === best.connectedCount &&
+          result.score < best.score
         )
       ) {
-        best = candidateResult;
+        best = result;
       }
 
-      if (!unresolved.length) return candidateResult;
+      if (!unresolved.length) return result;
     }
   }
 
@@ -2900,59 +2876,6 @@ function buildPanelMultiTerminalNetwork(group, prepared, panelStandoff, obstacle
   // Main Tray corridor between the rows before the generic seed-and-branch
   // network. This prevents two parallel cable paths from becoming two
   // independent Main Trays when the open space between them is usable.
-
-  for (let levelIndex = 0; levelIndex < levels.length; levelIndex++) {
-      const routingY = levels[levelIndex];
-      const panelHighPoint = pointAtRoutingY(panelStandoff.point, routingY);
-      const panelDrop = findGridPath3D(
-        panelStandoff.point,
-        panelHighPoint,
-        obstacles,
-        {
-          ...routeOptions,
-          fixedRoutingY:routingY,
-          preferredRoutingY:routingY,
-          routeTurnPenaltyRatio:Math.max(
-            Number(options.turnPenaltyRatio) || 20,
-            Number(options.mainCorridorTurnPenaltyRatio) || 100
-          )
-        },
-        new Set()
-      );
-
-      if (!panelDrop.points || panelDrop.points.length < 1) continue;
-
-      const backboneResult = buildGlobalMainBackboneNetwork(
-        group,
-        prepared,
-        panelStandoff,
-        obstacles,
-        routeOptions,
-        options,
-        routingY,
-        panelDrop
-      );
-
-      if (!backboneResult) continue;
-
-      if (!bestPartial ||
-          backboneResult.connectedCount > bestPartial.connectedCount ||
-          (
-            backboneResult.connectedCount === bestPartial.connectedCount &&
-            backboneResult.score < bestPartial.partialScore
-          )) {
-        bestPartial = {
-          ...backboneResult,
-          partialScore:backboneResult.score
-        };
-      }
-
-      if (backboneResult.unresolved.length === 0) {
-        return backboneResult;
-      }
-    }
-  }
-
   for (let levelIndex = 0; levelIndex < levels.length; levelIndex++) {
     const routingY = levels[levelIndex];
     const panelHighPoint = pointAtRoutingY(panelStandoff.point, routingY);
@@ -2988,15 +2911,11 @@ function buildPanelMultiTerminalNetwork(group, prepared, panelStandoff, obstacle
     if (parallelResult && parallelResult.unresolved.length === 0) {
       return parallelResult;
     }
-  }
 
-  // For larger equipment groups, build a global Main backbone before the
-  // legacy seed-and-branch network. This gives every equipment item a real
-  // attachment target and prevents one branch from becoming another branch's Main.
-  const backboneThreshold = Math.max(
-    5,
-    attachLimit + 1
-  );
+  // Larger groups use a global Main backbone so every equipment item gets
+  // a real Main attachment node. The previous seed corridor must not become
+  // the only usable Main target when the equipment count grows.
+  const backboneThreshold = Math.max(5, attachLimit + 1);
 
   if (prepared.length >= backboneThreshold) {
     for (let levelIndex = 0; levelIndex < levels.length; levelIndex++) {
@@ -3051,6 +2970,8 @@ function buildPanelMultiTerminalNetwork(group, prepared, panelStandoff, obstacle
         return backboneResult;
       }
     }
+  }
+
   }
 
   for (let levelIndex = 0; levelIndex < levels.length; levelIndex++) {
