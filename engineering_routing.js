@@ -1370,7 +1370,11 @@ function buildTrayRuns(cablePlans, options, mainCorridors) {
       fixed2 = rounded(segment.start.y);
     }
 
-    const cableSetKey = Array.from(segment.cableIds).sort().join(',');
+    // Main Tray is one physical shared route even when the cable membership
+    // changes along its length. Branch runs remain separated by cable set.
+    const cableSetKey = segment.classification === 'branch'
+      ? Array.from(segment.cableIds).sort().join(',')
+      : '';
     const lineKey = [
       segment.axis,
       fixed1,
