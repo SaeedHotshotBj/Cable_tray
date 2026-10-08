@@ -2839,23 +2839,123 @@ function buildGlobalMainBackboneNetwork(group, prepared, panelStandoff, obstacle
           b.densityScore - a.densityScore;
       });
 
-      rankedEquipment.forEach(function(entry){
-        const branchResult = findGridPath3D(
-          entry.start,
-          null,
-          obstacles,
-          {
-            ...(entry.branchRouteOptions || routeOptions),
-            fixedRoutingY:routingY,
-            preferredRoutingY:routingY,
-            networkGoalPoints:mainNetworkPoints,
-            routeTurnPenaltyRatio:Math.max(
-              Number(options.turnPenaltyRatio) || 20,
-              Number(options.mainCorridorTurnPenaltyRatio) || 100
-            )
-          },
-          new Set()
+      function tryDirectMainAttachment(entry) {
+        const primaryAxis = axis;
+        const secondaryAxis = axis === 'x' ? 'z' : 'x';
+        const grid = Math.max(50, Number(options.gridStepMm) || 100);
+        const primaryValue = Number(entry.start[primaryAxis]);
+        if (!Number.isFinite(primaryValue)) return null;
+
+        const candidates = [];
+        mainNetworkPoints.forEach(function(point) {
+          const secondaryDistance = Math.abs(
+            Number(point[secondaryAxis]) - Number(secondary)
+          );
+          if (secondaryDistance > 0.001) return;
+
+          const primaryDistance = Math.abs(
+            Number(point[primaryAxis]) - primaryValue
+          );
+          candidates.push({point, distance:primaryDistance});
+        });
+
+        candidates.sort(function(a,b){ return a.distance - b.distance; });
+
+        const branchCandidates = candidates.slice(
+          0,
+          Math.max(3, Number(options.networkAttachmentCandidateLimit) || 4)
         );
+
+        let bestDirect = null;
+
+        branchCandidates.forEach(function(candidate) {
+          const target = clonePoint(candidate.point);
+          const verticalPoint = {
+            x:Number(entry.start.x),
+            y:routingY,
+            z:Number(entry.start.z)
+          };
+          const secondaryPoint = primaryAxis === 'x'
+            ? {
+                x:Number(verticalPoint.x),
+                y:routingY,
+                z:Number(secondary)
+              }
+            : {
+                x:Number(secondary),
+                y:routingY,
+                z:Number(verticalPoint.z)
+              };
+
+          const path = [
+            clonePoint(entry.start),
+            verticalPoint,
+            secondaryPoint,
+            target
+          ].filter(function(point, index, points){
+            if (!index) return true;
+            const previous = points[index - 1];
+            return Math.abs(previous.x - point.x) > 0.001 ||
+              Math.abs(previous.y - point.y) > 0.001 ||
+              Math.abs(previous.z - point.z) > 0.001;
+          });
+
+          let clear = true;
+          for (let i = 1; i < path.length; i++) {
+            if (!segmentClearForRouting(
+              path[i - 1],
+              path[i],
+              obstacles,
+              entry.branchRouteOptions || routeOptions
+            )) {
+              clear = false;
+              break;
+            }
+          }
+
+          if (!clear) return;
+
+          const score =
+            polylineLengthMm(path) +
+            countPolylineTurns(path) * grid * 50 +
+            candidate.distance * 0.01;
+
+          if (!bestDirect || score < bestDirect.score) {
+            bestDirect = {
+              points:path,
+              attachment_point:target,
+              fallback:false,
+              warning:null,
+              score
+            };
+          }
+        });
+
+        return bestDirect;
+      }
+
+      rankedEquipment.forEach(function(entry){
+        let branchResult = tryDirectMainAttachment(entry);
+
+        if (!branchResult) {
+          branchResult = findGridPath3D(
+            entry.start,
+            null,
+            obstacles,
+            {
+              ...(entry.branchRouteOptions || routeOptions),
+              fixedRoutingY:routingY,
+              preferredRoutingY:routingY,
+              networkGoalPoints:mainNetworkPoints,
+              networkGoalCandidateLimit:Number(options.networkGoalCandidateLimit) || 24,
+              routeTurnPenaltyRatio:Math.max(
+                Number(options.turnPenaltyRatio) || 20,
+                Number(options.mainCorridorTurnPenaltyRatio) || 100
+              )
+            },
+            new Set()
+          );
+        }
 
         if (!branchResult.points || branchResult.points.length < 1 || !branchResult.attachment_point) {
           return;
