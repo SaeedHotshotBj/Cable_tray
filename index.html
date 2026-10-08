@@ -55,8 +55,11 @@
         <label id="autoRouteTypeRow" class="field hidden"><span>Auto Route Type</span><select id="autoRouteType"><option value="cable">Cable</option><option value="tray">Cable Tray</option></select></label>
         <button class="tool" data-tool="equipment">＋ Place Equipment</button>
         <button class="tool" data-tool="panel">＋ Place Panel</button>
+        <button class="tool" data-tool="floor">＋ Define Floor (4 Points)</button>
         <button id="autoDesignBtn" class="tool engineering-action">⚡ Auto Design Routing</button>
-        <div class="hint">Place motors, pumps, fans, heaters or other electrical loads directly on CAD/model surfaces, place the destination panels, assign each cable, then Auto Design Routing builds shortest valid grid routes and sizes main/branch trays.</div>
+        <div class="hint">Place motors, pumps, fans, heaters or other electrical loads directly on CAD/model surfaces, place the destination panels, define each floor with four corner points when needed, assign each cable, then Auto Design Routing builds one shared Main Tray per floor with tree-like branches.</div>
+        <div class="hint" id="floorToolHint">Define Floor: click four corner points around one floor in order. The fourth point saves the floor definition automatically. Press Esc to cancel.</div>
+        <div id="engineeringFloors" class="engineering-floors"></div>
         <label id="autoRouteOffsetAxisRow" class="field hidden"><span>Tray Offset Axis</span><select id="autoRouteOffsetAxis"><option value="auto">Auto</option><option value="x">X</option><option value="y">Y</option><option value="z">Z</option></select></label>
         <div id="autoRouteActions" class="hidden">
           <div class="hint">Preview length: <b id="autoRoutePreviewLength">0.000 m</b></div>
