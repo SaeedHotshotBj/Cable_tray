@@ -1233,15 +1233,16 @@ function planAxisForParallelMain(plan) {
 }
 
 function buildTrayRuns(cablePlans, options, mainCorridors) {
-  const networkWidthByPanel = new Map();
+  const networkWidthById = new Map();
 
   (cablePlans || []).forEach(function(plan) {
-    const panelId = plan.panel && plan.panel.id;
+    const networkId = plan.engineering_network_id ||
+      (plan.panel && plan.panel.id ? String(plan.panel.id) : null);
     const width = Number(plan.planning_tray_width_mm);
-    if (!panelId || !Number.isFinite(width) || width <= 0) return;
-    networkWidthByPanel.set(
-      panelId,
-      Math.max(Number(networkWidthByPanel.get(panelId)) || 0, width)
+    if (!networkId || !Number.isFinite(width) || width <= 0) return;
+    networkWidthById.set(
+      networkId,
+      Math.max(Number(networkWidthById.get(networkId)) || 0, width)
     );
   });
 
@@ -1273,6 +1274,9 @@ function buildTrayRuns(cablePlans, options, mainCorridors) {
       );
       if (!segment) continue;
 
+      segment.network_id = plan.engineering_network_id ||
+        (plan.panel && plan.panel.id ? String(plan.panel.id) : null);
+
       segment.main_level_eligible = Number.isFinite(mainLevelY) &&
         Math.abs(segment.start.y - mainLevelY) < 0.001 &&
         Math.abs(segment.end.y - mainLevelY) < 0.001;
@@ -1293,9 +1297,13 @@ function buildTrayRuns(cablePlans, options, mainCorridors) {
           ) < 0.001
         );
 
-      const existing = segments.get(segment.key);
+      const segmentMapKey = [
+        segment.network_id || '',
+        segment.key
+      ].join('||');
+      const existing = segments.get(segmentMapKey);
       if (!existing) {
-        segments.set(segment.key, segment);
+        segments.set(segmentMapKey, segment);
       } else {
         existing.cableIds.add(plan.equipment.id);
         existing.diameterByCable.set(
@@ -1322,7 +1330,8 @@ function buildTrayRuns(cablePlans, options, mainCorridors) {
         segment.cableIds.has(plan.equipment.id);
     })?.panel?.id || null;
 
-    const networkWidth = Number(networkWidthByPanel.get(panelId));
+    const networkWidthId = segment.network_id || panelId;
+    const networkWidth = Number(networkWidthById.get(networkWidthId));
     const width = Number.isFinite(networkWidth) && networkWidth > 0
       ? networkWidth
       : chooseTrayWidth(
@@ -1382,6 +1391,7 @@ function buildTrayRuns(cablePlans, options, mainCorridors) {
       ? Array.from(segment.cableIds).sort().join(',')
       : '';
     const lineKey = [
+      segment.network_id || '',
       segment.axis,
       fixed1,
       fixed2,
@@ -1392,6 +1402,7 @@ function buildTrayRuns(cablePlans, options, mainCorridors) {
     ].join('|');
 
     const entry = grouped.get(lineKey) || {
+      network_id:segment.network_id || null,
       axis:segment.axis,
       fixed1,
       fixed2,
@@ -1528,6 +1539,7 @@ function mergeTrayRunPath(items) {
   });
 
   return {
+    network_id:first.network_id || null,
     classification:first.classification,
     width_mm:first.width_mm,
     height_mm:first.height_mm,
@@ -1545,6 +1557,7 @@ function stitchTrayRuns(runs) {
 
   source.forEach(function(run){
     const groupKey = [
+      run.network_id || '',
       run.classification || 'branch',
       Number(run.width_mm) || 0,
       Number(run.height_mm) || 0,
@@ -1637,6 +1650,7 @@ function makeTrayRun(group, range) {
   const cableIds = Array.from(group.cable_ids || []);
   if (group.axis === 'x') {
     return {
+      network_id:group.network_id || null,
       classification:group.classification,
       width_mm:group.width_mm,
       height_mm:group.height_mm,
@@ -1650,6 +1664,7 @@ function makeTrayRun(group, range) {
   }
   if (group.axis === 'y') {
     return {
+      network_id:group.network_id || null,
       classification:group.classification,
       width_mm:group.width_mm,
       height_mm:group.height_mm,
@@ -1662,6 +1677,7 @@ function makeTrayRun(group, range) {
     };
   }
   return {
+      network_id:group.network_id || null,
     classification:group.classification,
     width_mm:group.width_mm,
     height_mm:group.height_mm,
@@ -2060,6 +2076,7 @@ function makeNetworkCablePlan(entry, group, branchPath, tree, attachmentPoint, p
     main_corridor_segment_keys:Array.isArray(mainCorridorSegmentKeys)
       ? mainCorridorSegmentKeys.slice()
       : [],
+    engineering_network_id:group.network_id || String(group.panel.id),
     points,
     warning:null,
     fallback:false
@@ -3299,7 +3316,67 @@ export function routeEngineeringNetwork(inputs) {
   const cablePlans = [];
   const mainCorridors = [];
 
+  const routingGroups = [];
+  const configuredWidths = (options.standardTrayWidthsMm || [])
+    .map(function(value){ return Number(value); })
+    .filter(function(value){ return Number.isFinite(value) && value > 0; })
+    .sort(function(a,b){ return a - b; });
+  const maxStandardTrayWidth = configuredWidths.length
+    ? configuredWidths[configuredWidths.length - 1]
+    : 1200;
+  const maxCableDiameterSum = Math.max(
+    0,
+    maxStandardTrayWidth * (Math.max(1, Math.min(100, options.fillLimitPercent)) / 100) -
+    Math.max(0, options.traySideMarginMm || 25) * 2
+  );
+
   groups.forEach(function(group) {
+    const sourceEquipment = group.equipment.slice();
+    const totalDiameter = sourceEquipment.reduce(function(sum, item){
+      return sum + Math.max(0, Number(item.cable_diameter_mm) || 0);
+    }, 0);
+
+    const batches = [];
+    if (totalDiameter <= maxCableDiameterSum + 0.001 || sourceEquipment.length <= 1) {
+      batches.push(sourceEquipment);
+    } else {
+      const primaryAxis = options.structurePrimaryAxis === 'z' ? 'z' : 'x';
+      const secondaryAxis = primaryAxis === 'x' ? 'z' : 'x';
+      sourceEquipment.sort(function(a,b){
+        const av = Number(a.anchor && a.anchor.point ? a.anchor.point[primaryAxis] : 0);
+        const bv = Number(b.anchor && b.anchor.point ? b.anchor.point[primaryAxis] : 0);
+        if (Math.abs(av - bv) > 0.001) return av - bv;
+        const as = Number(a.anchor && a.anchor.point ? a.anchor.point[secondaryAxis] : 0);
+        const bs = Number(b.anchor && b.anchor.point ? b.anchor.point[secondaryAxis] : 0);
+        return as - bs;
+      });
+
+      let current = [];
+      let currentDiameter = 0;
+      sourceEquipment.forEach(function(item){
+        const diameter = Math.max(0, Number(item.cable_diameter_mm) || 0);
+        if (current.length && currentDiameter + diameter > maxCableDiameterSum + 0.001) {
+          batches.push(current);
+          current = [];
+          currentDiameter = 0;
+        }
+        current.push(item);
+        currentDiameter += diameter;
+      });
+      if (current.length) batches.push(current);
+    }
+
+    batches.forEach(function(batch, batchIndex){
+      routingGroups.push({
+        panel:group.panel,
+        equipment:batch,
+        network_id:String(group.panel.id) + '::network-' + String(routingGroups.length + 1),
+        source_batch_index:batchIndex
+      });
+    });
+  });
+
+  routingGroups.forEach(function(group) {
     let planningCableDiameterSum = 0;
     group.equipment.forEach(function(item){
       planningCableDiameterSum += Math.max(0, Number(item.cable_diameter_mm) || 0);
@@ -3463,6 +3540,7 @@ export function routeEngineeringNetwork(inputs) {
           main_corridor_equipment_id:null,
           standoff_distance_mm:Math.max(entry.startDistanceMm, panelStandoff.distance_mm),
           planning_tray_width_mm:planningTrayWidth,
+          engineering_network_id:group.network_id || String(group.panel.id),
           branch_points:branchPoints,
           points,
           warning:highRoute.warning || panelDrop.warning || null,
@@ -3558,6 +3636,7 @@ export function routeEngineeringNetwork(inputs) {
           main_corridor_routing_y_mm:Number(routingY),
           standoff_distance_mm:Math.max(entry.startDistanceMm, panelStandoff.distance_mm),
           planning_tray_width_mm:planningTrayWidth,
+          engineering_network_id:group.network_id || String(group.panel.id),
           branch_points:branchPoints,
           points,
           warning:highRoute.warning || panelDrop.warning || null,
@@ -3598,6 +3677,7 @@ export function routeEngineeringNetwork(inputs) {
 
     mainCorridors.push({
       panel_id:group.panel.id,
+      network_id:group.network_id || String(group.panel.id),
       width_mm:planningTrayWidth,
       height_mm:Number(options.trayHeightMm) || 100,
       cable_ids:prepared.map(function(entry){ return entry.equipment.id; }),
