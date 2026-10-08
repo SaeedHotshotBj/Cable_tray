@@ -2160,7 +2160,7 @@ function makeNetworkCablePlan(entry, group, branchPath, tree, attachmentPoint, p
 
   return {
     equipment:entry.equipment,
-    panel:group.panel,
+    panel:targetPanel,
     cable:{
       name:entry.equipment.cable_name || 'Power Cable',
       diameter_mm:Number(entry.equipment.cable_diameter_mm) || 0
