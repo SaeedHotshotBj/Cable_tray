@@ -64,10 +64,20 @@ function pointKey3D(ix, iy, iz) {
   return ix + ',' + iy + ',' + iz;
 }
 
-function normalizeBounds3D(start, goal, obstacles, step, paddingMm) {
+function normalizeBounds3D(start, goal, obstacles, step, paddingMm, extraPoints) {
   const xs = [start.x, goal.x];
   const ys = [start.y, goal.y];
   const zs = [start.z, goal.z];
+
+  (extraPoints || []).forEach(function(point) {
+    if (!point) return;
+    const x = Number(point.x);
+    const y = Number(point.y);
+    const z = Number(point.z);
+    if (Number.isFinite(x)) xs.push(x);
+    if (Number.isFinite(y)) ys.push(y);
+    if (Number.isFinite(z)) zs.push(z);
+  });
 
   obstacles.forEach(function(rect) {
     xs.push(rect.minX, rect.maxX);
@@ -92,11 +102,11 @@ function normalizeBounds3D(start, goal, obstacles, step, paddingMm) {
   };
 }
 
-function adaptGridStep3D(start, goal, obstacles, baseStep, maxCells, paddingMm) {
+function adaptGridStep3D(start, goal, obstacles, baseStep, maxCells, paddingMm, extraPoints) {
   let step = Math.max(50, Number(baseStep) || 250);
 
   for (let attempt = 0; attempt < 8; attempt++) {
-    const bounds = normalizeBounds3D(start, goal, obstacles, step, paddingMm);
+    const bounds = normalizeBounds3D(start, goal, obstacles, step, paddingMm, extraPoints);
     const width = bounds.maxIx - bounds.minIx + 1;
     const height = bounds.maxIy - bounds.minIy + 1;
     const depth = bounds.maxIz - bounds.minIz + 1;
@@ -108,7 +118,7 @@ function adaptGridStep3D(start, goal, obstacles, baseStep, maxCells, paddingMm) 
 
   return {
     step,
-    bounds: normalizeBounds3D(start, goal, obstacles, step, paddingMm)
+    bounds: normalizeBounds3D(start, goal, obstacles, step, paddingMm, extraPoints)
   };
 }
 
@@ -699,11 +709,56 @@ function manhattanDistanceToBounds3D(point, bounds) {
   return dx + dy + dz;
 }
 
+function selectNetworkGoalPoints(start, networkPoints, candidateLimit) {
+  const source = (networkPoints || [])
+    .filter(function(point){
+      return point &&
+        Number.isFinite(Number(point.x)) &&
+        Number.isFinite(Number(point.y)) &&
+        Number.isFinite(Number(point.z));
+    });
+
+  if (!source.length) return [];
+
+  const limit = Math.max(4, Math.floor(Number(candidateLimit) || 24));
+  if (source.length <= limit) return source.map(clonePoint);
+
+  return source
+    .map(function(point){
+      return {
+        point:clonePoint(point),
+        distance:manhattanDistance3D(start, point)
+      };
+    })
+    .sort(function(a,b){
+      return a.distance - b.distance;
+    })
+    .slice(0, limit)
+    .map(function(entry){ return entry.point; });
+}
+
 function findGridPath3D(start, goal, obstacles, options, reuseCells) {
-  const networkGoalPoints = Array.isArray(options && options.networkGoalPoints)
-    ? options.networkGoalPoints.filter(Boolean).map(clonePoint)
+  const rawNetworkGoalPoints = Array.isArray(options && options.networkGoalPoints)
+    ? options.networkGoalPoints.filter(Boolean)
     : [];
-  const networkMode = networkGoalPoints.length > 0;
+  const networkMode = rawNetworkGoalPoints.length > 0;
+  const networkGoalPoints = networkMode
+    ? selectNetworkGoalPoints(
+        start,
+        rawNetworkGoalPoints,
+        Number(options && options.networkGoalCandidateLimit) || 24
+      )
+    : [];
+
+  if (networkMode && !networkGoalPoints.length) {
+    return {
+      step:Math.max(50, Number(options.gridStepMm) || 250),
+      points:[],
+      fallback:true,
+      warning:'No usable Main Tray attachment nodes were available.'
+    };
+  }
+
   if (networkMode && !goal) {
     const nearest = nearestNetworkPoint3D(start, networkGoalPoints);
     goal = nearest ? nearest.point : null;
@@ -720,7 +775,15 @@ function findGridPath3D(start, goal, obstacles, options, reuseCells) {
   const baseStep = Math.max(50, Number(options.gridStepMm) || 250);
   const paddingMm = Math.max(baseStep * 4, Number(options.routingPaddingMm) || 1000);
   const maxCells = Math.max(10000, Number(options.maxGridCells) || 120000);
-  const adapted = adaptGridStep3D(start, goal, obstacles, baseStep, maxCells, paddingMm);
+  const adapted = adaptGridStep3D(
+    start,
+    goal,
+    obstacles,
+    baseStep,
+    maxCells,
+    paddingMm,
+    networkMode ? networkGoalPoints : null
+  );
   const step = adapted.step;
   const bounds = adapted.bounds;
 
@@ -3234,6 +3297,88 @@ function buildPanelMultiTerminalNetwork(group, prepared, panelStandoff, obstacle
   return bestPartial;
 }
 
+function buildDirectFallbackCablePlan(entry, group, panelStandoff, obstacles, routeOptions, planningTrayWidth) {
+  const routingY = resolveHighestValidRoutingY(
+    [entry.start, panelStandoff.point],
+    routeOptions
+  );
+
+  const highPanelPoint = routingY == null
+    ? clonePoint(panelStandoff.point)
+    : pointAtRoutingY(panelStandoff.point, routingY);
+
+  const highRoute = findGridPath3D(
+    entry.start,
+    highPanelPoint,
+    obstacles,
+    {
+      ...(entry.branchRouteOptions || routeOptions),
+      preferredRoutingY:routingY
+    },
+    new Set()
+  );
+
+  if (!highRoute.points || highRoute.points.length < 1) return null;
+
+  const panelDrop = highPanelPoint.y === panelStandoff.point.y
+    ? {
+        points:[
+          clonePoint(panelStandoff.point),
+          clonePoint(highPanelPoint)
+        ],
+        warning:null,
+        fallback:false
+      }
+    : findGridPath3D(
+        panelStandoff.point,
+        highPanelPoint,
+        obstacles,
+        {
+          ...routeOptions,
+          preferredRoutingY:routingY
+        },
+        new Set()
+      );
+
+  if (!panelDrop.points || panelDrop.points.length < 1) return null;
+
+  const branchPoints = [];
+  appendDistinctPoints(branchPoints, highRoute.points, 0);
+  for (let i = panelDrop.points.length - 2; i >= 0; i--) {
+    appendDistinctPoints(branchPoints, [panelDrop.points[i]]);
+  }
+
+  const points = [];
+  appendDistinctPoints(points, [entry.equipment.anchor.point]);
+  appendDistinctPoints(points, [entry.start]);
+  appendDistinctPoints(points, highRoute.points, 0);
+  for (let i = panelDrop.points.length - 2; i >= 0; i--) {
+    appendDistinctPoints(points, [panelDrop.points[i]]);
+  }
+  appendDistinctPoints(points, [group.panel.anchor.point]);
+
+  return {
+    equipment:entry.equipment,
+    panel:group.panel,
+    cable:{
+      name:entry.equipment.cable_name || 'Power Cable',
+      diameter_mm:Number(entry.equipment.cable_diameter_mm) || 0
+    },
+    routing_start:entry.start,
+    routing_goal:panelStandoff.point,
+    main_corridor_equipment_id:null,
+    main_corridor_routing_y_mm:Number.isFinite(Number(routingY)) ? Number(routingY) : null,
+    standoff_distance_mm:Math.max(entry.startDistanceMm, panelStandoff.distance_mm),
+    planning_tray_width_mm:planningTrayWidth,
+    engineering_network_id:group.network_id || String(group.panel.id),
+    branch_points:branchPoints,
+    main_corridor_segment_keys:[],
+    points,
+    warning:'Shared Main Tray attachment was unavailable for this equipment; a direct branch route was used.',
+    fallback:true
+  };
+}
+
 export function routeEngineeringNetwork(inputs) {
   const equipment = Array.isArray(inputs && inputs.equipment) ? inputs.equipment : [];
   const panels = Array.isArray(inputs && inputs.panels) ? inputs.panels : [];
@@ -3281,6 +3426,7 @@ export function routeEngineeringNetwork(inputs) {
       : 0,
     networkSeedAttempts:Number(inputs && inputs.options && inputs.options.networkSeedAttempts) || 4,
     networkAttachmentCandidateLimit:Number(inputs && inputs.options && inputs.options.networkAttachmentCandidateLimit) || 4,
+    networkGoalCandidateLimit:Number(inputs && inputs.options && inputs.options.networkGoalCandidateLimit) || 24,
     parallelMainCorridorCandidateLimit:Number(inputs && inputs.options && inputs.options.parallelMainCorridorCandidateLimit) || 6,
     trayStopBeforeEquipmentMm:Number.isFinite(Number(inputs && inputs.options && inputs.options.trayStopBeforeEquipmentMm))
       ? Number(inputs.options.trayStopBeforeEquipmentMm)
@@ -3549,103 +3695,6 @@ export function routeEngineeringNetwork(inputs) {
       });
       return;
     }
-    if (prepared.length < Math.max(2, Number(options.mainMinCables) || 2)) {
-      prepared.forEach(function(entry) {
-        const routingY = resolveHighestValidRoutingY(
-          [entry.start, panelStandoff.point],
-          routeOptions
-        );
-
-        const highPanelPoint = routingY == null
-          ? clonePoint(panelStandoff.point)
-          : pointAtRoutingY(panelStandoff.point, routingY);
-
-        const highRoute = findGridPath3D(
-          entry.start,
-          highPanelPoint,
-          obstacles,
-          {
-            ...routeOptions,
-            preferredRoutingY:routingY
-          },
-          new Set()
-        );
-
-        if (!highRoute.points || !highRoute.points.length) {
-          warnings.push(
-            entry.equipment.name + ' → ' + group.panel.name +
-            ': no collision-free branch route was found.'
-          );
-          return;
-        }
-
-        const panelDrop = highPanelPoint.y === panelStandoff.point.y
-          ? {points:[clonePoint(panelStandoff.point),clonePoint(highPanelPoint)], warning:null, fallback:false}
-          : findGridPath3D(
-            panelStandoff.point,
-            highPanelPoint,
-            obstacles,
-            {
-              ...routeOptions,
-              preferredRoutingY:routingY
-            },
-            new Set()
-          );
-
-        if (!panelDrop.points || !panelDrop.points.length) {
-          warnings.push(
-            entry.equipment.name + ' → ' + group.panel.name +
-            ': no collision-free final drop to the panel was found.'
-          );
-          return;
-        }
-
-        const branchPoints = [];
-        highRoute.points.forEach(function(point){ branchPoints.push(clonePoint(point)); });
-        for (let i = panelDrop.points.length - 2; i >= 0; i--) {
-          const point = clonePoint(panelDrop.points[i]);
-          const previous = branchPoints[branchPoints.length - 1];
-          if (
-            previous &&
-            Math.abs(point.x - previous.x) < 0.001 &&
-            Math.abs(point.y - previous.y) < 0.001 &&
-            Math.abs(point.z - previous.z) < 0.001
-          ) continue;
-          branchPoints.push(point);
-        }
-
-        const points = [];
-        appendDistinctPoints(points, [entry.equipment.anchor.point]);
-        appendDistinctPoints(points, [entry.start]);
-        appendDistinctPoints(points, branchPoints, 0);
-        for (let i = panelDrop.points.length - 2; i >= 0; i--) {
-          appendDistinctPoints(points, [panelDrop.points[i]]);
-        }
-        appendDistinctPoints(points, [group.panel.anchor.point]);
-
-        cablePlans.push({
-          equipment:entry.equipment,
-          panel:group.panel,
-          cable:{
-            name:entry.equipment.cable_name || 'Power Cable',
-            diameter_mm:Number(entry.equipment.cable_diameter_mm) || 0
-          },
-          routing_start:entry.start,
-          routing_goal:panelStandoff.point,
-          main_corridor_equipment_id:null,
-          main_corridor_routing_y_mm:Number(routingY),
-          standoff_distance_mm:Math.max(entry.startDistanceMm, panelStandoff.distance_mm),
-          planning_tray_width_mm:planningTrayWidth,
-          engineering_network_id:group.network_id || String(group.panel.id),
-          branch_points:branchPoints,
-          points,
-          warning:highRoute.warning || panelDrop.warning || null,
-          fallback:!!highRoute.fallback || !!panelDrop.fallback
-        });
-      });
-      return;
-    }
-
     const networkResult = buildPanelMultiTerminalNetwork(
       group,
       prepared,
@@ -3656,11 +3705,61 @@ export function routeEngineeringNetwork(inputs) {
     );
 
     if (!networkResult) {
-      warnings.push(
-        group.panel.name + ': no collision-free multi-terminal tray network could be built inside the configured body-distance corridor.'
-      );
+      let directFallbackCount = 0;
+
+      prepared.forEach(function(entry) {
+        const fallbackPlan = buildDirectFallbackCablePlan(
+          entry,
+          group,
+          panelStandoff,
+          obstacles,
+          routeOptions,
+          planningTrayWidth
+        );
+
+        if (fallbackPlan) {
+          cablePlans.push(fallbackPlan);
+          directFallbackCount++;
+          return;
+        }
+
+        warnings.push(
+          entry.equipment.name + ' → ' + group.panel.name +
+          ': no collision-free route was found inside the configured body-distance corridor.'
+        );
+      });
+
+      if (!directFallbackCount) {
+        warnings.push(
+          group.panel.name + ': no collision-free multi-terminal tray network or direct branch fallback could be built inside the configured body-distance corridor.'
+        );
+      }
       return;
     }
+
+    const networkConnectedIds = new Set(
+      networkResult.cablePlans.map(function(plan){ return plan.equipment.id; })
+    );
+
+    (networkResult.unresolved || []).forEach(function(entry) {
+      const fallbackPlan = buildDirectFallbackCablePlan(
+        entry,
+        group,
+        panelStandoff,
+        obstacles,
+        routeOptions,
+        planningTrayWidth
+      );
+
+      if (fallbackPlan) {
+        networkResult.cablePlans.push(fallbackPlan);
+        networkConnectedIds.add(entry.equipment.id);
+      }
+    });
+
+    networkResult.unresolved = prepared.filter(function(entry){
+      return !networkConnectedIds.has(entry.equipment.id);
+    });
 
     networkResult.cablePlans.forEach(function(plan) {
       cablePlans.push(plan);
@@ -3670,7 +3769,7 @@ export function routeEngineeringNetwork(inputs) {
       networkResult.unresolved.forEach(function(entry) {
         warnings.push(
           entry.equipment.name + ' → ' + group.panel.name +
-          ': no collision-free branch to the shared tray network was found.'
+          ': no collision-free branch to the shared tray network or direct fallback route was found.'
         );
       });
     }
