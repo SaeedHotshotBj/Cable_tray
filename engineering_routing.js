@@ -212,28 +212,79 @@ function segmentClear3D(a, b, obstacles, clearanceMm) {
   return true;
 }
 
+function segmentSegmentDistance3D(p1,q1,p2,q2) {
+  const d1={x:q1.x-p1.x,y:q1.y-p1.y,z:q1.z-p1.z};
+  const d2={x:q2.x-p2.x,y:q2.y-p2.y,z:q2.z-p2.z};
+  const r={x:p1.x-p2.x,y:p1.y-p2.y,z:p1.z-p2.z};
+  const dot=(a,b)=>a.x*b.x+a.y*b.y+a.z*b.z;
+  const a=dot(d1,d1),e=dot(d2,d2),f=dot(d2,r);
+  let s=0,t=0;
+  if(a<=1e-9&&e<=1e-9){
+    return Math.sqrt(dot(r,r));
+  }
+  if(a<=1e-9){
+    s=0;t=Math.max(0,Math.min(1,f/e));
+  }else{
+    const c=dot(d1,r);
+    if(e<=1e-9){
+      t=0;s=Math.max(0,Math.min(1,-c/a));
+    }else{
+      const b=dot(d1,d2),denom=a*e-b*b;
+      s=denom>1e-9?Math.max(0,Math.min(1,(b*f-c*e)/denom)):0;
+      t=(b*s+f)/e;
+      if(t<0){t=0;s=Math.max(0,Math.min(1,-c/a));}
+      else if(t>1){t=1;s=Math.max(0,Math.min(1,(b-c)/a));}
+    }
+  }
+  const c1={x:p1.x+d1.x*s,y:p1.y+d1.y*s,z:p1.z+d1.z*s};
+  const c2={x:p2.x+d2.x*t,y:p2.y+d2.y*t,z:p2.z+d2.z*t};
+  return Math.sqrt(
+    Math.pow(c1.x-c2.x,2)+
+    Math.pow(c1.y-c2.y,2)+
+    Math.pow(c1.z-c2.z,2)
+  );
+}
+
+function clearsExistingMainTrays(a,b,options) {
+  const corridors=Array.isArray(options&&options.occupiedMainCorridors)?options.occupiedMainCorridors:[];
+  if(!corridors.length)return true;
+  const trayWidth=Math.max(1,Number(options.routingTrayWidthMm)||Number(options.trayHeightMm)||100);
+  const clearance=Math.max(0,Number(options.clearanceMm)||0);
+  for(let i=0;i<corridors.length;i++){
+    const corridor=corridors[i];
+    const points=Array.isArray(corridor.points)?corridor.points:[];
+    if(points.length<2)continue;
+    const oldWidth=Math.max(1,Number(corridor.width_mm)||Number(corridor.height_mm)||100);
+    const separation=(trayWidth+oldWidth)/2+clearance;
+    for(let j=1;j<points.length;j++){
+      if(segmentSegmentDistance3D(a,b,points[j-1],points[j])<separation-0.001)return false;
+    }
+  }
+  return true;
+}
+
 function segmentClearForRouting(a, b, obstacles, options) {
   if (!segmentWithinRoutingBounds(a, b, options)) return false;
   if (!segmentWithinBodyDistanceForRouting(a, b, options)) return false;
 
-  if (typeof options.segmentClear === 'function') {
-    return options.segmentClear(
-      a,
-      b,
-      {
-        trayWidthMm:Number(options.routingTrayWidthMm) || Number(options.trayHeightMm) || 100,
-        trayHeightMm:Number(options.trayHeightMm) || 100,
-        bodyClearanceMm:Number(options.clearanceMm) || 0
-      }
-    );
-  }
-
-  return segmentClear3D(
-    a,
-    b,
-    obstacles,
-    Number(options.centerlineClearanceMm) || Number(options.clearanceMm) || 0
-  );
+  const clear = typeof options.segmentClear === 'function'
+    ? options.segmentClear(
+        a,
+        b,
+        {
+          trayWidthMm:Number(options.routingTrayWidthMm) || Number(options.trayHeightMm) || 100,
+          trayHeightMm:Number(options.trayHeightMm) || 100,
+          bodyClearanceMm:Number(options.clearanceMm) || 0
+        }
+      )
+    : segmentClear3D(
+        a,
+        b,
+        obstacles,
+        Number(options.centerlineClearanceMm) || Number(options.clearanceMm) || 0
+      );
+  if(!clear)return false;
+  return clearsExistingMainTrays(a,b,options);
 }
 
 function pointWithinBodyDistanceForRouting(point, options) {
@@ -2661,9 +2712,10 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
   const secondaryCandidates=[];
   baseLevels.forEach(function(base){
     if(!secondaryCandidates.includes(base))secondaryCandidates.push(base);
-    const count=Math.min(10,Math.floor(Math.max(0,maxSec-minSec)/(step*2)));
+    const hasOccupiedMains=Array.isArray(options.occupiedMainCorridors)&&options.occupiedMainCorridors.length>0;
+    const count=Math.min(hasOccupiedMains?40:10,Math.floor(Math.max(0,maxSec-minSec)/(step*0.5)));
     for(let n=1;n<=count;n++)[base-n*step,base+n*step].forEach(function(v){
-      if(maxSec-minSec>=step*2&&(v<=minSec+step*0.5||v>=maxSec-step*0.5))return;
+      if(!hasOccupiedMains&&maxSec-minSec>=step*2&&(v<=minSec+step*0.5||v>=maxSec-step*0.5))return;
       if(!secondaryCandidates.includes(v))secondaryCandidates.push(v);
     });
   });
@@ -4189,6 +4241,13 @@ export function routeEngineeringNetwork(inputs) {
         : null,
       centerlineClearanceMm:options.clearanceMm + planningTrayWidth / 2,
       routingTrayWidthMm:planningTrayWidth,
+      occupiedMainCorridors:mainCorridors.map(function(corridor){return {
+        network_id:corridor.network_id,
+        points:(corridor.points||[]).map(clonePoint),
+        width_mm:Number(corridor.width_mm)||100,
+        height_mm:Number(corridor.height_mm)||100,
+        main_level_y_mm:Number(corridor.main_level_y_mm)
+      };}),
       preferredStandoffDistanceMm:Math.min(
         options.maxBodyDistanceMm + planningTrayWidth / 2,
         options.clearanceMm + planningTrayWidth / 2 + options.gridStepMm
