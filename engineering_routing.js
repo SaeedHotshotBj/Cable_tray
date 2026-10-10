@@ -2726,6 +2726,8 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
   const secondaryCandidates=[];
   const occupiedCorridors=Array.isArray(routeOptions.occupiedMainCorridors)?routeOptions.occupiedMainCorridors:[];
   const hasOccupiedMains=occupiedCorridors.length>0;
+  const meanLoadSecondary=secondaryValues.reduce(function(sum,value){return sum+value;},0)/secondaryValues.length;
+  const preferredCorridorSide=Math.sign(meanLoadSecondary-panelSecondary)||-1;
   const occupiedMainWidth=hasOccupiedMains
     ? Math.max.apply(null,occupiedCorridors.map(function(c){return Number(c.width_mm)||Number(c.height_mm)||100;}))
     : 0;
@@ -2803,6 +2805,13 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
     return Math.min.apply(Math,baseLevels.map(function(v){return Math.abs(a-v);}))-
       Math.min.apply(Math,baseLevels.map(function(v){return Math.abs(b-v);}))||a-b;
   });
+  if(hasOccupiedMains){
+    const sameSideCandidates=secondaryCandidates.filter(function(value){
+      return (Number(value)-panelSecondary)*preferredCorridorSide > 0.001;
+    });
+    secondaryCandidates.splice(0,secondaryCandidates.length);
+    sameSideCandidates.forEach(function(value){secondaryCandidates.push(value);});
+  }
 
   for(let si=0;si<secondaryCandidates.length;si++){
     const sec=secondaryCandidates[si];
@@ -2822,6 +2831,7 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
       // usable envelope for the actual Main tray width.
       const usableMainBounds=normalizeRoutingBounds(routeOptions.routingBounds,routeOptions);
       if(usableMainBounds&&usableMainBounds.valid===false)continue;
+      let panelLoopPivotPrimary=null;
       if(usableMainBounds){
         const primaryMin=primaryAxis==='x'?usableMainBounds.minX:usableMainBounds.minZ;
         const primaryMax=primaryAxis==='x'?usableMainBounds.maxX:usableMainBounds.maxZ;
@@ -2829,6 +2839,34 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
         physicalEndPrimary=Math.min(physicalEndPrimary,primaryMax);
       }
       if(physicalEndPrimary-physicalStartPrimary<Math.max(1,step*0.5))continue;
+
+      if(hasOccupiedMains){
+        const occupiedPrimary=[];
+        occupiedCorridors.forEach(function(corridor){
+          const points=Array.isArray(corridor.points)?corridor.points:[];
+          points.forEach(function(point){
+            const value=Number(point[primaryAxis]);
+            if(Number.isFinite(value))occupiedPrimary.push(value);
+          });
+        });
+        const overallMin=Math.min.apply(Math,[physicalStartPrimary].concat(occupiedPrimary));
+        const overallMax=Math.max.apply(Math,[physicalEndPrimary].concat(occupiedPrimary));
+        const laneLow=(usableMainBounds?(primaryAxis==='x'?usableMainBounds.minX:usableMainBounds.minZ):-Infinity);
+        const laneHigh=(usableMainBounds?(primaryAxis==='x'?usableMainBounds.maxX:usableMainBounds.maxZ):Infinity);
+        const highPivot=overallMax+laneSpacing;
+        const lowPivot=overallMin-laneSpacing;
+        const highFits=highPivot<=laneHigh+0.001;
+        const lowFits=lowPivot>=laneLow-0.001;
+        if(!highFits&&!lowFits)continue;
+        const chooseHigh=highFits&&(!lowFits||(highPivot-physicalEndPrimary)<= (physicalStartPrimary-lowPivot));
+        if(chooseHigh){
+          physicalEndPrimary=Math.max(physicalEndPrimary,highPivot);
+          panelLoopPivotPrimary=highPivot;
+        }else{
+          physicalStartPrimary=Math.min(physicalStartPrimary,lowPivot);
+          panelLoopPivotPrimary=lowPivot;
+        }
+      }
       const physicalSpan=Math.max(0.001,physicalEndPrimary-physicalStartPrimary);
       const requestedCrossShift=(panelSecondary-sec)*0.215;
       const maxCrossShift=Math.tan(2.57*Math.PI/180)*physicalSpan;
@@ -2857,7 +2895,22 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
       const panelSpine=mainPoint(panelPrimary,sec);
       if(!directionalClear(panelStandoff.point,panelPoint,routeOptions))continue;
       let panelConnectorResult={points:dedupe([panelSpine,panelPoint]),warning:null,fallback:false};
-      if(!clearPath(panelConnectorResult.points,routeOptions)){
+      let panelPhysicalConnectionPath=null;
+      if(hasOccupiedMains&&panelLoopPivotPrimary!=null){
+        const outerMainPoint=mainPoint(panelLoopPivotPrimary,sec);
+        const panelSidePoint=clonePoint(outerMainPoint);
+        panelSidePoint[secondaryAxis]=Number(panelPoint[secondaryAxis]);
+        const loopPath=dedupe([panelSpine,outerMainPoint,panelSidePoint,panelPoint]);
+        if(clearPath(loopPath,routeOptions)){
+          panelConnectorResult={points:loopPath,warning:null,fallback:false};
+          // The first leg is physically the Main spine itself. Do not create a
+          // second tray on top of it; draw only the return branch from the
+          // outer Main endpoint around to the panel.
+          panelPhysicalConnectionPath=dedupe([outerMainPoint,panelSidePoint,panelPoint]);
+        }else{
+          continue;
+        }
+      }else if(!clearPath(panelConnectorResult.points,routeOptions)){
         const directionCandidates=[-1,1,-2,2];
         let detour=null;
         for(let di=0;di<directionCandidates.length;di++){
@@ -2973,13 +3026,14 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
         plan.parallel_main_corridor=true;plan.main_corridor_axis=primaryAxis;plan.main_corridor_secondary_coordinate_mm=sec;plans.push(plan);
       }
       if(!valid||plans.length!==prepared.length)continue;
-      const panelConnectionLength=polylineLengthMm(panelConnectorPath);
+      const visiblePanelPath=panelPhysicalConnectionPath||panelConnectorPath;
+      const panelConnectionLength=polylineLengthMm(visiblePanelPath);
       const panelGap=Math.min(
         Math.max(100,Math.min(220,step*1.5)),
         Math.max(0,panelConnectionLength-50)
       );
       const panelConnectionPoints=panelConnectionLength>0.001
-        ? shortenPolylineEnd(panelConnectorPath.slice().reverse(),panelGap)
+        ? shortenPolylineEnd(visiblePanelPath.slice().reverse(),panelGap)
         : [clonePoint(panelPoint)];
       const length=plans.reduce(function(s,p){return s+routeLengthMeters(p.points);},0);
       const turns=plans.reduce(function(s,p){return s+countPolylineTurns(p.points);},0);
@@ -4422,27 +4476,39 @@ export function routeEngineeringNetwork(inputs) {
         const sorted = sortEquipmentByLayout(items);
         let current = [];
         let currentDiameter = 0;
-        sorted.forEach(function(item){
-          const diameter = Math.max(0, Number(item.cable_diameter_mm) || 0);
-          if (current.length && currentDiameter + diameter > maxCableDiameterSum + 0.001) {
-            batches.push({
-              equipment:current,
-              panel:panel,
-              panels:panel ? new Map([[panel.id,panel]]) : group.panels
-            });
-            current = [];
-            currentDiameter = 0;
-          }
-          current.push(item);
-          currentDiameter += diameter;
-        });
-        if (current.length) {
+        let currentRowSecondary = null;
+        const rowTolerance = Math.max(150, (Number(options.gridStepMm) || 100) * 1.5);
+        function flushCurrent() {
+          if (!current.length) return;
           batches.push({
             equipment:current,
             panel:panel,
             panels:panel ? new Map([[panel.id,panel]]) : group.panels
           });
+          current = [];
+          currentDiameter = 0;
+          currentRowSecondary = null;
         }
+        sorted.forEach(function(item){
+          const diameter = Math.max(0, Number(item.cable_diameter_mm) || 0);
+          const secondary = Number(item.anchor && item.anchor.point
+            ? item.anchor.point[secondaryAxis]
+            : 0);
+          // A tray's width capacity may split a row into several parallel
+          // lanes, but a single Main must never mix separate physical rows.
+          if (current.length && Number.isFinite(secondary) &&
+              Number.isFinite(currentRowSecondary) &&
+              Math.abs(secondary-currentRowSecondary) > rowTolerance) {
+            flushCurrent();
+          }
+          if (current.length && currentDiameter + diameter > maxCableDiameterSum + 0.001) {
+            flushCurrent();
+          }
+          if (!current.length) currentRowSecondary = secondary;
+          current.push(item);
+          currentDiameter += diameter;
+        });
+        flushCurrent();
       }
 
       // Do not mix equipment for different panels into the same capacity
