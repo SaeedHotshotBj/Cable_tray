@@ -1320,12 +1320,11 @@ function buildTrayRuns(cablePlans, options, mainCorridors) {
     const sourceTrayPoints = Array.isArray(plan.tray_points)
       ? plan.tray_points
       : (Array.isArray(plan.points) ? plan.points : []);
+    const trayStopDistance = Number.isFinite(Number(plan.tray_stop_before_equipment_mm))
+      ? Math.max(0, Number(plan.tray_stop_before_equipment_mm))
+      : Math.max(0, Number(options.trayStopBeforeEquipmentMm) || 1000);
     const trayPoints = sourceTrayPoints.length
-      ? trimBranchTrayStart(
-          plan,
-          sourceTrayPoints,
-          Math.max(0, Number(options.trayStopBeforeEquipmentMm) || 1000)
-        )
+      ? trimBranchTrayStart(plan, sourceTrayPoints, trayStopDistance)
       : [];
     const points = Array.isArray(trayPoints) && trayPoints.length >= 2
       ? trayPoints
@@ -2644,6 +2643,7 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
         const branchGap=Math.max(100,Math.min(220,220-120*branchPosition));
         const physicalBranch=shortenPathEnd(branch,branchGap);
         plan.tray_points=physicalBranch.length>=2?physicalBranch:branch.map(clonePoint);
+        plan.tray_stop_before_equipment_mm=0;
         plan.parallel_main_corridor=true;plan.main_corridor_axis=primaryAxis;plan.main_corridor_secondary_coordinate_mm=sec;plans.push(plan);
         branchGaps.push({equipment_id:entry.equipment.id,gap_mm:branchGap});
       }
