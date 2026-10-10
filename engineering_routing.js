@@ -4491,15 +4491,16 @@ export function routeEngineeringNetwork(inputs) {
     }, 0);
 
     const batches = [];
+    const primaryAxis = options.structurePrimaryAxis === 'z' ? 'z' : 'x';
+    const secondaryAxis = primaryAxis === 'x' ? 'z' : 'x';
     if (totalDiameter <= maxCableDiameterSum + 0.001 || sourceEquipment.length <= 1) {
       batches.push({
         equipment:sourceEquipment,
         panel:group.panel,
-        panels:group.panels
+        panels:group.panels,
+        row_secondary_mm:null
       });
     } else {
-      const primaryAxis = options.structurePrimaryAxis === 'z' ? 'z' : 'x';
-      const secondaryAxis = primaryAxis === 'x' ? 'z' : 'x';
       function sortEquipmentByLayout(items) {
         // Capacity batches should contain equipment from the same physical row
         // before moving to the next row. Sorting by the primary axis first
@@ -4525,7 +4526,8 @@ export function routeEngineeringNetwork(inputs) {
           batches.push({
             equipment:current,
             panel:panel,
-            panels:panel ? new Map([[panel.id,panel]]) : group.panels
+            panels:panel ? new Map([[panel.id,panel]]) : group.panels,
+            row_secondary_mm:currentRowSecondary
           });
           current = [];
           currentDiameter = 0;
@@ -4569,6 +4571,43 @@ export function routeEngineeringNetwork(inputs) {
       });
     }
 
+    const rowToleranceForBatching = Math.max(150, (Number(options.gridStepMm) || 100) * 1.5);
+    const rowClusters = [];
+    batches.forEach(function(batchRecord, originalBatchIndex){
+      const panelId = String((batchRecord.panel || group.panel).id);
+      const rowValues = (batchRecord.equipment || []).map(function(item){
+        return Number(item.anchor && item.anchor.point ? item.anchor.point[secondaryAxis] : NaN);
+      }).filter(Number.isFinite);
+      const rowCoordinate = Number.isFinite(Number(batchRecord.row_secondary_mm))
+        ? Number(batchRecord.row_secondary_mm)
+        : (rowValues.length ? rowValues.reduce(function(a,b){return a+b;},0)/rowValues.length : NaN);
+      let cluster = rowClusters.find(function(candidate){
+        return candidate.panel_id === panelId && Number.isFinite(rowCoordinate) &&
+          Math.abs(candidate.mean_secondary-rowCoordinate) <= rowToleranceForBatching;
+      });
+      if(!cluster){
+        cluster={panel_id:panelId,mean_secondary:rowCoordinate,indices:[]};
+        rowClusters.push(cluster);
+      }else if(Number.isFinite(rowCoordinate)){
+        cluster.mean_secondary=(cluster.mean_secondary*cluster.indices.length+rowCoordinate)/(cluster.indices.length+1);
+      }
+      cluster.indices.push(originalBatchIndex);
+    });
+    rowClusters.forEach(function(cluster){
+      cluster.indices.sort(function(a,b){
+        function rowPrimaryMin(index){
+          return Math.min.apply(Math,batches[index].equipment.map(function(item){
+            return Number(item.anchor && item.anchor.point ? item.anchor.point[primaryAxis] : 0);
+          }));
+        }
+        return rowPrimaryMin(a)-rowPrimaryMin(b);
+      });
+      cluster.indices.forEach(function(index,rowIndex){
+        batches[index].source_row_batch_index=rowIndex;
+        batches[index].source_row_batch_count=cluster.indices.length;
+      });
+    });
+
     batches.forEach(function(batchRecord, batchIndex){
       const batchPanel = batchRecord.panel || group.panel;
       routingGroups.push({
@@ -4582,7 +4621,9 @@ export function routeEngineeringNetwork(inputs) {
         floor_min_y_mm:group.floor_min_y_mm,
         floor_max_y_mm:group.floor_max_y_mm,
         network_id:String(group.floor_id || batchPanel.id) + '::network-' + String(routingGroups.length + 1),
-        source_batch_index:batchIndex
+        source_batch_index:batchIndex,
+        source_row_batch_index:Number(batchRecord.source_row_batch_index)||0,
+        source_row_batch_count:Math.max(1,Number(batchRecord.source_row_batch_count)||1)
       });
     });
   });
