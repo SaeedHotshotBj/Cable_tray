@@ -28,6 +28,8 @@ const state = {
     gridStepMm: 100,
     clearanceMm: 100,
     maxBodyDistanceMm: 1500,
+    ceilingSafetyGapMm: 50,
+    floorLevelToleranceMm: 1500,
     namesVisible: true,
     mainMinCables: 2,
     traySideMarginMm: 25,
@@ -1073,7 +1075,25 @@ function collectRoutingObstacles(clearanceMm) {
 }
 
 function removeEngineeringGeneratedRoutes() {
-  state.objects = state.objects.filter(function(o){ return !o.engineering_generated; });
+  state.objects = state.objects.filter(function(obj){
+    if (!obj || (obj.kind !== 'cable' && obj.kind !== 'tray')) return true;
+
+    const generatedTraySpecification = obj.kind === 'tray' &&
+      /\bTRAY\s*-\s*(MAIN|BRANCH)\b/i.test(String(obj.specification || ''));
+
+    const hasEngineeringMetadata =
+      obj.engineering_generated === true ||
+      !!obj.engineering_equipment_id ||
+      !!obj.engineering_panel_id ||
+      !!obj.engineering_network_id ||
+      !!obj.engineering_classification ||
+      (Array.isArray(obj.engineering_cable_ids) && obj.engineering_cable_ids.length > 0) ||
+      (Array.isArray(obj.engineering_shared_segment_keys) && obj.engineering_shared_segment_keys.length > 0);
+
+    // Older generated routes are identifiable by their engineering metadata
+    // even if a previous project version did not persist the boolean marker.
+    return !(hasEngineeringMetadata || generatedTraySpecification);
+  });
 }
 
 function getEngineeringModelMaxY() {
@@ -1216,6 +1236,10 @@ async function runEngineeringAutoDesign() {
   }
 
   syncEngineeringAnchors();
+  state.equipment.forEach(function(item){
+    const diameter = Number(item.cable_diameter_mm);
+    if (!Number.isFinite(diameter) || diameter <= 0) item.cable_diameter_mm = 16;
+  });
   const missing = state.equipment.filter(function(item){ return !item.destination_panel_id || !state.panels.some(function(panel){ return panel.id === item.destination_panel_id; }); });
   if (missing.length) {
     toast(missing[0].name + ' has no valid destination panel');
@@ -1232,7 +1256,12 @@ async function runEngineeringAutoDesign() {
       ? Number($('autoTrayMaxDistance').value)
       : 1500,
     ceilingY:routingBounds ? routingBounds.maxY : getEngineeringModelMaxY(),
-    ceilingSafetyGapMm:50,
+    ceilingSafetyGapMm:Math.max(
+      0,
+      Number.isFinite(Number($('autoTrayCeilingGap').value))
+        ? Number($('autoTrayCeilingGap').value)
+        : Number(state.engineeringSettings.ceilingSafetyGapMm) || 50
+    ),
     routingBounds:routingBounds,
     fillLimitPercent:Number($('fillLimit').value) || 80,
     mainMinCables:Number($('mainTrayMinCables').value) || 2,
@@ -1252,7 +1281,7 @@ async function runEngineeringAutoDesign() {
     traySideMarginMm:25,
     standardTrayWidthsMm:parseNumberList($('autoTrayStandards').value),
     floorZones:state.engineeringFloors.map(function(floor){ return JSON.parse(JSON.stringify(floor)); }),
-    floorLevelToleranceMm:500,
+    floorLevelToleranceMm:Math.max(500, Number(state.engineeringSettings.floorLevelToleranceMm) || 1500),
     verticalPenaltyRatio:0.02,
     verticalRangePenaltyRatio:0.25,
     reuseBonus:0.45,
@@ -1411,7 +1440,7 @@ async function runEngineeringAutoDesign() {
     createRoute('cable', plan.points, {
       pointsAreMm:true,
       name:item.name + ' - ' + (item.cable_name || plan.cable.name),
-      diameter_mm:Number(item.cable_diameter_mm) || plan.cable.diameter_mm,
+      diameter_mm:Number(plan.cable.diameter_mm),
       specification:item.cable_name || plan.cable.name,
       material:'Copper/PVC',
       engineering_generated:true,
@@ -1477,6 +1506,8 @@ async function runEngineeringAutoDesign() {
     gridStepMm:settings.gridStepMm,
     clearanceMm:settings.clearanceMm,
     maxBodyDistanceMm:settings.maxBodyDistanceMm,
+    ceilingSafetyGapMm:settings.ceilingSafetyGapMm,
+    floorLevelToleranceMm:settings.floorLevelToleranceMm,
     namesVisible:state.engineeringSettings.namesVisible !== false,
     mainMinCables:settings.mainMinCables,
     traySideMarginMm:settings.traySideMarginMm,
@@ -1639,7 +1670,7 @@ $('measureType').addEventListener('change', function(){
 });
 $('projectName').addEventListener('input', function(e){ state.project.name = e.target.value; });
 $('unitSystem').addEventListener('change', function(e){ state.project.units = e.target.value; });
-['routingGridStep','autoTrayClearance','autoTrayMaxDistance','mainTrayMinCables','autoTrayStandards'].forEach(function(idValue){
+['routingGridStep','autoTrayClearance','autoTrayMaxDistance','autoTrayCeilingGap','mainTrayMinCables','autoTrayStandards'].forEach(function(idValue){
   const field = $(idValue);
   if (!field) return;
   field.addEventListener('change', function(){
@@ -1648,6 +1679,8 @@ $('unitSystem').addEventListener('change', function(e){ state.project.units = e.
       gridStepMm:Number($('routingGridStep').value) || 100,
       clearanceMm:Number.isFinite(Number($('autoTrayClearance').value)) ? Number($('autoTrayClearance').value) : 100,
       maxBodyDistanceMm:Number.isFinite(Number($('autoTrayMaxDistance').value)) ? Number($('autoTrayMaxDistance').value) : 1500,
+      ceilingSafetyGapMm:Number.isFinite(Number($('autoTrayCeilingGap').value)) ? Math.max(0, Number($('autoTrayCeilingGap').value)) : 50,
+      floorLevelToleranceMm:1500,
       mainMinCables:Number($('mainTrayMinCables').value) || 2,
       standardTrayWidthsMm:parseNumberList($('autoTrayStandards').value)
     };
@@ -4292,21 +4325,31 @@ function renderProperties() {
     bindEngineeringField('e_current','current_a',true);
     bindEngineeringField('e_voltage','voltage_v',true);
     bindEngineeringField('e_cable_name','cable_name',false);
-    bindEngineeringField('e_cable_diameter','cable_diameter_mm',true);
     $('e_cable_diameter').addEventListener('change', function(e){
-      const diameter = Math.max(0.1, Number(e.target.value) || 0.1);
+      const diameter = Number(e.target.value);
+      if (!Number.isFinite(diameter) || diameter <= 0) {
+        e.target.value = String(Number(equipment.cable_diameter_mm) || 16);
+        toast('Cable diameter must be greater than 0 mm');
+        return;
+      }
+
       equipment.cable_diameter_mm = diameter;
+      equipment.routing_result = null;
+
       state.objects.forEach(function(route){
         if (
           route.kind === 'cable' &&
-          route.engineering_generated === true &&
-          route.engineering_equipment_id === equipment.id
+          route.engineering_equipment_id === equipment.id &&
+          (route.engineering_generated === true || !!route.engineering_network_id)
         ) {
           route.diameter_mm = diameter;
+          route.specification = equipment.cable_name || route.specification;
         }
       });
+
       rebuildRoutes();
       renderEngineeringTakeoff();
+      renderScene();
     });
     $('e_panel').addEventListener('change', function(e){
       equipment.destination_panel_id = e.target.value;
@@ -5119,6 +5162,7 @@ function syncEngineeringSettingsInputs() {
   if ($('routingGridStep')) $('routingGridStep').value = Number(settings.gridStepMm) || 100;
   if ($('autoTrayClearance')) $('autoTrayClearance').value = Number(settings.clearanceMm) || 100;
   if ($('autoTrayMaxDistance')) $('autoTrayMaxDistance').value = Number(settings.maxBodyDistanceMm) || 1500;
+  if ($('autoTrayCeilingGap')) $('autoTrayCeilingGap').value = Number.isFinite(Number(settings.ceilingSafetyGapMm)) ? Number(settings.ceilingSafetyGapMm) : 50;
   if ($('mainTrayMinCables')) $('mainTrayMinCables').value = Number(settings.mainMinCables) || 2;
   if ($('autoTrayStandards')) $('autoTrayStandards').value = (settings.standardTrayWidthsMm || []).join(',');
 }
