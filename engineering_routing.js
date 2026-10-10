@@ -2757,7 +2757,7 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
       let start=Math.min(rawMin,Math.round(rawMin/step)*step),end=Math.max(rawMax,Math.round(rawMax/step)*step);
       if(atHigh)end=Math.max(end,Math.round(panelPrimary/step)*step+tail);
       else if(atLow)start=Math.min(start,Math.round(panelPrimary/step)*step-tail);
-      const physicalInset=Math.min(Math.max(150,step*1.5),Math.max(0,(end-start)*0.2));
+      const physicalInset=Math.min(Math.max(50,step*0.5),Math.max(0,(end-start)*0.2));
       let physicalStartPrimary=atHigh?start+physicalInset:start;
       let physicalEndPrimary=atLow?end-physicalInset:end;
 
