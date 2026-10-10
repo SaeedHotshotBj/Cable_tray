@@ -2760,8 +2760,23 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
       if(atHigh)end=Math.max(end,Math.round(panelPrimary/step)*step+tail);
       else if(atLow)start=Math.min(start,Math.round(panelPrimary/step)*step-tail);
       const physicalInset=Math.min(Math.max(150,step*1.5),Math.max(0,(end-start)*0.2));
-      const physicalStartPrimary=atHigh?start+physicalInset:start;
-      const physicalEndPrimary=atLow?end-physicalInset:end;
+      let physicalStartPrimary=atHigh?start+physicalInset:start;
+      let physicalEndPrimary=atLow?end-physicalInset:end;
+
+      // Validate and build only the physical Main span. Cable-tree nodes may
+      // extend to a load near the model boundary, but that logical extension
+      // is not a tray segment and must not make an otherwise valid Main fail
+      // the collision/bounds test. Keep the physical centerline inside the
+      // usable envelope for the actual Main tray width.
+      const usableMainBounds=normalizeRoutingBounds(routeOptions.routingBounds,routeOptions);
+      if(usableMainBounds&&usableMainBounds.valid===false)continue;
+      if(usableMainBounds){
+        const primaryMin=primaryAxis==='x'?usableMainBounds.minX:usableMainBounds.minZ;
+        const primaryMax=primaryAxis==='x'?usableMainBounds.maxX:usableMainBounds.maxZ;
+        physicalStartPrimary=Math.max(physicalStartPrimary,primaryMin);
+        physicalEndPrimary=Math.min(physicalEndPrimary,primaryMax);
+      }
+      if(physicalEndPrimary-physicalStartPrimary<Math.max(1,step*0.5))continue;
       const physicalSpan=Math.max(0.001,physicalEndPrimary-physicalStartPrimary);
       const requestedCrossShift=(panelSecondary-sec)*0.215;
       const maxCrossShift=Math.tan(2.57*Math.PI/180)*physicalSpan;
@@ -2776,9 +2791,14 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
         activeMainPrimaryCenter=(physicalStartPrimary+physicalEndPrimary)/2;
         activeMainSlope=crossShift/physicalSpan;
       }
-      const coordsSet=new Set([start,end,panelPrimary]);terminal.forEach(function(v){coordsSet.add(v);});
-      for(let v=Math.ceil(start/step)*step;v<end-0.001;v+=step)coordsSet.add(v);
-      const coords=Array.from(coordsSet).filter(Number.isFinite).filter(function(v){return v>=start-0.001&&v<=end+0.001;}).sort(function(a,b){return a-b;});
+      const coordsSet=new Set([physicalStartPrimary,physicalEndPrimary]);
+      terminal.forEach(function(v){
+        if(v>=physicalStartPrimary-0.001&&v<=physicalEndPrimary+0.001)coordsSet.add(v);
+      });
+      for(let v=Math.ceil(physicalStartPrimary/step)*step;v<physicalEndPrimary-0.001;v+=step)coordsSet.add(v);
+      const coords=Array.from(coordsSet).filter(Number.isFinite).filter(function(v){
+        return v>=physicalStartPrimary-0.001&&v<=physicalEndPrimary+0.001;
+      }).sort(function(a,b){return a-b;});
       if(coords.length<2)continue;
       const spine=coords.map(function(v){return mainPoint(v,sec);});
       if(!clearPath(spine,routeOptions))continue;
@@ -2855,7 +2875,9 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
       for(let i=0;i<prepared.length;i++){
         const entry=prepared[i],branchOptions=entry.branchRouteOptions||routeOptions;
         const plane=clonePoint(entry.start);plane.y=routingY;
-        let attach=mainPoint(Number(entry.start[primaryAxis]),sec);
+        const rawAttachPrimary=Number(entry.start[primaryAxis]);
+        const attachPrimary=Math.max(physicalStartPrimary,Math.min(physicalEndPrimary,rawAttachPrimary));
+        let attach=mainPoint(attachPrimary,sec);
         let branch=dedupe([entry.start,plane,attach]);
         if(!clearPath(branch,branchOptions)){
           const horizontalOptions={
