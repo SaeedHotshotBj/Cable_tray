@@ -2719,9 +2719,10 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
     if(Number.isFinite(value)&&!baseLevels.some(function(existing){return Math.abs(existing-value)<0.001;}))baseLevels.push(value);
   });
   const secondaryCandidates=[];
-  const hasOccupiedMains=Array.isArray(options.occupiedMainCorridors)&&options.occupiedMainCorridors.length>0;
+  const occupiedCorridors=Array.isArray(routeOptions.occupiedMainCorridors)?routeOptions.occupiedMainCorridors:[];
+  const hasOccupiedMains=occupiedCorridors.length>0;
   const occupiedMainWidth=hasOccupiedMains
-    ? Math.max.apply(null,options.occupiedMainCorridors.map(function(c){return Number(c.width_mm)||Number(c.height_mm)||100;}))
+    ? Math.max.apply(null,occupiedCorridors.map(function(c){return Number(c.width_mm)||Number(c.height_mm)||100;}))
     : 0;
   const laneSpacing=hasOccupiedMains
     ? Math.max(step,Math.ceil((((Number(routeOptions.routingTrayWidthMm)||100)+occupiedMainWidth)/2+Math.max(0,Number(options.clearanceMm)||0))/step)*step)
@@ -2746,7 +2747,7 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
     const currentPrimaryMin=Math.min.apply(Math,terminal);
     const currentPrimaryMax=Math.max.apply(Math,terminal);
     const sameSideLanes=[];
-    (options.occupiedMainCorridors||[]).forEach(function(corridor){
+    occupiedCorridors.forEach(function(corridor){
       if(String(corridor.floor_id == null ? '' : corridor.floor_id)!==String(group.floor_id == null ? '' : group.floor_id))return;
       const points=Array.isArray(corridor.points)?corridor.points:[];
       if(points.length<2)return;
@@ -2855,7 +2856,7 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
           const primaryOffset=directionCandidates[di]*Math.max(
             step,
             Math.ceil((((Number(routeOptions.routingTrayWidthMm)||100)+
-              (Number(options.occupiedMainCorridors&&options.occupiedMainCorridors[0]&&options.occupiedMainCorridors[0].width_mm)||100))/2+
+              (Number(occupiedCorridors[0]&&occupiedCorridors[0].width_mm)||100))/2+
               Math.max(0,Number(options.clearanceMm)||0))/step)*step
           );
           const pivotA=clonePoint(panelSpine);
