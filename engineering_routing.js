@@ -2547,6 +2547,17 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
     }
     return dedupe(out);
   }
+  function extendPathEnd(points,distanceMm){
+    const out=dedupe(points||[]);
+    const distance=Math.max(0,Number(distanceMm)||0);
+    if(out.length<2||distance<0.001)return out;
+    const last=out[out.length-1],previous=out[out.length-2];
+    const dx=last.x-previous.x,dy=last.y-previous.y,dz=last.z-previous.z;
+    const length=Math.sqrt(dx*dx+dy*dy+dz*dz);
+    if(length<0.001)return out;
+    out.push({x:last.x+dx/length*distance,y:last.y+dy/length*distance,z:last.z+dz/length*distance});
+    return dedupe(out);
+  }
 
   let activeMainSlope=0,activeMainPrimaryCenter=0,activeMainCrossOffset=0;
   const panelPoint=pointAtRoutingY(panelStandoff.point,routingY),panelPrimary=Number(panelStandoff.point[primaryAxis]);
@@ -2593,9 +2604,11 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
         ? pairSlopes[(pairSlopes.length-1)/2]
         : (pairSlopes[pairSlopes.length/2-1]+pairSlopes[pairSlopes.length/2])/2
       : 0;
-    activeMainSlope=Math.max(-0.08,Math.min(0.08,activeMainSlope));
+    // The visible Main spine sits between the equipment row and the panel row.
+    // The reference geometry uses a slightly stronger slope than the anchor row.
+    activeMainSlope=Math.max(-0.08,Math.min(0.08,activeMainSlope*2));
     activeMainPrimaryCenter=(Math.min.apply(null,terminal)+Math.max.apply(null,terminal))/2;
-    activeMainCrossOffset=(panelSecondary>=sec?1:-1)*Math.min(step*0.5,50);
+    activeMainCrossOffset=(panelSecondary>=sec?1:-1)*Math.min(step*0.1,10);
     for(let ti=0;ti<tailOptions.length;ti++){
       const tail=tailOptions[ti];
       let start=Math.min(rawMin,Math.round(rawMin/step)*step),end=Math.max(rawMax,Math.round(rawMax/step)*step);
@@ -2637,15 +2650,33 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
           ...routeOptions,fixedRoutingY:routingY,panelStandoffDistanceMm:panelStandoff.distance_mm
         });
         if(!plan){valid=false;break;}
-        const branchPosition=loadMax-loadMin>0.001
-          ? Math.max(0,Math.min(1,(Number(entry.start[primaryAxis])-loadMin)/(loadMax-loadMin)))
+        const networkPrimaryMin=Math.min(loadMin,panelPrimary);
+        const networkPrimaryMax=Math.max(loadMax,panelPrimary);
+        const branchPosition=networkPrimaryMax-networkPrimaryMin>0.001
+          ? Math.max(0,Math.min(1,(Number(entry.start[primaryAxis])-networkPrimaryMin)/(networkPrimaryMax-networkPrimaryMin)))
           : 0.5;
         const branchGap=Math.max(100,Math.min(220,220-120*branchPosition));
-        const physicalBranch=shortenPathEnd(branch,branchGap);
+        const atOuterEquipmentEnd=atHigh
+          ? Number(entry.start[primaryAxis])<=loadMin+step*0.5
+          : (atLow
+            ? Number(entry.start[primaryAxis])>=loadMax-step*0.5
+            : Number(entry.start[primaryAxis])<=loadMin+step*0.5);
+        let physicalBranch;
+        if(atOuterEquipmentEnd){
+          const extension=Math.max(100,Math.min(220,step*1.5));
+          const extended=extendPathEnd(branch,extension);
+          const from=branch[branch.length-1],to=extended[extended.length-1];
+          physicalBranch=directionalClear(from,to,entry.branchRouteOptions||routeOptions)
+            ? extended
+            : shortenPathEnd(branch,branchGap);
+          branchGaps.push({equipment_id:entry.equipment.id,gap_mm:physicalBranch===extended?-extension:branchGap});
+        }else{
+          physicalBranch=shortenPathEnd(branch,branchGap);
+          branchGaps.push({equipment_id:entry.equipment.id,gap_mm:branchGap});
+        }
         plan.tray_points=physicalBranch.length>=2?physicalBranch:branch.map(clonePoint);
         plan.tray_stop_before_equipment_mm=0;
         plan.parallel_main_corridor=true;plan.main_corridor_axis=primaryAxis;plan.main_corridor_secondary_coordinate_mm=sec;plans.push(plan);
-        branchGaps.push({equipment_id:entry.equipment.id,gap_mm:branchGap});
       }
       if(!valid||plans.length!==prepared.length)continue;
       const physicalEndOffset=Math.max(500,step);
