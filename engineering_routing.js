@@ -1654,7 +1654,12 @@ function buildTrayRuns(cablePlans, options, mainCorridors) {
       Math.max(1, Number(options.gridStepMm) || 100) * 3,
       300
     );
+    const hasExplicitParallelSpine = (mainCorridors || []).some(function(corridor){
+      return corridor && corridor.parallel_main_corridor === true &&
+        String(corridor.network_id || '') === String(segment.network_id || '');
+    });
     const sharedHorizontalTrunkEligible =
+      !hasExplicitParallelSpine &&
       segment.cableIds.size >= mainMinCables &&
       segment.main_level_eligible &&
       corridorAxisEligible &&
@@ -2757,7 +2762,10 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
       const overlap=Math.min(currentPrimaryMax,Math.max.apply(Math,lanePrimary))-
         Math.max(currentPrimaryMin,Math.min.apply(Math,lanePrimary));
       if(overlap<Math.max(1,step*0.5))return;
-      const laneCoordinate=laneSecondary.reduce(function(sum,value){return sum+value;},0)/laneSecondary.length;
+      const reportedLaneCoordinate=Number(corridor.main_corridor_secondary_coordinate_mm);
+      const laneCoordinate=Number.isFinite(reportedLaneCoordinate)
+        ? reportedLaneCoordinate
+        : laneSecondary.reduce(function(sum,value){return sum+value;},0)/laneSecondary.length;
       if((laneCoordinate-panelSecondary)*side>0.001)sameSideLanes.push(laneCoordinate);
     });
     if(sameSideLanes.length){
@@ -2980,6 +2988,7 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
         main_spine_points:[mainPoint(physicalStartPrimary,sec),mainPoint(physicalEndPrimary,sec)],
         panel_connection_points:panelConnectionPoints,
         parallel_main_corridor:true,main_corridor_axis:primaryAxis,
+        main_corridor_secondary_coordinate_mm:sec,
         score:length+turns*step*0.001};
     }
   }
@@ -4500,7 +4509,8 @@ export function routeEngineeringNetwork(inputs) {
         points:(corridor.points||[]).map(clonePoint),
         width_mm:Number(corridor.width_mm)||100,
         height_mm:Number(corridor.height_mm)||100,
-        main_level_y_mm:Number(corridor.main_level_y_mm)
+        main_level_y_mm:Number(corridor.main_level_y_mm),
+        main_corridor_secondary_coordinate_mm:Number(corridor.main_corridor_secondary_coordinate_mm)
       };}),
       preferredStandoffDistanceMm:Math.min(
         options.maxBodyDistanceMm + planningTrayWidth / 2,
@@ -4761,6 +4771,7 @@ export function routeEngineeringNetwork(inputs) {
       network_nodes:networkResult.networkNodes || [],
       panel_drop_points:(networkResult.panelDrop.points || []).map(clonePoint),
       main_level_y_mm:Number(networkResult.routingY),
+      main_corridor_secondary_coordinate_mm:Number(networkResult.main_corridor_secondary_coordinate_mm),
       parallel_main_corridor:networkResult.parallel_main_corridor===true,
       panel_connection_points:Array.isArray(networkResult.panel_connection_points)
         ? networkResult.panel_connection_points.map(clonePoint)
@@ -4792,6 +4803,7 @@ export function routeEngineeringNetwork(inputs) {
         network_id:run.network_id||null,
         floor_id:group.floor_id == null ? null : String(group.floor_id),
         points:run.points.map(clonePoint),
+        main_corridor_secondary_coordinate_mm:Number(latestMainCorridor.main_corridor_secondary_coordinate_mm),
         width_mm:Number(run.width_mm)||100,
         height_mm:Number(run.height_mm)||Number(options.trayHeightMm)||100,
         main_level_y_mm:run.points.length?Number(run.points[0].y):NaN
