@@ -4674,12 +4674,25 @@ export function routeEngineeringNetwork(inputs) {
     // Derive occupied corridors from the actual Main Tray runs already
     // classified in the accumulated output, not just the seed backbone. A
     // multi-row network can contain more than one shared horizontal trunk.
-    const completedMainRuns=buildTrayRuns(cablePlans,options,mainCorridors).filter(function(run){
-      return run && run.classification==='main' && Array.isArray(run.points) && run.points.length>=2;
+    // Rebuild occupancy only for this network. Reprocessing every previous
+    // cable plan after each batch grows quadratically with hundreds of loads.
+    const latestMainCorridor=mainCorridors[mainCorridors.length-1];
+    const currentNetworkMainRuns=buildTrayRuns(
+      networkResult.cablePlans,
+      options,
+      latestMainCorridor ? [latestMainCorridor] : []
+    ).filter(function(run){
+      return run && run.classification==='main' &&
+        Array.isArray(run.points) && run.points.length>=2;
     });
-    occupiedMainCorridors.length=0;
-    completedMainRuns.forEach(function(run){
+    currentNetworkMainRuns.forEach(function(run){
+      const signature=[run.network_id||'',JSON.stringify(run.points),Number(run.width_mm)||100].join('|');
+      const alreadyStored=occupiedMainCorridors.some(function(existing){
+        return existing.signature===signature;
+      });
+      if(alreadyStored)return;
       occupiedMainCorridors.push({
+        signature,
         network_id:run.network_id||null,
         points:run.points.map(clonePoint),
         width_mm:Number(run.width_mm)||100,
