@@ -2668,10 +2668,19 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
   if(!candidates.length){
     const avg=secondaryValues.reduce(function(a,b){return a+b;},0)/secondaryValues.length;
     const panelSecondaryForFallback=Number(panelStandoff.point[secondaryAxis]);
+    const preferredSide=Math.sign(avg-panelSecondaryForFallback)||-1;
+    const isCapacitySplitRow=Number(group.source_row_batch_count)>1;
+    const halfMain=Math.max(1,Number(routeOptions.routingTrayWidthMm)||100)/2;
+    const maxBranchWidth=prepared.reduce(function(max,entry){
+      return Math.max(max,Number(entry.branchTrayWidthMm)||100);
+    },100);
+    const rowClearance=halfMain+maxBranchWidth/2+
+      Math.max(0,Number(options.clearanceMm)||0)+Math.max(0,Number(options.gridStepMm)||100)*0.5;
+    const rowEdgeSecondary=avg-preferredSide*rowClearance;
     candidates=[{
-      secondary:Number.isFinite(panelSecondaryForFallback)
-        ? (avg+panelSecondaryForFallback)/2
-        : avg,
+      secondary:isCapacitySplitRow&&Number(group.source_row_batch_index)===0
+        ? rowEdgeSecondary
+        : (Number.isFinite(panelSecondaryForFallback) ? (avg+panelSecondaryForFallback)/2 : avg),
       singleRowFallback:true
     }];
   }
@@ -2773,11 +2782,12 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
       if((laneCoordinate-panelSecondary)*side>0.001)sameSideLanes.push(laneCoordinate);
     });
     if(sameSideLanes.length){
-      const outermost=side>0?Math.max.apply(Math,sameSideLanes):Math.min.apply(Math,sameSideLanes);
-      const nextLane=outermost+side*laneSpacing;
+      // Capacity lanes are added inward toward the destination panel.
+      const innermost=side>0?Math.min.apply(Math,sameSideLanes):Math.max.apply(Math,sameSideLanes);
+      const nextLane=innermost-side*laneSpacing;
       if(nextLane>=secondaryMin-0.001&&nextLane<=secondaryMax+0.001&&
           !baseLevels.some(function(value){return Math.abs(value-nextLane)<0.001;})){
-        baseLevels.push(nextLane);
+        baseLevels.unshift(nextLane);
       }
     }
   }
@@ -2894,10 +2904,10 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
           if((atPanel-panelSecondary)*preferredCorridorSide>0.001)panelLaneCoordinates.push(atPanel);
         });
         if(panelLaneCoordinates.length){
-          const outermostAtPanel=preferredCorridorSide<0
-            ? Math.min.apply(Math,panelLaneCoordinates)
-            : Math.max.apply(Math,panelLaneCoordinates);
-          const laneStepAtPanel=outermostAtPanel+preferredCorridorSide*laneSpacing;
+          const innermostAtPanel=preferredCorridorSide<0
+            ? Math.max.apply(Math,panelLaneCoordinates)
+            : Math.min.apply(Math,panelLaneCoordinates);
+          const laneStepAtPanel=innermostAtPanel-preferredCorridorSide*laneSpacing;
           const candidateOffset=Number(sec)-Number(baseLevels[0]);
           let calibratedSec=laneStepAtPanel+candidateOffset;
           for(let iteration=0;iteration<4;iteration++){
