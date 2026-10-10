@@ -2710,12 +2710,40 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
     if(Number.isFinite(value)&&!baseLevels.some(function(existing){return Math.abs(existing-value)<0.001;}))baseLevels.push(value);
   });
   const secondaryCandidates=[];
+  const hasOccupiedMains=Array.isArray(options.occupiedMainCorridors)&&options.occupiedMainCorridors.length>0;
+  const occupiedMainWidth=hasOccupiedMains
+    ? Math.max.apply(null,options.occupiedMainCorridors.map(function(c){return Number(c.width_mm)||Number(c.height_mm)||100;}))
+    : 0;
+  const laneSpacing=hasOccupiedMains
+    ? Math.max(step,Math.ceil((((Number(routeOptions.routingTrayWidthMm)||100)+occupiedMainWidth)/2+Math.max(0,Number(options.clearanceMm)||0))/step)*step)
+    : step;
+  const boundsForLanes=hasOccupiedMains
+    ? normalizeRoutingBounds(routeOptions.routingBounds,routeOptions)
+    : null;
+  const secondaryMin=boundsForLanes
+    ? (primaryAxis==='x'?boundsForLanes.minZ:boundsForLanes.minX)+(Number(routeOptions.routingTrayWidthMm)||100)/2
+    : -Infinity;
+  const secondaryMax=boundsForLanes
+    ? (primaryAxis==='x'?boundsForLanes.maxZ:boundsForLanes.maxX)-(Number(routeOptions.routingTrayWidthMm)||100)/2
+    : Infinity;
   baseLevels.forEach(function(base){
     if(!secondaryCandidates.includes(base))secondaryCandidates.push(base);
-    const hasOccupiedMains=Array.isArray(options.occupiedMainCorridors)&&options.occupiedMainCorridors.length>0;
-    const count=Math.min(hasOccupiedMains?40:10,Math.floor(Math.max(0,maxSec-minSec)/(step*0.5)));
+    if(hasOccupiedMains){
+      const extent=boundsForLanes
+        ? Math.max(Math.abs(base-secondaryMin),Math.abs(secondaryMax-base))
+        : Math.max(3000,Number(options.routingPaddingMm)||1000);
+      const count=Math.min(10,Math.max(1,Math.ceil(extent/laneSpacing)));
+      for(let n=1;n<=count;n++){
+        [base-n*laneSpacing,base+n*laneSpacing].forEach(function(v){
+          if(v<secondaryMin-0.001||v>secondaryMax+0.001)return;
+          if(!secondaryCandidates.some(function(existing){return Math.abs(existing-v)<0.001;}))secondaryCandidates.push(v);
+        });
+      }
+      return;
+    }
+    const count=Math.min(10,Math.floor(Math.max(0,maxSec-minSec)/(step*2)));
     for(let n=1;n<=count;n++)[base-n*step,base+n*step].forEach(function(v){
-      if(!hasOccupiedMains&&maxSec-minSec>=step*2&&(v<=minSec+step*0.5||v>=maxSec-step*0.5))return;
+      if(maxSec-minSec>=step*2&&(v<=minSec+step*0.5||v>=maxSec-step*0.5))return;
       if(!secondaryCandidates.includes(v))secondaryCandidates.push(v);
     });
   });
@@ -3331,6 +3359,16 @@ function buildPanelMultiTerminalNetwork(group, prepared, panelStandoff, obstacle
 
     if (parallelResult && parallelResult.unresolved.length === 0) {
       return parallelResult;
+    }
+
+    // Existing Main corridors are physical obstacles. If this floor already
+    // has a Main Tray and a clean parallel lane cannot be built at its fixed
+    // routing level, do not run expensive alternate tree searches that would
+    // risk overlapping the existing tray.
+    if (Array.isArray(routeOptions.occupiedMainCorridors) &&
+        routeOptions.occupiedMainCorridors.length > 0 &&
+        options.allowOutsideRouting !== true) {
+      return null;
     }
 
   // Larger groups use a global Main backbone so every equipment item gets
@@ -4016,6 +4054,7 @@ export function routeEngineeringNetwork(inputs) {
       ? Number(inputs.options.trayStopBeforeEquipmentMm)
       : 1000,
     exactCollisionRouting:inputs && inputs.options && inputs.options.exactCollisionRouting === true,
+    allowOutsideRouting:inputs && inputs.options && inputs.options.allowOutsideRouting === true,
     floorZones:Array.isArray(inputs && inputs.options && inputs.options.floorZones)
       ? inputs.options.floorZones
       : [],
@@ -4418,6 +4457,15 @@ export function routeEngineeringNetwork(inputs) {
     );
 
     if (!networkResult) {
+      const hasOccupiedMain = Array.isArray(routeOptions.occupiedMainCorridors) &&
+        routeOptions.occupiedMainCorridors.length > 0;
+      if (hasOccupiedMain && options.allowOutsideRouting !== true) {
+        warnings.push(
+          group.panel.name + ': no collision-free, non-overlapping Main Tray lane was available for this group inside the model bounds.'
+        );
+        return;
+      }
+
       let directFallbackCount = 0;
 
       prepared.forEach(function(entry) {
