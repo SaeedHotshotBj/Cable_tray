@@ -1309,7 +1309,7 @@ function buildTrayRuns(cablePlans, options, mainCorridors) {
     );
   });
 
-  const segments = new Map();
+  const rawSegments = [];
 
   cablePlans.forEach(function(plan) {
     // The 1 m free-cable allowance applies only at the equipment end.
@@ -1360,25 +1360,128 @@ function buildTrayRuns(cablePlans, options, mainCorridors) {
           ) < 0.001
         );
 
-      const segmentMapKey = [
-        segment.network_id || '',
-        segment.key
-      ].join('||');
-      const existing = segments.get(segmentMapKey);
-      if (!existing) {
-        segments.set(segmentMapKey, segment);
+      rawSegments.push(segment);
+    }
+  });
+
+  // A cable path may describe one shared trunk as A→C, while another path
+  // describes the same geometry as A→B→C. Split collinear segments at every
+  // endpoint before calculating cable membership so shared portions are
+  // classified consistently instead of overlaying a Branch on the Main Tray.
+  const segments = new Map();
+  const collinearLines = new Map();
+
+  rawSegments.forEach(function(segment) {
+    let fixed1;
+    let fixed2;
+    let low;
+    let high;
+
+    if (segment.axis === 'x') {
+      fixed1 = rounded(segment.start.y);
+      fixed2 = rounded(segment.start.z);
+      low = rounded(segment.minPoint.x);
+      high = rounded(segment.maxPoint.x);
+    } else if (segment.axis === 'y') {
+      fixed1 = rounded(segment.start.x);
+      fixed2 = rounded(segment.start.z);
+      low = rounded(segment.minPoint.y);
+      high = rounded(segment.maxPoint.y);
+    } else {
+      fixed1 = rounded(segment.start.x);
+      fixed2 = rounded(segment.start.y);
+      low = rounded(segment.minPoint.z);
+      high = rounded(segment.maxPoint.z);
+    }
+    if (high - low < 0.001) return;
+
+    const lineKey = [
+      segment.network_id || '',
+      segment.axis,
+      fixed1,
+      fixed2
+    ].join('|');
+    const line = collinearLines.get(lineKey) || {
+      network_id:segment.network_id || null,
+      axis:segment.axis,
+      fixed1,
+      fixed2,
+      ranges:[]
+    };
+    line.ranges.push({low,high,segment});
+    collinearLines.set(lineKey, line);
+  });
+
+  collinearLines.forEach(function(line) {
+    const breakpoints = Array.from(new Set(
+      line.ranges.reduce(function(all, range){
+        all.push(range.low, range.high);
+        return all;
+      }, [])
+    )).sort(function(a,b){ return a-b; });
+
+    for (let i = 1; i < breakpoints.length; i++) {
+      const low = breakpoints[i - 1];
+      const high = breakpoints[i];
+      if (high - low < 0.001) continue;
+      const middle = (low + high) / 2;
+      const active = line.ranges.filter(function(range){
+        return range.low <= middle + 0.001 && range.high >= middle - 0.001;
+      });
+      if (!active.length) continue;
+
+      let start;
+      let end;
+      if (line.axis === 'x') {
+        start = {x:low,y:line.fixed1,z:line.fixed2};
+        end = {x:high,y:line.fixed1,z:line.fixed2};
+      } else if (line.axis === 'y') {
+        start = {x:line.fixed1,y:low,z:line.fixed2};
+        end = {x:line.fixed1,y:high,z:line.fixed2};
       } else {
-        existing.cableIds.add(plan.equipment.id);
-        existing.diameterByCable.set(
-          plan.equipment.id,
-          Number(plan.cable.diameter_mm) || 0
-        );
-        existing.main_level_eligible =
-          existing.main_level_eligible || segment.main_level_eligible;
-        existing.main_corridor_eligible =
-          existing.main_corridor_eligible || segment.main_corridor_eligible;
-        existing.parallel_main_eligible =
-          existing.parallel_main_eligible || segment.parallel_main_eligible;
+        start = {x:line.fixed1,y:line.fixed2,z:low};
+        end = {x:line.fixed1,y:line.fixed2,z:high};
+      }
+
+      const first = active[0].segment;
+      const firstCableId = Array.from(first.cableIds)[0];
+      const firstDiameter = Number(first.diameterByCable.get(firstCableId)) || 0;
+      const atomic = segmentRecord(start,end,firstCableId,firstDiameter);
+      if (!atomic) continue;
+      atomic.network_id = line.network_id;
+      atomic.main_level_eligible = false;
+      atomic.main_corridor_eligible = false;
+      atomic.parallel_main_eligible = false;
+
+      active.forEach(function(range) {
+        range.segment.cableIds.forEach(function(cableId){
+          atomic.cableIds.add(cableId);
+          const diameter = Number(range.segment.diameterByCable.get(cableId)) || 0;
+          atomic.diameterByCable.set(
+            cableId,
+            Math.max(Number(atomic.diameterByCable.get(cableId)) || 0, diameter)
+          );
+        });
+        atomic.main_level_eligible = atomic.main_level_eligible || range.segment.main_level_eligible;
+        atomic.main_corridor_eligible = atomic.main_corridor_eligible || range.segment.main_corridor_eligible;
+        atomic.parallel_main_eligible = atomic.parallel_main_eligible || range.segment.parallel_main_eligible;
+      });
+
+      const segmentMapKey = [line.network_id || '',atomic.key].join('||');
+      const previous = segments.get(segmentMapKey);
+      if (previous) {
+        atomic.cableIds.forEach(function(cableId){ previous.cableIds.add(cableId); });
+        atomic.diameterByCable.forEach(function(diameter,cableId){
+          previous.diameterByCable.set(cableId,Math.max(
+            Number(previous.diameterByCable.get(cableId)) || 0,
+            Number(diameter) || 0
+          ));
+        });
+        previous.main_level_eligible = previous.main_level_eligible || atomic.main_level_eligible;
+        previous.main_corridor_eligible = previous.main_corridor_eligible || atomic.main_corridor_eligible;
+        previous.parallel_main_eligible = previous.parallel_main_eligible || atomic.parallel_main_eligible;
+      } else {
+        segments.set(segmentMapKey,atomic);
       }
     }
   });
@@ -3070,7 +3173,13 @@ function buildGlobalMainBackboneNetwork(group, prepared, panelStandoff, obstacle
         result.connectedCount > best.connectedCount ||
         (
           result.connectedCount === best.connectedCount &&
-          result.score < best.score
+          (
+            result.routingY > best.routingY + 0.001 ||
+            (
+              Math.abs(result.routingY - best.routingY) <= 0.001 &&
+              result.score < best.score
+            )
+          )
         )
       ) {
         best = result;
@@ -3225,7 +3334,13 @@ function buildPanelMultiTerminalNetwork(group, prepared, panelStandoff, obstacle
         backboneResult.connectedCount > bestPartial.connectedCount ||
         (
           backboneResult.connectedCount === bestPartial.connectedCount &&
-          backboneResult.score < bestPartial.partialScore
+          (
+            backboneResult.routingY > bestPartial.routingY + 0.001 ||
+            (
+              Math.abs(backboneResult.routingY - bestPartial.routingY) <= 0.001 &&
+              backboneResult.score < bestPartial.partialScore
+            )
+          )
         )
       ) {
         bestPartial = {
@@ -3465,7 +3580,13 @@ function buildPanelMultiTerminalNetwork(group, prepared, panelStandoff, obstacle
         result.connectedCount > bestPartial.connectedCount ||
         (
           result.connectedCount === bestPartial.connectedCount &&
-          partialScore > bestPartial.partialScore
+          (
+            result.routingY > bestPartial.routingY + 0.001 ||
+            (
+              Math.abs(result.routingY - bestPartial.routingY) <= 0.001 &&
+              partialScore > bestPartial.partialScore
+            )
+          )
         )
       ) {
         bestPartial = { ...result, partialScore };
