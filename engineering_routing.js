@@ -1377,12 +1377,16 @@ function buildTrayRuns(cablePlans, options, mainCorridors) {
     // The 1 m free-cable allowance applies only at the equipment end.
     // Keep the complete remaining cable path so the physical tray continues
     // through the shared network instead of stopping where branch_points end.
+    const configuredEquipmentStop = Number.isFinite(Number(options.trayStopBeforeEquipmentMm))
+      ? Math.max(0, Number(options.trayStopBeforeEquipmentMm))
+      : 1000;
+    // A reference-style shared network keeps the branch tray close to the
+    // equipment; retain the larger free-cable allowance for other route types.
+    const equipmentStop = plan.parallel_main_corridor === true
+      ? Math.min(configuredEquipmentStop, Math.max(75, Math.min(110, Number(options.trayHeightMm) || 100)))
+      : configuredEquipmentStop;
     let trayPoints = Array.isArray(plan.points)
-      ? trimBranchTrayStart(
-          plan,
-          plan.points,
-          Math.max(0, Number(options.trayStopBeforeEquipmentMm) || 1000)
-        )
+      ? trimBranchTrayStart(plan, plan.points, equipmentStop)
       : [];
 
     // For the dedicated parallel Main topology, draw only the physical
