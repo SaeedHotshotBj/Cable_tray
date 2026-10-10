@@ -2783,7 +2783,27 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
       const spine=coords.map(function(v){return mainPoint(v,sec);});
       if(!clearPath(spine,routeOptions))continue;
       const panelSpine=mainPoint(panelPrimary,sec);
-      if(!directionalClear(panelSpine,panelPoint,routeOptions)||!directionalClear(panelStandoff.point,panelPoint,routeOptions))continue;
+      if(!directionalClear(panelStandoff.point,panelPoint,routeOptions))continue;
+      let panelConnectorResult={points:dedupe([panelSpine,panelPoint]),warning:null,fallback:false};
+      if(!clearPath(panelConnectorResult.points,routeOptions)){
+        panelConnectorResult=findGridPath3D(
+          panelSpine,
+          panelPoint,
+          obstacles,
+          {
+            ...routeOptions,
+            fixedRoutingY:routingY,
+            preferredRoutingY:routingY,
+            routeTurnPenaltyRatio:Math.max(
+              Number(options.turnPenaltyRatio)||20,
+              Number(options.mainCorridorTurnPenaltyRatio)||100
+            )
+          },
+          new Set()
+        );
+      }
+      if(!panelConnectorResult.points||panelConnectorResult.points.length<2)continue;
+      const panelConnectorPath=dedupe(panelConnectorResult.points);
       const cleanDrop={points:[clonePoint(panelStandoff.point),clonePoint(panelPoint)],warning:null,fallback:false};
       prepared.forEach(function(e){
         e.panelStandoff=panelStandoff;e.panelHighPoint=clonePoint(panelPoint);
@@ -2800,13 +2820,44 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
         else if(v<panelPrimary)tree.parent.set(k,keys[i+1]||rootKey);
         else tree.parent.set(k,keys[i-1]||rootKey);
       }
+      // The logical tree remains connected through the routed panel connector,
+      // even when its physical tray end is shortened to preserve the reference gap.
+      for(let i=panelConnectorPath.length-2;i>=0;i--){
+        const current=panelConnectorPath[i],next=panelConnectorPath[i+1];
+        const currentKey=networkNodeKey(current),nextKey=networkNodeKey(next);
+        tree.nodes.set(currentKey,clonePoint(current));
+        tree.nodes.set(nextKey,clonePoint(next));
+        tree.parent.set(currentKey,nextKey);
+      }
       const plans=[];let valid=true;
       for(let i=0;i<prepared.length;i++){
         const entry=prepared[i],branchOptions=entry.branchRouteOptions||routeOptions;
         const plane=clonePoint(entry.start);plane.y=routingY;
-        const attach=mainPoint(Number(entry.start[primaryAxis]),sec);
+        let attach=mainPoint(Number(entry.start[primaryAxis]),sec);
+        let branch=dedupe([entry.start,plane,attach]);
+        if(!clearPath(branch,branchOptions)){
+          const routedBranch=findGridPath3D(
+            entry.start,
+            null,
+            obstacles,
+            {
+              ...branchOptions,
+              fixedRoutingY:routingY,
+              preferredRoutingY:routingY,
+              networkGoalPoints:spine,
+              networkGoalCandidateLimit:Number(options.networkGoalCandidateLimit)||24,
+              routeTurnPenaltyRatio:Math.max(
+                Number(options.turnPenaltyRatio)||20,
+                Number(options.mainCorridorTurnPenaltyRatio)||100
+              )
+            },
+            new Set()
+          );
+          if(!routedBranch.points||!routedBranch.points.length||!routedBranch.attachment_point){valid=false;break;}
+          branch=dedupe(routedBranch.points);
+          attach=clonePoint(routedBranch.attachment_point);
+        }
         if(!tree.nodes.has(networkNodeKey(attach))){valid=false;break;}
-        const branch=dedupe([entry.start,plane,attach]);if(!clearPath(branch,branchOptions)){valid=false;break;}
         const plan=makeNetworkCablePlan(entry,group,branch,tree,attach,cleanDrop,routeOptions.routingTrayWidthMm,{
           ...routeOptions,fixedRoutingY:routingY,panelStandoffDistanceMm:panelStandoff.distance_mm
         });
@@ -2814,24 +2865,20 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
         plan.parallel_main_corridor=true;plan.main_corridor_axis=primaryAxis;plan.main_corridor_secondary_coordinate_mm=sec;plans.push(plan);
       }
       if(!valid||plans.length!==prepared.length)continue;
-      const panelConnectionLength=manhattanDistance3D(panelPoint,panelSpine);
+      const panelConnectionLength=polylineLengthMm(panelConnectorPath);
       const panelGap=Math.min(
         Math.max(100,Math.min(220,step*1.5)),
         Math.max(0,panelConnectionLength-50)
       );
-      const panelConnectionEnd=panelConnectionLength>0.001
-        ? {
-            x:panelSpine.x+(panelPoint.x-panelSpine.x)*panelGap/panelConnectionLength,
-            y:panelSpine.y+(panelPoint.y-panelSpine.y)*panelGap/panelConnectionLength,
-            z:panelSpine.z+(panelPoint.z-panelSpine.z)*panelGap/panelConnectionLength
-          }
-        : clonePoint(panelSpine);
+      const panelConnectionPoints=panelConnectionLength>0.001
+        ? shortenPolylineEnd(panelConnectorPath.slice().reverse(),panelGap)
+        : [clonePoint(panelPoint)];
       const length=plans.reduce(function(s,p){return s+routeLengthMeters(p.points);},0);
       const turns=plans.reduce(function(s,p){return s+countPolylineTurns(p.points);},0);
       return {routingY,panelHighPoint:clonePoint(panelPoint),panelDrop:cleanDrop,cablePlans:plans,connectedCount:plans.length,
         unresolved:[],networkNodes:Array.from(tree.nodes.values()).map(clonePoint),
         main_spine_points:[mainPoint(physicalStartPrimary,sec),mainPoint(physicalEndPrimary,sec)],
-        panel_connection_points:[clonePoint(panelPoint),panelConnectionEnd],
+        panel_connection_points:panelConnectionPoints,
         parallel_main_corridor:true,main_corridor_axis:primaryAxis,
         score:length+turns*step*0.001};
     }
@@ -3365,12 +3412,6 @@ function buildPanelMultiTerminalNetwork(group, prepared, panelStandoff, obstacle
     // has a Main Tray and a clean parallel lane cannot be built at its fixed
     // routing level, do not run expensive alternate tree searches that would
     // risk overlapping the existing tray.
-    if (Array.isArray(routeOptions.occupiedMainCorridors) &&
-        routeOptions.occupiedMainCorridors.length > 0 &&
-        options.allowOutsideRouting !== true) {
-      return null;
-    }
-
   // Larger groups use a global Main backbone so every equipment item gets
   // a real Main attachment node. The previous seed corridor must not become
   // the only usable Main target when the equipment count grows.
@@ -3447,6 +3488,16 @@ function buildPanelMultiTerminalNetwork(group, prepared, panelStandoff, obstacle
     }
   }
 
+  }
+
+  if (Array.isArray(routeOptions.occupiedMainCorridors) &&
+      routeOptions.occupiedMainCorridors.length > 0 &&
+      options.allowOutsideRouting !== true) {
+    // One attempt to route a distinct shared Main (including branches around
+    // old trunk endpoints) is preferable to dozens of overlapping fallbacks.
+    return bestPartial && bestPartial.unresolved && bestPartial.unresolved.length === 0
+      ? bestPartial
+      : null;
   }
 
   for (let levelIndex = 0; levelIndex < levels.length; levelIndex++) {
