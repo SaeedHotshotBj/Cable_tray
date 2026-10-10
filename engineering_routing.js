@@ -2718,9 +2718,10 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
     const raw=Number(c.secondary);
     const panelSideDistance=panelSecondary-raw;
     const direction=panelSideDistance>=0?1:-1;
+    const occupiedLaneExists=Array.isArray(routeOptions.occupiedMainCorridors)&&routeOptions.occupiedMainCorridors.length>0;
     const value=Math.abs(panelSideDistance)<minimumPanelOffset
       ? panelSecondary-direction*minimumPanelOffset
-      : raw;
+      : (occupiedLaneExists ? raw : raw-direction*Math.min(20,step*0.1));
     if(Number.isFinite(value)&&!baseLevels.some(function(existing){return Math.abs(existing-value)<0.001;}))baseLevels.push(value);
   });
   const secondaryCandidates=[];
@@ -2732,7 +2733,8 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
     ? Math.max.apply(null,occupiedCorridors.map(function(c){return Number(c.width_mm)||Number(c.height_mm)||100;}))
     : 0;
   const laneSpacing=hasOccupiedMains
-    ? Math.max(step,Math.ceil((((Number(routeOptions.routingTrayWidthMm)||100)+occupiedMainWidth)/2+Math.max(0,Number(options.clearanceMm)||0))/step)*step)
+    ? Math.max(step,Math.ceil((((Number(routeOptions.routingTrayWidthMm)||100)+occupiedMainWidth)/2+
+        Math.max(0,Number(options.clearanceMm)||0)+step*0.5)/step)*step)
     : step;
   const boundsForLanes=hasOccupiedMains
     ? normalizeRoutingBounds(routeOptions.routingBounds,routeOptions)
