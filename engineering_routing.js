@@ -2662,7 +2662,13 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
   if(primarySpan<step*3)return null;
   if(!candidates.length){
     const avg=secondaryValues.reduce(function(a,b){return a+b;},0)/secondaryValues.length;
-    candidates=[{secondary:avg}];
+    const panelSecondaryForFallback=Number(panelStandoff.point[secondaryAxis]);
+    candidates=[{
+      secondary:Number.isFinite(panelSecondaryForFallback)
+        ? (avg+panelSecondaryForFallback)/2
+        : avg,
+      singleRowFallback:true
+    }];
   }
 
   // AABB checks currently inset both X and Z by half the tray width. For a
@@ -2701,10 +2707,15 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
   const atHigh=panelPrimary>=loadMax-step*0.5,atLow=panelPrimary<=loadMin+step*0.5;
   const overrun=Math.max(500,step),tailOptions=Array.from(new Set([overrun,Math.min(overrun,400),Math.min(overrun,300),Math.min(overrun,200),Math.min(overrun,100),0]));
   const minSec=Math.min.apply(Math,secondaryValues),maxSec=Math.max.apply(Math,secondaryValues),baseLevels=[];
+  const trayHalfWidth=Math.max(1,Number(routeOptions.routingTrayWidthMm)||100)/2;
+  const minimumPanelOffset=(trayHalfWidth+Math.max(0,Number(options.clearanceMm)||0)+step*0.5)/(1-0.215);
   candidates.forEach(function(c){
     const raw=Number(c.secondary);
-    const direction=panelSecondary>=raw?1:-1;
-    const value=raw-direction*Math.min(20,step*0.1);
+    const panelSideDistance=panelSecondary-raw;
+    const direction=panelSideDistance>=0?1:-1;
+    const value=Math.abs(panelSideDistance)<minimumPanelOffset
+      ? panelSecondary-direction*minimumPanelOffset
+      : raw;
     if(Number.isFinite(value)&&!baseLevels.some(function(existing){return Math.abs(existing-value)<0.001;}))baseLevels.push(value);
   });
   const secondaryCandidates=[];
@@ -2724,6 +2735,40 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
   const secondaryMax=boundsForLanes
     ? (primaryAxis==='x'?boundsForLanes.maxZ:boundsForLanes.maxX)-(Number(routeOptions.routingTrayWidthMm)||100)/2
     : Infinity;
+
+  // For capacity-split groups on the same floor and panel, keep each new Main
+  // on the outside of an existing lane on the same side of the panel. This
+  // prevents a later equipment branch from having to cross an earlier Main.
+  // Only lines whose primary-axis span actually overlaps this group are used.
+  if(hasOccupiedMains){
+    const loadSecondaryMean=secondaryValues.reduce(function(sum,value){return sum+value;},0)/secondaryValues.length;
+    const side= Math.sign(loadSecondaryMean-panelSecondary) || -1;
+    const currentPrimaryMin=Math.min.apply(Math,terminal);
+    const currentPrimaryMax=Math.max.apply(Math,terminal);
+    const sameSideLanes=[];
+    (options.occupiedMainCorridors||[]).forEach(function(corridor){
+      if(String(corridor.floor_id == null ? '' : corridor.floor_id)!==String(group.floor_id == null ? '' : group.floor_id))return;
+      const points=Array.isArray(corridor.points)?corridor.points:[];
+      if(points.length<2)return;
+      const lanePrimary=points.map(function(point){return Number(point[primaryAxis]);}).filter(Number.isFinite);
+      const laneSecondary=points.map(function(point){return Number(point[secondaryAxis]);}).filter(Number.isFinite);
+      if(lanePrimary.length<2||!laneSecondary.length)return;
+      const overlap=Math.min(currentPrimaryMax,Math.max.apply(Math,lanePrimary))-
+        Math.max(currentPrimaryMin,Math.min.apply(Math,lanePrimary));
+      if(overlap<Math.max(1,step*0.5))return;
+      const laneCoordinate=laneSecondary.reduce(function(sum,value){return sum+value;},0)/laneSecondary.length;
+      if((laneCoordinate-panelSecondary)*side>0.001)sameSideLanes.push(laneCoordinate);
+    });
+    if(sameSideLanes.length){
+      const outermost=side>0?Math.max.apply(Math,sameSideLanes):Math.min.apply(Math,sameSideLanes);
+      const nextLane=outermost+side*laneSpacing;
+      if(nextLane>=secondaryMin-0.001&&nextLane<=secondaryMax+0.001&&
+          !baseLevels.some(function(value){return Math.abs(value-nextLane)<0.001;})){
+        baseLevels.push(nextLane);
+      }
+    }
+  }
+
   baseLevels.forEach(function(base){
     if(!secondaryCandidates.includes(base))secondaryCandidates.push(base);
     if(hasOccupiedMains){
@@ -4350,13 +4395,17 @@ export function routeEngineeringNetwork(inputs) {
       const primaryAxis = options.structurePrimaryAxis === 'z' ? 'z' : 'x';
       const secondaryAxis = primaryAxis === 'x' ? 'z' : 'x';
       function sortEquipmentByLayout(items) {
+        // Capacity batches should contain equipment from the same physical row
+        // before moving to the next row. Sorting by the primary axis first
+        // mixed opposite rows into each batch; their branch routes then crossed
+        // Main lanes from earlier batches.
         return items.slice().sort(function(a,b){
-          const av = Number(a.anchor && a.anchor.point ? a.anchor.point[primaryAxis] : 0);
-          const bv = Number(b.anchor && b.anchor.point ? b.anchor.point[primaryAxis] : 0);
-          if (Math.abs(av - bv) > 0.001) return av - bv;
           const as = Number(a.anchor && a.anchor.point ? a.anchor.point[secondaryAxis] : 0);
           const bs = Number(b.anchor && b.anchor.point ? b.anchor.point[secondaryAxis] : 0);
-          return as - bs;
+          if (Math.abs(as - bs) > 0.001) return as - bs;
+          const av = Number(a.anchor && a.anchor.point ? a.anchor.point[primaryAxis] : 0);
+          const bv = Number(b.anchor && b.anchor.point ? b.anchor.point[primaryAxis] : 0);
+          return av - bv;
         });
       }
       function appendCapacityBatches(items, panel) {
