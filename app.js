@@ -1078,15 +1078,20 @@ function removeEngineeringGeneratedRoutes() {
   state.objects = state.objects.filter(function(obj){
     if (!obj || (obj.kind !== 'cable' && obj.kind !== 'tray')) return true;
 
-    const generatedTraySpecification = obj.kind === 'tray' &&
-      /\bTRAY\s*-\s*(MAIN|BRANCH)\b/i.test(String(obj.specification || ''));
+    const generatedTraySpecification = obj.kind === 'tray' && (
+      /\bTRAY\s*-\s*(MAIN|BRANCH)\b/i.test(String(obj.specification || '')) ||
+      /^\s*(?:AUTO\s+)?(?:MAIN|BRANCH)\s+TRAY\b/i.test(String(obj.name || ''))
+    );
 
     const hasEngineeringMetadata =
       obj.engineering_generated === true ||
       !!obj.engineering_equipment_id ||
       !!obj.engineering_panel_id ||
       !!obj.engineering_network_id ||
+      !!obj.engineering_floor_id ||
+      !!obj.engineering_floor_name ||
       !!obj.engineering_classification ||
+      Number.isFinite(Number(obj.engineering_tray_width_mm)) && obj.engineering_tray_width_mm != null ||
       (Array.isArray(obj.engineering_cable_ids) && obj.engineering_cable_ids.length > 0) ||
       (Array.isArray(obj.engineering_shared_segment_keys) && obj.engineering_shared_segment_keys.length > 0);
 
