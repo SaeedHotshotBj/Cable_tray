@@ -3397,13 +3397,37 @@ function buildPanelMultiTerminalNetwork(group, prepared, panelStandoff, obstacle
   });
 
   const requestedLevelAttempts = Number(options.networkLevelAttempts);
-  const levels = resolveNetworkRoutingLevels(
+  const resolvedLevels = resolveNetworkRoutingLevels(
     panelStandoff.point,
     routeOptions,
     Number.isFinite(requestedLevelAttempts) && requestedLevelAttempts > 0
       ? requestedLevelAttempts
       : 0
   );
+  // A floor has one Main-Tray routing elevation. Additional capacity batches
+  // may use another clear XZ lane, but must not evade a blocked lane by
+  // silently moving to a different Y level on the same floor.
+  const sameFloorMainLevels = (routeOptions.occupiedMainCorridors || [])
+    .filter(function(corridor){
+      return String(corridor.floor_id == null ? '' : corridor.floor_id) ===
+        String(group.floor_id == null ? '' : group.floor_id);
+    })
+    .map(function(corridor){ return Number(corridor.main_level_y_mm); })
+    .filter(Number.isFinite);
+  let levels = resolvedLevels;
+  if (sameFloorMainLevels.length) {
+    const levelCounts = new Map();
+    sameFloorMainLevels.forEach(function(value){
+      const key = rounded(value);
+      levelCounts.set(key,(levelCounts.get(key)||0)+1);
+    });
+    const requiredLevel = Array.from(levelCounts.entries()).sort(function(a,b){
+      return b[1]-a[1] || a[0]-b[0];
+    })[0][0];
+    levels = resolvedLevels.filter(function(value){
+      return Math.abs(Number(value)-requiredLevel) <= 0.001;
+    });
+  }
   const seedLimit = Math.min(
     seedCandidates.length,
     Math.max(1, Number(options.networkSeedAttempts) || 4)
@@ -4422,6 +4446,7 @@ export function routeEngineeringNetwork(inputs) {
       routingTrayWidthMm:planningTrayWidth,
       occupiedMainCorridors:occupiedMainCorridors.map(function(corridor){return {
         network_id:corridor.network_id,
+        floor_id:corridor.floor_id == null ? null : String(corridor.floor_id),
         points:(corridor.points||[]).map(clonePoint),
         width_mm:Number(corridor.width_mm)||100,
         height_mm:Number(corridor.height_mm)||100,
@@ -4677,6 +4702,7 @@ export function routeEngineeringNetwork(inputs) {
 
     mainCorridors.push({
       panel_id:group.panel.id,
+      floor_id:group.floor_id == null ? null : String(group.floor_id),
       network_id:group.network_id || String(group.panel.id),
       width_mm:planningTrayWidth,
       height_mm:Number(options.trayHeightMm) || 100,
@@ -4714,6 +4740,7 @@ export function routeEngineeringNetwork(inputs) {
       occupiedMainCorridors.push({
         signature,
         network_id:run.network_id||null,
+        floor_id:group.floor_id == null ? null : String(group.floor_id),
         points:run.points.map(clonePoint),
         width_mm:Number(run.width_mm)||100,
         height_mm:Number(run.height_mm)||Number(options.trayHeightMm)||100,
