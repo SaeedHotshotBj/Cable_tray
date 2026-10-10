@@ -2786,21 +2786,43 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
       if(!directionalClear(panelStandoff.point,panelPoint,routeOptions))continue;
       let panelConnectorResult={points:dedupe([panelSpine,panelPoint]),warning:null,fallback:false};
       if(!clearPath(panelConnectorResult.points,routeOptions)){
-        panelConnectorResult=findGridPath3D(
-          panelSpine,
-          panelPoint,
-          obstacles,
-          {
-            ...routeOptions,
-            fixedRoutingY:routingY,
-            preferredRoutingY:routingY,
-            routeTurnPenaltyRatio:Math.max(
-              Number(options.turnPenaltyRatio)||20,
-              Number(options.mainCorridorTurnPenaltyRatio)||100
-            )
-          },
-          new Set()
-        );
+        const directionCandidates=[-1,1,-2,2];
+        let detour=null;
+        for(let di=0;di<directionCandidates.length;di++){
+          const primaryOffset=directionCandidates[di]*Math.max(
+            step,
+            Math.ceil((((Number(routeOptions.routingTrayWidthMm)||100)+
+              (Number(options.occupiedMainCorridors&&options.occupiedMainCorridors[0]&&options.occupiedMainCorridors[0].width_mm)||100))/2+
+              Math.max(0,Number(options.clearanceMm)||0))/step)*step
+          );
+          const pivotA=clonePoint(panelSpine);
+          const pivotB=clonePoint(panelPoint);
+          if(primaryAxis==='x'){pivotA.x+=primaryOffset;pivotB.x+=primaryOffset;}
+          else{pivotA.z+=primaryOffset;pivotB.z+=primaryOffset;}
+          const candidate=[clonePoint(panelSpine),pivotA,pivotB,clonePoint(panelPoint)];
+          if(clearPath(candidate,routeOptions)){detour=dedupe(candidate);break;}
+        }
+        if(detour){
+          panelConnectorResult={points:detour,warning:null,fallback:false};
+        }else if(!hasOccupiedMains){
+          panelConnectorResult=findGridPath3D(
+            panelSpine,
+            panelPoint,
+            obstacles,
+            {
+              ...routeOptions,
+              fixedRoutingY:routingY,
+              preferredRoutingY:routingY,
+              routeTurnPenaltyRatio:Math.max(
+                Number(options.turnPenaltyRatio)||20,
+                Number(options.mainCorridorTurnPenaltyRatio)||100
+              )
+            },
+            new Set()
+          );
+        }else{
+          continue;
+        }
       }
       if(!panelConnectorResult.points||panelConnectorResult.points.length<2)continue;
       const panelConnectorPath=dedupe(panelConnectorResult.points);
@@ -2836,26 +2858,38 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
         let attach=mainPoint(Number(entry.start[primaryAxis]),sec);
         let branch=dedupe([entry.start,plane,attach]);
         if(!clearPath(branch,branchOptions)){
-          const routedBranch=findGridPath3D(
-            entry.start,
-            null,
-            obstacles,
-            {
-              ...branchOptions,
-              fixedRoutingY:routingY,
-              preferredRoutingY:routingY,
-              networkGoalPoints:spine,
-              networkGoalCandidateLimit:Number(options.networkGoalCandidateLimit)||24,
-              routeTurnPenaltyRatio:Math.max(
-                Number(options.turnPenaltyRatio)||20,
-                Number(options.mainCorridorTurnPenaltyRatio)||100
-              )
-            },
-            new Set()
-          );
-          if(!routedBranch.points||!routedBranch.points.length||!routedBranch.attachment_point){valid=false;break;}
-          branch=dedupe(routedBranch.points);
-          attach=clonePoint(routedBranch.attachment_point);
+          const horizontalOptions={
+            ...branchOptions,
+            fixedRoutingY:routingY,
+            preferredRoutingY:routingY
+          };
+          const horizontalBridge=bridgePath3D(plane,attach,obstacles,horizontalOptions);
+          if(horizontalBridge){
+            branch=dedupe([entry.start].concat(horizontalBridge));
+          }else if(!hasOccupiedMains){
+            const routedBranch=findGridPath3D(
+              entry.start,
+              null,
+              obstacles,
+              {
+                ...branchOptions,
+                fixedRoutingY:routingY,
+                preferredRoutingY:routingY,
+                networkGoalPoints:spine,
+                networkGoalCandidateLimit:Number(options.networkGoalCandidateLimit)||24,
+                routeTurnPenaltyRatio:Math.max(
+                  Number(options.turnPenaltyRatio)||20,
+                  Number(options.mainCorridorTurnPenaltyRatio)||100
+                )
+              },
+              new Set()
+            );
+            if(!routedBranch.points||!routedBranch.points.length||!routedBranch.attachment_point){valid=false;break;}
+            branch=dedupe(routedBranch.points);
+            attach=clonePoint(routedBranch.attachment_point);
+          }else{
+            valid=false;break;
+          }
         }
         if(!tree.nodes.has(networkNodeKey(attach))){valid=false;break;}
         const plan=makeNetworkCablePlan(entry,group,branch,tree,attach,cleanDrop,routeOptions.routingTrayWidthMm,{
