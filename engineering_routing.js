@@ -1357,7 +1357,7 @@ function buildTrayRuns(cablePlans, options, mainCorridors) {
           Math.abs(
             Number(segment.start[plan.main_corridor_axis === 'x' ? 'z' : 'x']) -
             Number(plan.main_corridor_secondary_coordinate_mm)
-          ) < 0.001
+          ) < Math.max(1, (Number(options.gridStepMm) || 100) * 0.5)
         );
 
       rawSegments.push(segment);
@@ -1522,7 +1522,10 @@ function buildTrayRuns(cablePlans, options, mainCorridors) {
 
     const classification = (
       segment.main_corridor_eligible ||
-      segment.parallel_main_eligible ||
+      (
+        segment.parallel_main_eligible &&
+        segment.length + 0.001 >= sharedMainMinimumLength
+      ) ||
       sharedHorizontalTrunkEligible
     ) ? 'main' : 'branch';
 
