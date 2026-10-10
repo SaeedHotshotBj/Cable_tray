@@ -5092,7 +5092,7 @@ function exportEngineeringBoq() {
   const panelMap = new Map(state.panels.map(function(panel){ return [panel.id, panel]; }));
   const rows = [
     ['Cable Schedule'],
-    ['Load','Cable','Destination Panel','Length (m)']
+    ['Load','Cable','Cable Diameter (mm)','Destination Panel','Length (m)']
   ];
 
   state.objects
@@ -5103,13 +5103,14 @@ function exportEngineeringBoq() {
       return {
         load:item ? item.name : route.name,
         cable:item ? item.cable_name : route.specification,
+        diameter_mm:Number(route.diameter_mm) || (item ? Number(item.cable_diameter_mm) : 0),
         panel:panel ? panel.name : '',
         length:lengthOf(route.points)
       };
     })
     .sort(function(a,b){ return a.load.localeCompare(b.load); })
     .forEach(function(row){
-      rows.push([row.load,row.cable,row.panel,row.length.toFixed(3)]);
+      rows.push([row.load,row.cable,Number(row.diameter_mm).toFixed(1),row.panel,row.length.toFixed(3)]);
     });
 
   rows.push([]);
