@@ -1329,9 +1329,26 @@ function buildTrayRuns(cablePlans, options, mainCorridors) {
     const mainLevelY = Number(plan.main_corridor_routing_y_mm);
 
     for (let i = 1; i < points.length; i++) {
+      const pointA = points[i - 1];
+      const pointB = points[i];
+
+      // Physical trays stay on the horizontal routing plane. Vertical or
+      // diagonal cable drops connect this plane to equipment/panels but do
+      // not become 3D tray transitions.
+      if (
+        Math.abs(pointA.y - pointB.y) > 0.001 ||
+        (
+          Number.isFinite(mainLevelY) &&
+          (
+            Math.abs(pointA.y - mainLevelY) > 0.001 ||
+            Math.abs(pointB.y - mainLevelY) > 0.001
+          )
+        )
+      ) continue;
+
       const segment = segmentRecord(
-        points[i - 1],
-        points[i],
+        pointA,
+        pointB,
         plan.equipment.id,
         plan.cable.diameter_mm
       );
@@ -4338,6 +4355,7 @@ export function routeEngineeringNetwork(inputs) {
           routing_start:entry.start,
           routing_goal:panelStandoff.point,
           main_corridor_equipment_id:null,
+          main_corridor_routing_y_mm:Number.isFinite(Number(routingY)) ? Number(routingY) : null,
           standoff_distance_mm:Math.max(entry.startDistanceMm, panelStandoff.distance_mm),
           planning_tray_width_mm:planningTrayWidth,
           engineering_network_id:group.network_id || String(group.panel.id),
