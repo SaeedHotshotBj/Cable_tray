@@ -4263,46 +4263,80 @@ export function routeEngineeringNetwork(inputs) {
 
     const batches = [];
     if (totalDiameter <= maxCableDiameterSum + 0.001 || sourceEquipment.length <= 1) {
-      batches.push(sourceEquipment);
+      batches.push({
+        equipment:sourceEquipment,
+        panel:group.panel,
+        panels:group.panels
+      });
     } else {
       const primaryAxis = options.structurePrimaryAxis === 'z' ? 'z' : 'x';
       const secondaryAxis = primaryAxis === 'x' ? 'z' : 'x';
-      sourceEquipment.sort(function(a,b){
-        const av = Number(a.anchor && a.anchor.point ? a.anchor.point[primaryAxis] : 0);
-        const bv = Number(b.anchor && b.anchor.point ? b.anchor.point[primaryAxis] : 0);
-        if (Math.abs(av - bv) > 0.001) return av - bv;
-        const as = Number(a.anchor && a.anchor.point ? a.anchor.point[secondaryAxis] : 0);
-        const bs = Number(b.anchor && b.anchor.point ? b.anchor.point[secondaryAxis] : 0);
-        return as - bs;
-      });
-
-      let current = [];
-      let currentDiameter = 0;
-      sourceEquipment.forEach(function(item){
-        const diameter = Math.max(0, Number(item.cable_diameter_mm) || 0);
-        if (current.length && currentDiameter + diameter > maxCableDiameterSum + 0.001) {
-          batches.push(current);
-          current = [];
-          currentDiameter = 0;
+      function sortEquipmentByLayout(items) {
+        return items.slice().sort(function(a,b){
+          const av = Number(a.anchor && a.anchor.point ? a.anchor.point[primaryAxis] : 0);
+          const bv = Number(b.anchor && b.anchor.point ? b.anchor.point[primaryAxis] : 0);
+          if (Math.abs(av - bv) > 0.001) return av - bv;
+          const as = Number(a.anchor && a.anchor.point ? a.anchor.point[secondaryAxis] : 0);
+          const bs = Number(b.anchor && b.anchor.point ? b.anchor.point[secondaryAxis] : 0);
+          return as - bs;
+        });
+      }
+      function appendCapacityBatches(items, panel) {
+        const sorted = sortEquipmentByLayout(items);
+        let current = [];
+        let currentDiameter = 0;
+        sorted.forEach(function(item){
+          const diameter = Math.max(0, Number(item.cable_diameter_mm) || 0);
+          if (current.length && currentDiameter + diameter > maxCableDiameterSum + 0.001) {
+            batches.push({
+              equipment:current,
+              panel:panel,
+              panels:panel ? new Map([[panel.id,panel]]) : group.panels
+            });
+            current = [];
+            currentDiameter = 0;
+          }
+          current.push(item);
+          currentDiameter += diameter;
+        });
+        if (current.length) {
+          batches.push({
+            equipment:current,
+            panel:panel,
+            panels:panel ? new Map([[panel.id,panel]]) : group.panels
+          });
         }
-        current.push(item);
-        currentDiameter += diameter;
+      }
+
+      // Do not mix equipment for different panels into the same capacity
+      // batch. Every batch must route to its actual destination panel; otherwise
+      // the planner repeatedly tries to send loads from several panel locations
+      // through one primary panel corridor and creates duplicate/overlapping Main trays.
+      const itemsByPanel = new Map();
+      sourceEquipment.forEach(function(item){
+        const panelId = String(item.__engineering_panel || item.destination_panel_id || group.panel.id);
+        if (!itemsByPanel.has(panelId)) itemsByPanel.set(panelId, []);
+        itemsByPanel.get(panelId).push(item);
       });
-      if (current.length) batches.push(current);
+      itemsByPanel.forEach(function(items, panelId){
+        const destinationPanel = validPanels.get(panelId) || group.panel;
+        appendCapacityBatches(items, destinationPanel);
+      });
     }
 
-    batches.forEach(function(batch, batchIndex){
+    batches.forEach(function(batchRecord, batchIndex){
+      const batchPanel = batchRecord.panel || group.panel;
       routingGroups.push({
-        panel:group.panel,
-        panels:group.panels,
-        equipment:batch,
+        panel:batchPanel,
+        panels:batchRecord.panels || group.panels,
+        equipment:batchRecord.equipment,
         floor_zone:group.floor_zone,
         floor_id:group.floor_id,
         floor_name:group.floor_name,
         floor_base_y_mm:group.floor_base_y_mm,
         floor_min_y_mm:group.floor_min_y_mm,
         floor_max_y_mm:group.floor_max_y_mm,
-        network_id:String(group.floor_id || group.panel.id) + '::network-' + String(routingGroups.length + 1),
+        network_id:String(group.floor_id || batchPanel.id) + '::network-' + String(routingGroups.length + 1),
         source_batch_index:batchIndex
       });
     });
