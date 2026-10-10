@@ -4239,6 +4239,7 @@ export function routeEngineeringNetwork(inputs) {
 
   const cablePlans = [];
   const mainCorridors = [];
+  const occupiedMainCorridors = [];
 
   const routingGroups = [];
   const configuredWidths = (options.standardTrayWidthsMm || [])
@@ -4331,7 +4332,7 @@ export function routeEngineeringNetwork(inputs) {
         : null,
       centerlineClearanceMm:options.clearanceMm + planningTrayWidth / 2,
       routingTrayWidthMm:planningTrayWidth,
-      occupiedMainCorridors:mainCorridors.map(function(corridor){return {
+      occupiedMainCorridors:occupiedMainCorridors.map(function(corridor){return {
         network_id:corridor.network_id,
         points:(corridor.points||[]).map(clonePoint),
         width_mm:Number(corridor.width_mm)||100,
@@ -4600,6 +4601,23 @@ export function routeEngineeringNetwork(inputs) {
       panel_connection_points:Array.isArray(networkResult.panel_connection_points)
         ? networkResult.panel_connection_points.map(clonePoint)
         : []
+    });
+
+    // Derive occupied corridors from the actual Main Tray runs already
+    // classified in the accumulated output, not just the seed backbone. A
+    // multi-row network can contain more than one shared horizontal trunk.
+    const completedMainRuns=buildTrayRuns(cablePlans,options,mainCorridors).filter(function(run){
+      return run && run.classification==='main' && Array.isArray(run.points) && run.points.length>=2;
+    });
+    occupiedMainCorridors.length=0;
+    completedMainRuns.forEach(function(run){
+      occupiedMainCorridors.push({
+        network_id:run.network_id||null,
+        points:run.points.map(clonePoint),
+        width_mm:Number(run.width_mm)||100,
+        height_mm:Number(run.height_mm)||Number(options.trayHeightMm)||100,
+        main_level_y_mm:run.points.length?Number(run.points[0].y):NaN
+      });
     });
 
   });
