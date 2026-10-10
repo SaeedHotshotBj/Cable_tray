@@ -1267,8 +1267,8 @@ function segmentRecord(a, b, cableId, cableDiameter) {
   } else if (axis === 'y') {
     key = 'y|' + rounded(start.x) + '|' + rounded(start.z) + '|' + rounded(minPoint.y) + '|' + rounded(maxPoint.y);
   } else if (axis === 'xz') {
-    const slope = roundedTo((end.z - start.z) / (end.x - start.x), 4);
-    const intercept = roundedTo(start.z - slope * start.x, 1);
+    const slope = roundedTo((end.z - start.z) / (end.x - start.x), 5);
+    const intercept = roundedTo(start.z - slope * start.x, 0);
     key = 'xz|' + rounded(start.y) + '|' + slope + '|' + intercept + '|' + rounded(minPoint.x) + '|' + rounded(maxPoint.x);
   } else {
     key = 'z|' + rounded(start.x) + '|' + rounded(start.y) + '|' + rounded(minPoint.z) + '|' + rounded(maxPoint.z);
@@ -1438,8 +1438,8 @@ function buildTrayRuns(cablePlans, options, mainCorridors) {
       high = rounded(segment.maxPoint.y);
     } else if (segment.axis === 'xz') {
       fixed1 = rounded(segment.start.y);
-      fixed2 = roundedTo((segment.end.z - segment.start.z) / (segment.end.x - segment.start.x), 4);
-      fixed3 = roundedTo(segment.start.z - fixed2 * segment.start.x, 1);
+      fixed2 = roundedTo((segment.end.z - segment.start.z) / (segment.end.x - segment.start.x), 5);
+      fixed3 = roundedTo(segment.start.z - fixed2 * segment.start.x, 0);
       low = rounded(segment.minPoint.x);
       high = rounded(segment.maxPoint.x);
     } else {
@@ -1635,8 +1635,8 @@ function buildTrayRuns(cablePlans, options, mainCorridors) {
       fixed1 = rounded(segment.start.x);
       fixed2 = rounded(segment.start.z);
     } else if (segment.axis === 'xz') {
-      const slope = roundedTo((segment.end.z - segment.start.z) / (segment.end.x - segment.start.x), 4);
-      const intercept = roundedTo(segment.start.z - slope * segment.start.x, 1);
+      const slope = roundedTo((segment.end.z - segment.start.z) / (segment.end.x - segment.start.x), 5);
+      const intercept = roundedTo(segment.start.z - slope * segment.start.x, 0);
       fixed1 = rounded(segment.start.y);
       fixed2 = slope + '|' + intercept;
     } else {
@@ -2594,7 +2594,7 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
       if(atHigh)end=Math.max(end,Math.round(panelPrimary/step)*step+tail);
       else if(atLow)start=Math.min(start,Math.round(panelPrimary/step)*step-tail);
       const lineSpan=Math.max(0.001,end-start);
-      const requestedCrossShift=(panelSecondary-sec)*0.18;
+      const requestedCrossShift=(panelSecondary-sec)*0.215;
       const maxCrossShift=Math.tan(3*Math.PI/180)*lineSpan;
       const crossShift=Math.max(-maxCrossShift,Math.min(maxCrossShift,requestedCrossShift));
       if(atHigh){
