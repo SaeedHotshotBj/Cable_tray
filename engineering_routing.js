@@ -2803,10 +2803,18 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
       if(!secondaryCandidates.includes(v))secondaryCandidates.push(v);
     });
   });
-  secondaryCandidates.sort(function(a,b){
-    return Math.min.apply(Math,baseLevels.map(function(v){return Math.abs(a-v);}))-
-      Math.min.apply(Math,baseLevels.map(function(v){return Math.abs(b-v);}))||a-b;
-  });
+  if(hasOccupiedMains&&baseLevels.length){
+    const preferredLaneBase=Number(baseLevels[0]);
+    secondaryCandidates.sort(function(a,b){
+      return Math.abs(a-preferredLaneBase)-Math.abs(b-preferredLaneBase) ||
+        ((b-preferredLaneBase)*preferredCorridorSide)-((a-preferredLaneBase)*preferredCorridorSide);
+    });
+  }else{
+    secondaryCandidates.sort(function(a,b){
+      return Math.min.apply(Math,baseLevels.map(function(v){return Math.abs(a-v);}))-
+        Math.min.apply(Math,baseLevels.map(function(v){return Math.abs(b-v);}))||a-b;
+    });
+  }
   if(hasOccupiedMains){
     const sameSideCandidates=secondaryCandidates.filter(function(value){
       return (Number(value)-panelSecondary)*preferredCorridorSide > 0.001;
@@ -2870,6 +2878,38 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
         }
       }
       const physicalSpan=Math.max(0.001,physicalEndPrimary-physicalStartPrimary);
+      const mainCenterPrimary=atHigh
+        ? physicalStartPrimary
+        : (atLow ? physicalEndPrimary : (physicalStartPrimary+physicalEndPrimary)/2);
+      if(hasOccupiedMains&&baseLevels.length){
+        const panelLaneCoordinates=[];
+        occupiedCorridors.forEach(function(corridor){
+          const points=Array.isArray(corridor.points)?corridor.points:[];
+          if(points.length<2)return;
+          const a=points[0],b=points[points.length-1];
+          const ap=Number(a[primaryAxis]),bp=Number(b[primaryAxis]);
+          const av=Number(a[secondaryAxis]),bv=Number(b[secondaryAxis]);
+          if(![ap,bp,av,bv].every(Number.isFinite)||Math.abs(bp-ap)<0.001)return;
+          const atPanel=av+(bv-av)*(panelPrimary-ap)/(bp-ap);
+          if((atPanel-panelSecondary)*preferredCorridorSide>0.001)panelLaneCoordinates.push(atPanel);
+        });
+        if(panelLaneCoordinates.length){
+          const outermostAtPanel=preferredCorridorSide<0
+            ? Math.min.apply(Math,panelLaneCoordinates)
+            : Math.max.apply(Math,panelLaneCoordinates);
+          const laneStepAtPanel=outermostAtPanel+preferredCorridorSide*laneSpacing;
+          const candidateOffset=Number(sec)-Number(baseLevels[0]);
+          let calibratedSec=laneStepAtPanel+candidateOffset;
+          for(let iteration=0;iteration<4;iteration++){
+            const requested=(panelSecondary-calibratedSec)*0.215;
+            const maxShift=Math.tan(2.57*Math.PI/180)*physicalSpan;
+            const shift=Math.max(-maxShift,Math.min(maxShift,requested));
+            const slope=(atHigh?1:(atLow?-1:1))*shift/physicalSpan;
+            calibratedSec=laneStepAtPanel+candidateOffset-slope*(panelPrimary-mainCenterPrimary);
+          }
+          sec=calibratedSec;
+        }
+      }
       const requestedCrossShift=(panelSecondary-sec)*0.215;
       const maxCrossShift=Math.tan(2.57*Math.PI/180)*physicalSpan;
       const crossShift=Math.max(-maxCrossShift,Math.min(maxCrossShift,requestedCrossShift));
@@ -3044,7 +3084,7 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
         main_spine_points:[mainPoint(physicalStartPrimary,sec),mainPoint(physicalEndPrimary,sec)],
         panel_connection_points:panelConnectionPoints,
         parallel_main_corridor:true,main_corridor_axis:primaryAxis,
-        main_corridor_secondary_coordinate_mm:sec,
+        main_corridor_secondary_coordinate_mm:Number(mainPoint(panelPrimary,sec)[secondaryAxis]),
         score:length+turns*step*0.001};
     }
   }
