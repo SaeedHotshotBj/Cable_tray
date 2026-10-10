@@ -2824,7 +2824,7 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
   }
 
   for(let si=0;si<secondaryCandidates.length;si++){
-    const sec=secondaryCandidates[si];
+    let sec=secondaryCandidates[si];
     for(let ti=0;ti<tailOptions.length;ti++){
       const tail=tailOptions[ti];
       let start=Math.min(rawMin,Math.round(rawMin/step)*step),end=Math.max(rawMax,Math.round(rawMax/step)*step);
