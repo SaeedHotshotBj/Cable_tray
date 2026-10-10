@@ -1281,7 +1281,7 @@ async function runEngineeringAutoDesign() {
     traySideMarginMm:25,
     standardTrayWidthsMm:parseNumberList($('autoTrayStandards').value),
     floorZones:state.engineeringFloors.map(function(floor){ return JSON.parse(JSON.stringify(floor)); }),
-    floorLevelToleranceMm:Math.max(500, Number(state.engineeringSettings.floorLevelToleranceMm) || 1500),
+    floorLevelToleranceMm:Math.max(1500, Number(state.engineeringSettings.floorLevelToleranceMm) || 1500),
     verticalPenaltyRatio:0.02,
     verticalRangePenaltyRatio:0.25,
     reuseBonus:0.45,
@@ -1546,8 +1546,10 @@ function renderEngineeringTakeoff() {
   const cableRows = cableRoutes.map(function(route){
     const item = state.equipment.find(function(eq){ return eq.id === route.engineering_equipment_id; });
     const panel = route.engineering_panel_id ? panelMap.get(route.engineering_panel_id) : null;
+    const diameter = Number(route.diameter_mm);
     return '<tr><td>' + esc(item ? item.name : route.name) + '</td><td>' +
       esc(item ? item.cable_name : route.specification) + '</td><td>' +
+      (Number.isFinite(diameter) && diameter > 0 ? diameter.toFixed(1) : '-') + '</td><td>' +
       esc(panel ? panel.name : '-') + '</td><td>' +
       lengthOf(route.points).toFixed(2) + ' m</td></tr>';
   }).join('');
@@ -1585,7 +1587,7 @@ function renderEngineeringTakeoff() {
       '<div><span>Auto Tray</span><b>' + totalTray.toFixed(2) + ' m</b></div>' +
     '</div>' +
     (missingCount ? '<div class="property-hint">Unassigned loads: ' + missingCount + '</div>' : '') +
-    (cableRows ? '<div class="property-group-title">Cable Schedule</div><div class="table-wrap"><table><thead><tr><th>Load</th><th>Cable</th><th>Panel</th><th>Length</th></tr></thead><tbody>' + cableRows + '</tbody></table></div>' : '') +
+    (cableRows ? '<div class="property-group-title">Cable Schedule</div><div class="table-wrap"><table><thead><tr><th>Load</th><th>Cable</th><th>Ø mm</th><th>Panel</th><th>Length</th></tr></thead><tbody>' + cableRows + '</tbody></table></div>' : '') +
     (trayRows ? '<div class="property-group-title">Tray Schedule</div><div class="table-wrap"><table><thead><tr><th>Class</th><th>Size</th><th>Length</th></tr></thead><tbody>' + trayRows + '</tbody></table></div>' : '') +
     (!cableRows && !trayRows ? '<div class="hint">Press Auto Design Routing after assigning every load to a panel.</div>' : '');
 }
