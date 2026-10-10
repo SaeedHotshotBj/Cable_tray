@@ -3036,6 +3036,18 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
         const attachPrimary=Math.max(physicalStartPrimary,Math.min(physicalEndPrimary,rawAttachPrimary));
         let attach=mainPoint(attachPrimary,sec);
         let branch=dedupe([entry.start,plane,attach]);
+        if(!clearPath(branch,branchOptions)&&hasOccupiedMains&&panelLoopPivotPrimary!=null){
+          // Bypass existing Main ends along the equipment's routing row, then
+          // turn into this inward capacity lane beyond the occupied Main span.
+          const rowPivot=clonePoint(plane);
+          rowPivot[primaryAxis]=panelLoopPivotPrimary;
+          const mainPivot=mainPoint(panelLoopPivotPrimary,sec);
+          const detour=dedupe([entry.start,plane,rowPivot,mainPivot]);
+          if(clearPath(detour,branchOptions)&&tree.nodes.has(networkNodeKey(mainPivot))){
+            branch=detour;
+            attach=mainPivot;
+          }
+        }
         if(!clearPath(branch,branchOptions)){
           const horizontalOptions={
             ...branchOptions,
