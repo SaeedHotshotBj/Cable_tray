@@ -1326,13 +1326,29 @@ function buildTrayRuns(cablePlans, options, mainCorridors) {
     // The 1 m free-cable allowance applies only at the equipment end.
     // Keep the complete remaining cable path so the physical tray continues
     // through the shared network instead of stopping where branch_points end.
-    const trayPoints = Array.isArray(plan.points)
+    let trayPoints = Array.isArray(plan.points)
       ? trimBranchTrayStart(
           plan,
           plan.points,
           Math.max(0, Number(options.trayStopBeforeEquipmentMm) || 1000)
         )
       : [];
+
+    // For the dedicated parallel Main topology, draw only the physical
+    // equipment branch here. The shared Main and panel branch are added once
+    // from mainCorridors below; otherwise each cable duplicates the spine.
+    if (plan.parallel_main_corridor === true) {
+      const branchOnly = clipPolylineAtPoint(trayPoints, plan.routing_goal, 1);
+      if (branchOnly.length >= 2) {
+        const requestedGap = Math.max(100, Math.min(220, (Number(options.gridStepMm) || 100) * 1.5));
+        const availableLength = polylineLengthMm(branchOnly);
+        const gap = Math.min(requestedGap, Math.max(0, availableLength - 50));
+        trayPoints = gap > 0 ? shortenPolylineEnd(branchOnly, gap) : branchOnly;
+      } else {
+        trayPoints = [];
+      }
+    }
+
     const points = Array.isArray(trayPoints) && trayPoints.length >= 2
       ? trayPoints
       : [];
@@ -1409,6 +1425,22 @@ function buildTrayRuns(cablePlans, options, mainCorridors) {
       segment.main_corridor_eligible=true;segment.parallel_main_eligible=true;
       ids.forEach(function(cableId){segment.cableIds.add(cableId);segment.diameterByCable.set(cableId,Number(diameterByCableId.get(cableId))||0);});
       rawSegments.push(segment);
+    }
+
+    const panelPoints=Array.isArray(corridor.panel_connection_points)?corridor.panel_connection_points:[];
+    if(corridor.parallel_main_corridor===true&&panelPoints.length>=2){
+      for(let i=1;i<panelPoints.length;i++){
+        const id=ids[0],segment=segmentRecord(panelPoints[i-1],panelPoints[i],id,Number(diameterByCableId.get(id))||0);
+        if(!segment)continue;
+        segment.network_id=corridor.network_id||null;
+        segment.main_level_eligible=Number.isFinite(Number(corridor.main_level_y_mm))&&
+          Math.abs(segment.start.y-Number(corridor.main_level_y_mm))<0.001&&
+          Math.abs(segment.end.y-Number(corridor.main_level_y_mm))<0.001;
+        segment.main_corridor_eligible=false;
+        segment.parallel_main_eligible=false;
+        ids.forEach(function(cableId){segment.cableIds.add(cableId);segment.diameterByCable.set(cableId,Number(diameterByCableId.get(cableId))||0);});
+        rawSegments.push(segment);
+      }
     }
   });
 
@@ -1714,6 +1746,60 @@ function buildTrayRuns(cablePlans, options, mainCorridors) {
   // One engineering network uses one physical tray width. This deliberately
   // removes the need for any reducer/transition between branch and main runs.
   return stitchTrayRuns(runs);
+}
+
+function clipPolylineAtPoint(points, target, toleranceMm) {
+  const source = (points || []).map(clonePoint);
+  if (!target || source.length < 2) return [];
+  const tolerance = Math.max(0.01, Number(toleranceMm) || 1);
+  function distance(a,b) {
+    return Math.sqrt(
+      Math.pow(a.x-b.x,2) +
+      Math.pow(a.y-b.y,2) +
+      Math.pow(a.z-b.z,2)
+    );
+  }
+  const output = [];
+  for (let i=0;i<source.length;i++) {
+    const point = source[i];
+    output.push(point);
+    if (distance(point,target) <= tolerance) {
+      output[output.length-1] = clonePoint(target);
+      return output;
+    }
+    if (i+1 >= source.length) continue;
+    const next = source[i+1];
+    const dx=next.x-point.x,dy=next.y-point.y,dz=next.z-point.z;
+    const lengthSq=dx*dx+dy*dy+dz*dz;
+    if (lengthSq < 1e-9) continue;
+    const t=Math.max(0,Math.min(1,((target.x-point.x)*dx+(target.y-point.y)*dy+(target.z-point.z)*dz)/lengthSq));
+    const projection={x:point.x+dx*t,y:point.y+dy*t,z:point.z+dz*t};
+    if (distance(projection,target) <= tolerance) {
+      output.push(clonePoint(target));
+      return output;
+    }
+  }
+  return [];
+}
+
+function shortenPolylineEnd(points, distanceMm) {
+  const output = (points || []).map(clonePoint);
+  let remaining=Math.max(0,Number(distanceMm)||0);
+  while(output.length>=2&&remaining>0.001){
+    const last=output[output.length-1],previous=output[output.length-2];
+    const dx=last.x-previous.x,dy=last.y-previous.y,dz=last.z-previous.z;
+    const length=Math.sqrt(dx*dx+dy*dy+dz*dz);
+    if(length<0.001){output.pop();continue;}
+    if(length>remaining+0.001){
+      const ratio=(length-remaining)/length;
+      output[output.length-1]={x:previous.x+dx*ratio,y:previous.y+dy*ratio,z:previous.z+dz*ratio};
+      remaining=0;
+    }else{
+      remaining-=length;
+      output.pop();
+    }
+  }
+  return output;
 }
 
 function trimBranchTrayStart(plan, branchPoints, stopDistanceMm) {
@@ -2593,19 +2679,22 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
       let start=Math.min(rawMin,Math.round(rawMin/step)*step),end=Math.max(rawMax,Math.round(rawMax/step)*step);
       if(atHigh)end=Math.max(end,Math.round(panelPrimary/step)*step+tail);
       else if(atLow)start=Math.min(start,Math.round(panelPrimary/step)*step-tail);
-      const lineSpan=Math.max(0.001,end-start);
+      const physicalInset=Math.min(Math.max(150,step*1.5),Math.max(0,lineSpan*0.2));
+      const physicalStartPrimary=atHigh?start+physicalInset:start;
+      const physicalEndPrimary=atLow?end-physicalInset:end;
+      const physicalSpan=Math.max(0.001,physicalEndPrimary-physicalStartPrimary);
       const requestedCrossShift=(panelSecondary-sec)*0.215;
-      const maxCrossShift=Math.tan(3*Math.PI/180)*lineSpan;
+      const maxCrossShift=Math.tan(2.57*Math.PI/180)*physicalSpan;
       const crossShift=Math.max(-maxCrossShift,Math.min(maxCrossShift,requestedCrossShift));
       if(atHigh){
-        activeMainPrimaryCenter=start;
-        activeMainSlope=crossShift/lineSpan;
+        activeMainPrimaryCenter=physicalStartPrimary;
+        activeMainSlope=crossShift/physicalSpan;
       }else if(atLow){
-        activeMainPrimaryCenter=end;
-        activeMainSlope=-crossShift/lineSpan;
+        activeMainPrimaryCenter=physicalEndPrimary;
+        activeMainSlope=-crossShift/physicalSpan;
       }else{
-        activeMainPrimaryCenter=(start+end)/2;
-        activeMainSlope=crossShift/lineSpan;
+        activeMainPrimaryCenter=(physicalStartPrimary+physicalEndPrimary)/2;
+        activeMainSlope=crossShift/physicalSpan;
       }
       const coordsSet=new Set([start,end,panelPrimary]);terminal.forEach(function(v){coordsSet.add(v);});
       for(let v=Math.ceil(start/step)*step;v<end-0.001;v+=step)coordsSet.add(v);
@@ -2645,10 +2734,25 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
         plan.parallel_main_corridor=true;plan.main_corridor_axis=primaryAxis;plan.main_corridor_secondary_coordinate_mm=sec;plans.push(plan);
       }
       if(!valid||plans.length!==prepared.length)continue;
+      const panelConnectionLength=manhattanDistance3D(panelPoint,panelSpine);
+      const panelGap=Math.min(
+        Math.max(100,Math.min(220,step*1.5)),
+        Math.max(0,panelConnectionLength-50)
+      );
+      const panelConnectionEnd=panelConnectionLength>0.001
+        ? {
+            x:panelSpine.x+(panelPoint.x-panelSpine.x)*panelGap/panelConnectionLength,
+            y:panelSpine.y+(panelPoint.y-panelSpine.y)*panelGap/panelConnectionLength,
+            z:panelSpine.z+(panelPoint.z-panelSpine.z)*panelGap/panelConnectionLength
+          }
+        : clonePoint(panelSpine);
       const length=plans.reduce(function(s,p){return s+routeLengthMeters(p.points);},0);
       const turns=plans.reduce(function(s,p){return s+countPolylineTurns(p.points);},0);
       return {routingY,panelHighPoint:clonePoint(panelPoint),panelDrop:cleanDrop,cablePlans:plans,connectedCount:plans.length,
-        unresolved:[],networkNodes:Array.from(tree.nodes.values()).map(clonePoint),main_spine_points:spine.map(clonePoint),
+        unresolved:[],networkNodes:Array.from(tree.nodes.values()).map(clonePoint),
+        main_spine_points:[mainPoint(physicalStartPrimary,sec),mainPoint(physicalEndPrimary,sec)],
+        panel_connection_points:[clonePoint(panelPoint),panelConnectionEnd],
+        parallel_main_corridor:true,main_corridor_axis:primaryAxis,
         score:length+turns*step*0.001};
     }
   }
@@ -4333,7 +4437,11 @@ export function routeEngineeringNetwork(inputs) {
       points:Array.isArray(networkResult.main_spine_points) ? networkResult.main_spine_points.map(clonePoint) : [],
       network_nodes:networkResult.networkNodes || [],
       panel_drop_points:(networkResult.panelDrop.points || []).map(clonePoint),
-      main_level_y_mm:Number(networkResult.routingY)
+      main_level_y_mm:Number(networkResult.routingY),
+      parallel_main_corridor:networkResult.parallel_main_corridor===true,
+      panel_connection_points:Array.isArray(networkResult.panel_connection_points)
+        ? networkResult.panel_connection_points.map(clonePoint)
+        : []
     });
 
   });
