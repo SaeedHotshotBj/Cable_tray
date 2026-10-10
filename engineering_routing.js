@@ -1445,13 +1445,9 @@ function buildTrayRuns(cablePlans, options, mainCorridors) {
 
       segment.parallel_main_eligible =
         plan.parallel_main_corridor === true &&
-        (
-          plan.main_corridor_axis === segment.axis ||
-          (segment.axis === 'xz' && (plan.main_corridor_axis === 'x' || plan.main_corridor_axis === 'z'))
-        ) &&
+        plan.main_corridor_axis === segment.axis &&
         segment.main_level_eligible &&
         (
-          segment.axis === 'xz' ||
           !Number.isFinite(Number(plan.main_corridor_secondary_coordinate_mm)) ||
           Math.abs(
             Number(segment.start[plan.main_corridor_axis === 'x' ? 'z' : 'x']) -
@@ -1645,9 +1641,7 @@ function buildTrayRuns(cablePlans, options, mainCorridors) {
         plan.parallel_main_corridor === true;
     });
     const parallelAxis = planAxisForParallelMain(parallelPlan);
-    const corridorAxisEligible = !parallelAxis ||
-      segment.axis === parallelAxis ||
-      segment.axis === 'xz';
+    const corridorAxisEligible = !parallelAxis || segment.axis === parallelAxis;
 
     // Prefer the explicitly selected corridor, but also recognize a real
     // shared horizontal trunk when CAD anchor geometry prevents exact segment
