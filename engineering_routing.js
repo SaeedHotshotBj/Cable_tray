@@ -1222,6 +1222,8 @@ function segmentAxis(a, b) {
   const dx = Math.abs(b.x - a.x);
   const dy = Math.abs(b.y - a.y);
   const dz = Math.abs(b.z - a.z);
+  // Preserve a straight, slightly sloped Main Tray in the horizontal XZ plane.
+  if (dy < 0.001 && dx > 0.001 && dz > 0.001) return 'xz';
   if (dx >= dy && dx >= dz) return 'x';
   if (dy >= dx && dy >= dz) return 'y';
   return 'z';
@@ -1229,6 +1231,11 @@ function segmentAxis(a, b) {
 
 function rounded(value) {
   return Math.round(Number(value) * 100) / 100;
+}
+
+function roundedTo(value, decimalPlaces) {
+  const factor = Math.pow(10, Math.max(0, Number(decimalPlaces) || 0));
+  return Math.round(Number(value) * factor) / factor;
 }
 
 function segmentRecord(a, b, cableId, cableDiameter) {
@@ -1259,6 +1266,10 @@ function segmentRecord(a, b, cableId, cableDiameter) {
     key = 'x|' + rounded(start.y) + '|' + rounded(start.z) + '|' + rounded(minPoint.x) + '|' + rounded(maxPoint.x);
   } else if (axis === 'y') {
     key = 'y|' + rounded(start.x) + '|' + rounded(start.z) + '|' + rounded(minPoint.y) + '|' + rounded(maxPoint.y);
+  } else if (axis === 'xz') {
+    const slope = roundedTo((end.z - start.z) / (end.x - start.x), 4);
+    const intercept = roundedTo(start.z - slope * start.x, 1);
+    key = 'xz|' + rounded(start.y) + '|' + slope + '|' + intercept + '|' + rounded(minPoint.x) + '|' + rounded(maxPoint.x);
   } else {
     key = 'z|' + rounded(start.x) + '|' + rounded(start.y) + '|' + rounded(minPoint.z) + '|' + rounded(maxPoint.z);
   }
@@ -1367,9 +1378,13 @@ function buildTrayRuns(cablePlans, options, mainCorridors) {
 
       segment.parallel_main_eligible =
         plan.parallel_main_corridor === true &&
-        plan.main_corridor_axis === segment.axis &&
+        (
+          plan.main_corridor_axis === segment.axis ||
+          (segment.axis === 'xz' && (plan.main_corridor_axis === 'x' || plan.main_corridor_axis === 'z'))
+        ) &&
         segment.main_level_eligible &&
         (
+          segment.axis === 'xz' ||
           !Number.isFinite(Number(plan.main_corridor_secondary_coordinate_mm)) ||
           Math.abs(
             Number(segment.start[plan.main_corridor_axis === 'x' ? 'z' : 'x']) -
@@ -1410,6 +1425,7 @@ function buildTrayRuns(cablePlans, options, mainCorridors) {
     let low;
     let high;
 
+    let fixed3 = null;
     if (segment.axis === 'x') {
       fixed1 = rounded(segment.start.y);
       fixed2 = rounded(segment.start.z);
@@ -1420,6 +1436,12 @@ function buildTrayRuns(cablePlans, options, mainCorridors) {
       fixed2 = rounded(segment.start.z);
       low = rounded(segment.minPoint.y);
       high = rounded(segment.maxPoint.y);
+    } else if (segment.axis === 'xz') {
+      fixed1 = rounded(segment.start.y);
+      fixed2 = roundedTo((segment.end.z - segment.start.z) / (segment.end.x - segment.start.x), 4);
+      fixed3 = roundedTo(segment.start.z - fixed2 * segment.start.x, 1);
+      low = rounded(segment.minPoint.x);
+      high = rounded(segment.maxPoint.x);
     } else {
       fixed1 = rounded(segment.start.x);
       fixed2 = rounded(segment.start.y);
@@ -1432,13 +1454,15 @@ function buildTrayRuns(cablePlans, options, mainCorridors) {
       segment.network_id || '',
       segment.axis,
       fixed1,
-      fixed2
+      fixed2,
+      fixed3 == null ? '' : fixed3
     ].join('|');
     const line = collinearLines.get(lineKey) || {
       network_id:segment.network_id || null,
       axis:segment.axis,
       fixed1,
       fixed2,
+      fixed3,
       ranges:[]
     };
     line.ranges.push({low,high,segment});
@@ -1471,6 +1495,9 @@ function buildTrayRuns(cablePlans, options, mainCorridors) {
       } else if (line.axis === 'y') {
         start = {x:line.fixed1,y:low,z:line.fixed2};
         end = {x:line.fixed1,y:high,z:line.fixed2};
+      } else if (line.axis === 'xz') {
+        start = {x:low,y:line.fixed1,z:line.fixed2 * low + line.fixed3};
+        end = {x:high,y:line.fixed1,z:line.fixed2 * high + line.fixed3};
       } else {
         start = {x:line.fixed1,y:line.fixed2,z:low};
         end = {x:line.fixed1,y:line.fixed2,z:high};
@@ -1535,7 +1562,9 @@ function buildTrayRuns(cablePlans, options, mainCorridors) {
         plan.parallel_main_corridor === true;
     });
     const parallelAxis = planAxisForParallelMain(parallelPlan);
-    const corridorAxisEligible = !parallelAxis || segment.axis === parallelAxis;
+    const corridorAxisEligible = !parallelAxis ||
+      segment.axis === parallelAxis ||
+      segment.axis === 'xz';
 
     // Prefer the explicitly selected corridor, but also recognize a real
     // shared horizontal trunk when CAD anchor geometry prevents exact segment
@@ -1605,6 +1634,11 @@ function buildTrayRuns(cablePlans, options, mainCorridors) {
     } else if (segment.axis === 'y') {
       fixed1 = rounded(segment.start.x);
       fixed2 = rounded(segment.start.z);
+    } else if (segment.axis === 'xz') {
+      const slope = roundedTo((segment.end.z - segment.start.z) / (segment.end.x - segment.start.x), 4);
+      const intercept = roundedTo(segment.start.z - slope * segment.start.x, 1);
+      fixed1 = rounded(segment.start.y);
+      fixed2 = slope + '|' + intercept;
     } else {
       fixed1 = rounded(segment.start.x);
       fixed2 = rounded(segment.start.y);
@@ -1634,6 +1668,8 @@ function buildTrayRuns(cablePlans, options, mainCorridors) {
       classification:segment.classification,
       width_mm:segment.width_mm,
       height_mm:segment.height_mm,
+      lineSlope:segment.axis === 'xz' ? Number(String(fixed2).split('|')[0]) : null,
+      lineIntercept:segment.axis === 'xz' ? Number(String(fixed2).split('|')[1]) : null,
       cable_ids:[],
       ranges:[]
     };
@@ -1648,6 +1684,8 @@ function buildTrayRuns(cablePlans, options, mainCorridors) {
       low = segment.minPoint.x; high = segment.maxPoint.x;
     } else if (segment.axis === 'y') {
       low = segment.minPoint.y; high = segment.maxPoint.y;
+    } else if (segment.axis === 'xz') {
+      low = segment.minPoint.x; high = segment.maxPoint.x;
     } else {
       low = segment.minPoint.z; high = segment.maxPoint.z;
     }
@@ -1899,6 +1937,21 @@ function makeTrayRun(group, range) {
         {x:group.fixed1,y:range.high,z:group.fixed2}
       ],
       length_m:(range.high - range.low) / 1000
+    };
+  }
+  if (group.axis === 'xz') {
+    const points = [
+      {x:range.low,y:group.fixed1,z:group.lineSlope * range.low + group.lineIntercept},
+      {x:range.high,y:group.fixed1,z:group.lineSlope * range.high + group.lineIntercept}
+    ];
+    return {
+      network_id:group.network_id || null,
+      classification:group.classification,
+      width_mm:group.width_mm,
+      height_mm:group.height_mm,
+      cable_ids:cableIds,
+      points,
+      length_m:routeLengthMeters(points)
     };
   }
   return {
@@ -2452,6 +2505,8 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
   if(panelIds.size!==1||!panelIds.has(String(group.panel.id)))return null;
 
   const step=Math.max(50,Number(options.gridStepMm)||100);
+  let activeMainSlope=0;
+  let activeMainPrimaryCenter=0;
   let primaryAxis=options.structurePrimaryAxis==='x'||options.structurePrimaryAxis==='z'?options.structurePrimaryAxis:null;
   if(!primaryAxis){
     const xs=prepared.map(function(e){return Number(e.start.x);}),zs=prepared.map(function(e){return Number(e.start.z);});
@@ -2493,14 +2548,17 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
     }
     return segmentClearForRouting(a,b,obstacles,adjusted);
   }
-  function mainPoint(p,s){return primaryAxis==='x'?{x:p,y:routingY,z:s}:{x:s,y:routingY,z:p};}
+  function mainPoint(p,s){
+    const cross=Number(s)+activeMainSlope*(Number(p)-activeMainPrimaryCenter);
+    return primaryAxis==='x'?{x:Number(p),y:routingY,z:cross}:{x:cross,y:routingY,z:Number(p)};
+  }
   function dedupe(points){
     const out=[];(points||[]).forEach(function(p){if(!p)return;const q=clonePoint(p),v=out[out.length-1];
       if(v&&Math.abs(v.x-q.x)<0.001&&Math.abs(v.y-q.y)<0.001&&Math.abs(v.z-q.z)<0.001)return;out.push(q);});return out;
   }
   function clearPath(points,opts){for(let i=1;i<points.length;i++)if(!directionalClear(points[i-1],points[i],opts))return false;return true;}
 
-  const panelPoint=pointAtRoutingY(panelStandoff.point,routingY),panelPrimary=Number(panelStandoff.point[primaryAxis]);
+  const panelPoint=pointAtRoutingY(panelStandoff.point,routingY),panelPrimary=Number(panelStandoff.point[primaryAxis]),panelSecondary=Number(panelStandoff.point[secondaryAxis]);
   const terminal=prepared.map(function(e){return Number(e.start[primaryAxis]);}).concat([panelPrimary]);
   const rawMin=Math.min.apply(Math,terminal),rawMax=Math.max.apply(Math,terminal);
   const loadMin=Math.min.apply(Math,prepared.map(function(e){return Number(e.start[primaryAxis]);}));
@@ -2508,7 +2566,12 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
   const atHigh=panelPrimary>=loadMax-step*0.5,atLow=panelPrimary<=loadMin+step*0.5;
   const overrun=Math.max(500,step),tailOptions=Array.from(new Set([overrun,Math.min(overrun,400),Math.min(overrun,300),Math.min(overrun,200),Math.min(overrun,100),0]));
   const minSec=Math.min.apply(Math,secondaryValues),maxSec=Math.max.apply(Math,secondaryValues),baseLevels=[];
-  candidates.forEach(function(c){const value=Math.round(Number(c.secondary)/step)*step;if(Number.isFinite(value)&&!baseLevels.includes(value))baseLevels.push(value);});
+  candidates.forEach(function(c){
+    const raw=Number(c.secondary);
+    const direction=panelSecondary>=raw?1:-1;
+    const value=raw-direction*Math.min(20,step*0.1);
+    if(Number.isFinite(value)&&!baseLevels.some(function(existing){return Math.abs(existing-value)<0.001;}))baseLevels.push(value);
+  });
   const secondaryCandidates=[];
   baseLevels.forEach(function(base){
     if(!secondaryCandidates.includes(base))secondaryCandidates.push(base);
@@ -2530,6 +2593,20 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
       let start=Math.min(rawMin,Math.round(rawMin/step)*step),end=Math.max(rawMax,Math.round(rawMax/step)*step);
       if(atHigh)end=Math.max(end,Math.round(panelPrimary/step)*step+tail);
       else if(atLow)start=Math.min(start,Math.round(panelPrimary/step)*step-tail);
+      const lineSpan=Math.max(0.001,end-start);
+      const requestedCrossShift=(panelSecondary-sec)*0.18;
+      const maxCrossShift=Math.tan(3*Math.PI/180)*lineSpan;
+      const crossShift=Math.max(-maxCrossShift,Math.min(maxCrossShift,requestedCrossShift));
+      if(atHigh){
+        activeMainPrimaryCenter=start;
+        activeMainSlope=crossShift/lineSpan;
+      }else if(atLow){
+        activeMainPrimaryCenter=end;
+        activeMainSlope=-crossShift/lineSpan;
+      }else{
+        activeMainPrimaryCenter=(start+end)/2;
+        activeMainSlope=crossShift/lineSpan;
+      }
       const coordsSet=new Set([start,end,panelPrimary]);terminal.forEach(function(v){coordsSet.add(v);});
       for(let v=Math.ceil(start/step)*step;v<end-0.001;v+=step)coordsSet.add(v);
       const coords=Array.from(coordsSet).filter(Number.isFinite).filter(function(v){return v>=start-0.001&&v<=end+0.001;}).sort(function(a,b){return a-b;});
