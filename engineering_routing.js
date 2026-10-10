@@ -1401,13 +1401,26 @@ function buildTrayRuns(cablePlans, options, mainCorridors) {
     const parallelAxis = planAxisForParallelMain(parallelPlan);
     const corridorAxisEligible = !parallelAxis || segment.axis === parallelAxis;
 
-    // Only the explicitly selected shared corridor is the physical Main
-    // Tray. Any other shared path is a branch/common panel connection, even
-    // when multiple cables happen to use it. This guarantees one canonical
-    // Main body per engineering network instead of multiple parallel Mains.
+    // Prefer the explicitly selected corridor, but also recognize a real
+    // shared horizontal trunk when CAD anchor geometry prevents exact segment
+    // keys from matching. Short panel stubs must never become Main Tray runs.
+    const sharedMainMinimumLength = Math.max(
+      Math.max(1, Number(options.gridStepMm) || 100) * 3,
+      300
+    );
+    const sharedHorizontalTrunkEligible =
+      segment.cableIds.size >= mainMinCables &&
+      segment.main_level_eligible &&
+      corridorAxisEligible &&
+      segment.length + 0.001 >= sharedMainMinimumLength &&
+      (options.structurePrimaryAxis === 'x' || options.structurePrimaryAxis === 'z'
+        ? segment.axis === options.structurePrimaryAxis
+        : segment.axis === 'x' || segment.axis === 'z');
+
     const classification = (
       segment.main_corridor_eligible ||
-      segment.parallel_main_eligible
+      segment.parallel_main_eligible ||
+      sharedHorizontalTrunkEligible
     ) ? 'main' : 'branch';
 
     const networkWidthId = segment.network_id || panelId;
@@ -3646,14 +3659,24 @@ function clusterEquipmentFloorLevels(equipment, toleranceMm) {
   return clusters;
 }
 
+function floorZoneBoundsOverlap(a, b) {
+  if (!a || !b) return false;
+  return a.min_x_mm <= b.max_x_mm &&
+    a.max_x_mm >= b.min_x_mm &&
+    a.min_z_mm <= b.max_z_mm &&
+    a.max_z_mm >= b.min_z_mm;
+}
+
 function resolveEquipmentFloorZone(item, floorZones) {
   if (!item || !item.anchor || !item.anchor.point || !floorZones.length) return null;
 
   const y = Number(item.anchor.point.y);
+  // Equipment anchors sit on equipment bodies, not necessarily on the floor
+  // plane. The four-point zone defines a footprint; when floors overlap in
+  // plan, choose the nearest floor elevation rather than imposing a fixed
+  // 1000 mm vertical cutoff.
   const candidates = floorZones.filter(function(zone){
-    if (!floorZoneContainsPoint(zone, item.anchor.point)) return false;
-    return Math.abs(y - Number(zone.base_y_mm)) <=
-      Math.max(50, Number(zone.height_tolerance_mm) || 1000);
+    return floorZoneContainsPoint(zone, item.anchor.point);
   });
 
   candidates.sort(function(a,b){
@@ -3784,7 +3807,9 @@ export function routeEngineeringNetwork(inputs) {
     ceilingY:Number.isFinite(Number(inputs && inputs.options && inputs.options.ceilingY))
       ? Number(inputs.options.ceilingY)
       : null,
-    ceilingSafetyGapMm:Number(inputs && inputs.options && inputs.options.ceilingSafetyGapMm) || 50,
+    ceilingSafetyGapMm:Number.isFinite(Number(inputs && inputs.options && inputs.options.ceilingSafetyGapMm))
+      ? Math.max(0, Number(inputs.options.ceilingSafetyGapMm))
+      : 50,
     routingBounds:inputs && inputs.options && inputs.options.routingBounds
       ? { ...inputs.options.routingBounds }
       : null,
@@ -3821,7 +3846,7 @@ export function routeEngineeringNetwork(inputs) {
       : [],
     floorLevelToleranceMm:Number.isFinite(Number(inputs && inputs.options && inputs.options.floorLevelToleranceMm))
       ? Number(inputs.options.floorLevelToleranceMm)
-      : 500,
+      : 1500,
     segmentClear:inputs && inputs.options && typeof inputs.options.segmentClear === 'function'
       ? inputs.options.segmentClear
       : null,
@@ -3913,14 +3938,36 @@ export function routeEngineeringNetwork(inputs) {
       ? Number(options.routingBounds.maxY)
       : Number(options.ceilingY);
 
-    const floorMinY = previous
+    let floorMinY = previous
       ? (previous.meanY + item.meanY) * 0.5
       : globalMinY;
-    const floorMaxY = next
+    let floorMaxY = next
       ? (item.meanY + next.meanY) * 0.5
       : globalMaxY;
 
-    item.group.floor_base_y_mm = item.meanY;
+    if (item.group.floor_zone) {
+      const zone = item.group.floor_zone;
+      const higherOverlappingZones = normalizedFloorZones.filter(function(other){
+        return String(other.id) !== String(zone.id) &&
+          Number(other.base_y_mm) > Number(zone.base_y_mm) + 50 &&
+          floorZoneBoundsOverlap(zone, other);
+      }).sort(function(a,b){
+        return Number(a.base_y_mm) - Number(b.base_y_mm);
+      });
+
+      // A higher overlapping floor defines the ceiling boundary for the
+      // current floor. Using the midpoint between floors kept the Main Tray
+      // unnecessarily low and made ceiling-gap settings ineffective.
+      floorMinY = Number(zone.base_y_mm);
+      floorMaxY = higherOverlappingZones.length
+        ? Number(higherOverlappingZones[0].base_y_mm)
+        : globalMaxY;
+    }
+
+    item.group.floor_base_y_mm = item.group.floor_zone &&
+      Number.isFinite(Number(item.group.floor_zone.base_y_mm))
+      ? Number(item.group.floor_zone.base_y_mm)
+      : item.meanY;
     item.group.floor_min_y_mm = floorMinY;
     item.group.floor_max_y_mm = floorMaxY;
   });
