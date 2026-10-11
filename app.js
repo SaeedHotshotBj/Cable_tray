@@ -2856,12 +2856,32 @@ function applyEngineeringFloorHoleCutouts() {
       .sort(function(a,b){return Math.abs(a.point.y*10-hole.y)-Math.abs(b.point.y*10-hole.y);});
     if(!nearby.length){misses.push(hole);return;}
     const topHit=nearby[0],topYmm=topHit.point.y*10;
-    const lowerHits=hits.filter(function(hit){
-      const yMm=hit.point.y*10;return yMm<topYmm-0.5&&topYmm-yMm<=300;
-    }).sort(function(a,b){return (topYmm-a.point.y*10)-(topYmm-b.point.y*10);});
-    const measuredThickness=lowerHits.length?topYmm-lowerHits[0].point.y*10:0;
-    const depthMm=Math.max(20,Math.min(500,Math.max(hole.depth_mm,measuredThickness+10)));
-    const entry={x:hole.x,z:hole.z,centerYmm:topYmm-depthMm/2+0.5,depthMm,diameterMm:hole.diameter_mm,topYmm};
+
+    // Probe upward from below the slab. A downward ray usually sees only the
+    // upper face of a closed CAD solid, so looking for a lower hit on the same
+    // downward ray is insufficient to measure floor thickness.
+    const undersideProbeDepthMm=Math.max(1000,hole.depth_mm+500);
+    ray.set(
+      new THREE.Vector3(mmToScene(hole.x),mmToScene(topYmm-undersideProbeDepthMm),mmToScene(hole.z)),
+      new THREE.Vector3(0,1,0)
+    );
+    const undersideHits=ray.intersectObject(topHit.object,false).filter(function(hit){
+      const yMm=hit.point.y*10;
+      return yMm<topYmm-0.5&&topYmm-yMm<=Math.min(1000,undersideProbeDepthMm-1);
+    }).sort(function(a,b){return b.point.y-a.point.y;});
+    const measuredThickness=undersideHits.length?topYmm-undersideHits[0].point.y*10:0;
+
+    // When both faces are present, extend 5 mm beyond each face so the bore
+    // passes fully through the slab. Thin/open surface meshes use the saved
+    // minimum depth as a conservative fallback.
+    const hasMeasuredUnderside=Number.isFinite(measuredThickness)&&measuredThickness>0.5;
+    const depthMm=hasMeasuredUnderside
+      ? Math.max(20,measuredThickness+10)
+      : Math.max(20,Math.min(1000,hole.depth_mm));
+    const centerYmm=hasMeasuredUnderside
+      ? topYmm-measuredThickness/2
+      : topYmm-depthMm/2+0.5;
+    const entry={x:hole.x,z:hole.z,centerYmm,depthMm,diameterMm:hole.diameter_mm,topYmm,measuredThickness:hasMeasuredUnderside?measuredThickness:null};
     const list=holesByMesh.get(topHit.object)||[];
     if(!list.some(function(existing){
       return Math.hypot(existing.x-entry.x,existing.z-entry.z)<Math.max(existing.diameterMm,entry.diameterMm)*0.25&&Math.abs(existing.topYmm-entry.topYmm)<2;
