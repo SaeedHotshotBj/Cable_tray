@@ -4754,8 +4754,8 @@ function buildOutsideEscapeNetwork(equipment,panels,obstacles,options){
   const runs=buildTrayRuns(plans,options,corridors);
   const summary=buildTraySummary(runs);
   const results=buildEquipmentResults(plans,runs);
-  const totalCable=plans.reduce(function(sum,p){return sum+routeLengthMeters(p.points),0);
-  const totalTray=runs.reduce(function(sum,r){return sum+r.length_m,0);
+  const totalCable=plans.reduce(function(sum,p){return sum+routeLengthMeters(p.points);},0);
+  const totalTray=runs.reduce(function(sum,r){return sum+r.length_m;},0);
   if(plans.length)warnings.push('Approved outside routing uses an obstacle-checked perimeter route below the panel. If no collision-free route exists, that equipment is left unresolved instead of receiving a tray through an obstacle.');
   return {
     cable_plans:plans,tray_runs:runs,main_corridors:corridors.filter(function(c){
