@@ -2743,7 +2743,7 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
     : 0;
   const laneSpacing=hasOccupiedMains
     ? Math.max(step,Math.ceil((((Number(routeOptions.routingTrayWidthMm)||100)+occupiedMainWidth)/2+
-        Math.max(0,Number(options.clearanceMm)||0)+step*0.5)/step)*step)
+        Math.max(0,Number(options.clearanceMm)||0))/step)*step)
     : step;
   const boundsForLanes=hasOccupiedMains
     ? normalizeRoutingBounds(routeOptions.routingBounds,routeOptions)
@@ -2910,20 +2910,32 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
           const laneStepAtPanel=innermostAtPanel-preferredCorridorSide*laneSpacing;
           const candidateOffset=Number(sec)-Number(baseLevels[0]);
           let calibratedSec=laneStepAtPanel+candidateOffset;
-          for(let iteration=0;iteration<4;iteration++){
-            const requested=(panelSecondary-calibratedSec)*0.215;
-            const maxShift=Math.tan(2.57*Math.PI/180)*physicalSpan;
-            const shift=Math.max(-maxShift,Math.min(maxShift,requested));
-            const slope=(atHigh?1:(atLow?-1:1))*shift/physicalSpan;
-            calibratedSec=laneStepAtPanel+candidateOffset-slope*(panelPrimary-mainCenterPrimary);
+          if(Number(group.source_row_batch_count)>1){
+            // Capacity-split lanes must remain parallel and equally spaced
+            // along their full length. A different slope per lane makes
+            // otherwise-safe lanes converge near the panel and collide.
+            sec=calibratedSec;
+            activeMainSlope=0;
+            activeMainPrimaryCenter=mainCenterPrimary;
+          }else{
+            for(let iteration=0;iteration<4;iteration++){
+              const requested=(panelSecondary-calibratedSec)*0.215;
+              const maxShift=Math.tan(2.57*Math.PI/180)*physicalSpan;
+              const shift=Math.max(-maxShift,Math.min(maxShift,requested));
+              const slope=(atHigh?1:(atLow?-1:1))*shift/physicalSpan;
+              calibratedSec=laneStepAtPanel+candidateOffset-slope*(panelPrimary-mainCenterPrimary);
+            }
+            sec=calibratedSec;
           }
-          sec=calibratedSec;
         }
       }
       const requestedCrossShift=(panelSecondary-sec)*0.215;
       const maxCrossShift=Math.tan(2.57*Math.PI/180)*physicalSpan;
       const crossShift=Math.max(-maxCrossShift,Math.min(maxCrossShift,requestedCrossShift));
-      if(atHigh){
+      if(Number(group.source_row_batch_count)>1){
+        activeMainPrimaryCenter=mainCenterPrimary;
+        activeMainSlope=0;
+      }else if(atHigh){
         activeMainPrimaryCenter=physicalStartPrimary;
         activeMainSlope=crossShift/physicalSpan;
       }else if(atLow){
