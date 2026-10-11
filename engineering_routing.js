@@ -4523,13 +4523,6 @@ function buildOutsideEscapeNetwork(equipment,panels,obstacles,options){
   const minimumMainCables=Math.max(2,Number(options.mainMinCables)||2);
   const plans=[],corridors=[];
 
-  function median(values){
-    const sorted=values.filter(Number.isFinite).slice().sort(function(a,b){return a-b;});
-    if(!sorted.length)return 0;
-    const mid=Math.floor(sorted.length/2);
-    return sorted.length%2?sorted[mid]:(sorted[mid-1]+sorted[mid])/2;
-  }
-
   function samePoint(a,b){
     return Math.abs(a.x-b.x)<0.001&&Math.abs(a.y-b.y)<0.001&&Math.abs(a.z-b.z)<0.001;
   }
