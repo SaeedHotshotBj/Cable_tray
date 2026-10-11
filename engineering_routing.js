@@ -122,6 +122,32 @@ function adaptGridStep3D(start, goal, obstacles, baseStep, maxCells, paddingMm, 
   };
 }
 
+function adaptGridStepFixedY3D(start,goal,obstacles,baseStep,maxCells,paddingMm,extraPoints){
+  let step=Math.max(50,Number(baseStep)||250);
+  for(let attempt=0;attempt<8;attempt++){
+    const fullBounds=normalizeBounds3D(start,goal,obstacles,step,paddingMm,extraPoints);
+    const width=fullBounds.maxIx-fullBounds.minIx+1,depth=fullBounds.maxIz-fullBounds.minIz+1;
+    if(width*depth<=maxCells)return {step,bounds:{...fullBounds,minIy:0,maxIy:0}};
+    const scale=Math.sqrt((width*depth)/maxCells);
+    step=Math.max(step+50,Math.ceil(step*scale/50)*50);
+  }
+  const fullBounds=normalizeBounds3D(start,goal,obstacles,step,paddingMm,extraPoints);
+  return {step,bounds:{...fullBounds,minIy:0,maxIy:0}};
+}
+function buildBlockedSetFixedY3D(obstacles,step,bounds,clearanceMm,useAabbObstacles,fixedY){
+  const blocked=new Set();if(useAabbObstacles===false)return blocked;
+  const effectiveClearance=Math.max(0,Number(clearanceMm)||0)+step*0.55;
+  (obstacles||[]).forEach(function(rect){
+    const minY=Number(rect.minY),maxY=Number(rect.maxY);
+    if(!Number.isFinite(minY)||!Number.isFinite(maxY)||fixedY<minY-effectiveClearance||fixedY>maxY+effectiveClearance)return;
+    const minX=Number(rect.minX)-effectiveClearance,maxX=Number(rect.maxX)+effectiveClearance;
+    const minZ=Number(rect.minZ)-effectiveClearance,maxZ=Number(rect.maxZ)+effectiveClearance;
+    const ix0=Math.max(bounds.minIx,Math.ceil(minX/step)),ix1=Math.min(bounds.maxIx,Math.floor(maxX/step));
+    const iz0=Math.max(bounds.minIz,Math.ceil(minZ/step)),iz1=Math.min(bounds.maxIz,Math.floor(maxZ/step));
+    for(let ix=ix0;ix<=ix1;ix++)for(let iz=iz0;iz<=iz1;iz++)blocked.add(pointKey3D(ix,0,iz));
+  });
+  return blocked;
+}
 function buildBlockedSet3D(obstacles, step, bounds, clearanceMm, useAabbObstacles) {
   const blocked = new Set();
   if (useAabbObstacles === false) return blocked;
@@ -358,13 +384,7 @@ function bridgePath3D(from, to, obstacles, options) {
 
 function findBridgeCell(point, otherPoint, blocked, bounds, step, obstacles, options) {
   const hasFixedRoutingY = Number.isFinite(Number(options.fixedRoutingY));
-  const center = {
-    ix:Math.round(point.x / step),
-    iy:hasFixedRoutingY
-      ? Math.round(Number(options.fixedRoutingY) / step)
-      : Math.round(point.y / step),
-    iz:Math.round(point.z / step)
-  };
+  const center={ix:Math.round(point.x/step),iy:hasFixedRoutingY?0:Math.round(point.y/step),iz:Math.round(point.z/step)};
 
   const candidates = [];
   for (let dx = -1; dx <= 1; dx++) {
@@ -376,7 +396,7 @@ function findBridgeCell(point, otherPoint, blocked, bounds, step, obstacles, opt
         if (!cellInsideBounds3D(ix, iy, iz, bounds)) continue;
         if (blocked.has(pointKey3D(ix, iy, iz))) continue;
 
-        const target = {x:ix*step,y:iy*step,z:iz*step};
+        const target={x:ix*step,y:hasFixedRoutingY?Number(options.fixedRoutingY):iy*step,z:iz*step};
         if (
           Number.isFinite(Number(options.fixedRoutingY)) &&
           Math.abs(target.y - Number(options.fixedRoutingY)) > 0.001
@@ -826,25 +846,15 @@ function findGridPath3D(start, goal, obstacles, options, reuseCells) {
   const baseStep = Math.max(50, Number(options.gridStepMm) || 250);
   const paddingMm = Math.max(baseStep * 4, Number(options.routingPaddingMm) || 1000);
   const maxCells = Math.max(10000, Number(options.maxGridCells) || 120000);
-  const adapted = adaptGridStep3D(
-    start,
-    goal,
-    obstacles,
-    baseStep,
-    maxCells,
-    paddingMm,
-    networkMode ? networkGoalPoints : null
-  );
-  const step = adapted.step;
-  const bounds = adapted.bounds;
-
-  const blocked = buildBlockedSet3D(
-    obstacles,
-    step,
-    bounds,
-    Number(options.centerlineClearanceMm) || Number(options.clearanceMm) || 0,
-    options.exactCollisionRouting !== true
-  );
+  const fixedRoutingPlane=options&&options.fixedRoutingY!=null&&Number.isFinite(Number(options.fixedRoutingY));
+  const fixedRoutingY=fixedRoutingPlane?Number(options.fixedRoutingY):null;
+  const adapted=fixedRoutingPlane
+    ? adaptGridStepFixedY3D(start,goal,obstacles,baseStep,maxCells,paddingMm,networkMode?networkGoalPoints:null)
+    : adaptGridStep3D(start,goal,obstacles,baseStep,maxCells,paddingMm,networkMode?networkGoalPoints:null);
+  const step=adapted.step,bounds=adapted.bounds;
+  const blocked=fixedRoutingPlane
+    ? buildBlockedSetFixedY3D(obstacles,step,bounds,Number(options.centerlineClearanceMm)||Number(options.clearanceMm)||0,options.exactCollisionRouting!==true,fixedRoutingY)
+    : buildBlockedSet3D(obstacles,step,bounds,Number(options.centerlineClearanceMm)||Number(options.clearanceMm)||0,options.exactCollisionRouting!==true);
 
   const startBridge = findBridgeCell(
     start, goal, blocked, bounds, step, obstacles, options
@@ -857,10 +867,9 @@ function findGridPath3D(start, goal, obstacles, options, reuseCells) {
 
   if (networkMode) {
     networkBounds = networkBounds3D(networkGoalPoints);
-    networkGoalPoints.forEach(function(point) {
-      const ix = Math.round(point.x / step);
-      const iy = Math.round(point.y / step);
-      const iz = Math.round(point.z / step);
+    networkGoalPoints.forEach(function(point){
+      if(fixedRoutingPlane&&Math.abs(Number(point.y)-fixedRoutingY)>0.001)return;
+      const ix=Math.round(point.x/step),iy=fixedRoutingPlane?0:Math.round(point.y/step),iz=Math.round(point.z/step);
       for (let dx = -1; dx <= 1; dx++) {
         for (let dz = -1; dz <= 1; dz++) {
           const key = pointKey3D(ix + dx, iy, iz + dz);
@@ -940,18 +949,10 @@ function findGridPath3D(start, goal, obstacles, options, reuseCells) {
   const startState = makeCell3D(startCell.ix, startCell.iy, startCell.iz, -1);
   const startKey = cellKey3D(startState);
   gScore.set(startKey, 0);
-  open.push({
-    ix:startState.ix, iy:startState.iy, iz:startState.iz, dir:-1, g:0,
-    f:networkMode
-      ? manhattanDistanceToBounds3D(
-          {x:startCell.ix*step,y:startCell.iy*step,z:startCell.iz*step},
-          networkBounds
-        )
-      : manhattanDistance3D(
-          {x:startCell.ix*step,y:startCell.iy*step,z:startCell.iz*step},
-          {x:goalCell.ix*step,y:goalCell.iy*step,z:goalCell.iz*step}
-        )
-  });
+  const startGridPoint={x:startCell.ix*step,y:fixedRoutingPlane?fixedRoutingY:startCell.iy*step,z:startCell.iz*step};
+  open.push({ix:startState.ix,iy:startState.iy,iz:startState.iz,dir:-1,g:0,
+    f:networkMode?manhattanDistanceToBounds3D(startGridPoint,networkBounds):
+      manhattanDistance3D(startGridPoint,{x:goalCell.ix*step,y:fixedRoutingPlane?fixedRoutingY:goalCell.iy*step,z:goalCell.iz*step})});
 
   const directions = [
     {x:1,y:0,z:0,dir:0},
@@ -1002,16 +1003,8 @@ function findGridPath3D(start, goal, obstacles, options, reuseCells) {
       const nextKey3d = pointKey3D(nx, ny, nz);
       if (blocked.has(nextKey3d)) continue;
 
-      const currentPoint = {
-        x:current.ix * step,
-        y:current.iy * step,
-        z:current.iz * step
-      };
-      const nextPoint = {
-        x:nx * step,
-        y:ny * step,
-        z:nz * step
-      };
+      const currentPoint={x:current.ix*step,y:fixedRoutingPlane?fixedRoutingY:current.iy*step,z:current.iz*step};
+      const nextPoint={x:nx*step,y:fixedRoutingPlane?fixedRoutingY:ny*step,z:nz*step};
       if (!segmentClearForRouting(currentPoint, nextPoint, obstacles, options)) continue;
 
       const next = makeCell3D(nx, ny, nz, stepDir.dir);
@@ -1021,8 +1014,8 @@ function findGridPath3D(start, goal, obstacles, options, reuseCells) {
       let moveCost = step;
       if (stepDir.dir === 1 || stepDir.dir === 4) moveCost += verticalPenalty;
 
-      const currentWorldY = current.iy * step;
-      const nextWorldY = ny * step;
+      const currentWorldY=fixedRoutingPlane?fixedRoutingY:current.iy*step;
+      const nextWorldY=fixedRoutingPlane?fixedRoutingY:ny*step;
       const lowY = Math.min(start.y, goal.y);
       const highY = Math.max(start.y, goal.y);
       const outsideY = nextWorldY < lowY
@@ -1061,14 +1054,8 @@ function findGridPath3D(start, goal, obstacles, options, reuseCells) {
       );
 
       const heuristic = networkMode
-        ? manhattanDistanceToBounds3D(
-            {x:nx*step,y:ny*step,z:nz*step},
-            networkBounds
-          )
-        : manhattanDistance3D(
-            {x:nx*step,y:ny*step,z:nz*step},
-            {x:goalCell.ix*step,y:goalCell.iy*step,z:goalCell.iz*step}
-          );
+        ? manhattanDistanceToBounds3D({x:nx*step,y:fixedRoutingPlane?fixedRoutingY:ny*step,z:nz*step},networkBounds)
+        : manhattanDistance3D({x:nx*step,y:fixedRoutingPlane?fixedRoutingY:ny*step,z:nz*step},{x:goalCell.ix*step,y:fixedRoutingPlane?fixedRoutingY:goalCell.iy*step,z:goalCell.iz*step});
       open.push({
         ix:nx, iy:ny, iz:nz, dir:stepDir.dir,
         g:tentative,
@@ -1102,13 +1089,7 @@ function findGridPath3D(start, goal, obstacles, options, reuseCells) {
   }
 
   const cells = reconstructPath3D(cameFrom, goalState);
-  const gridPoints = cells.map(function(cell) {
-    return {
-      x:cell.ix * step,
-      y:cell.iy * step,
-      z:cell.iz * step
-    };
-  });
+  const gridPoints=cells.map(function(cell){return {x:cell.ix*step,y:fixedRoutingPlane?fixedRoutingY:cell.iy*step,z:cell.iz*step};});
 
   const points = [];
   startBridge.bridge.forEach(function(point){ points.push(point); });
@@ -2173,9 +2154,16 @@ function buildEquipmentResults(cablePlans, trayRuns) {
 }
 
 function polylineLengthMm(points) {
-  let total = 0;
-  for (let i = 1; i < points.length; i++) total += manhattanDistance3D(points[i - 1], points[i]);
+  let total=0;
+  for(let i=1;i<points.length;i++)total+=manhattanDistance3D(points[i-1],points[i]);
   return total;
+}
+function physicalTrayLengthAtY(points,routingY) {
+  let total=0;if(!Array.isArray(points))return total;
+  for(let i=1;i<points.length;i++){const a=points[i-1],b=points[i];
+    if(Math.abs(Number(a.y)-routingY)>0.001||Math.abs(Number(b.y)-routingY)>0.001)continue;
+    total+=manhattanDistance3D(a,b);
+  }return total;
 }
 
 function countPolylineTurns(points) {
@@ -2368,19 +2356,9 @@ function resolveNetworkRoutingLevels(panelPoint, options, levelLimit) {
     bounds ? bounds.maxY : ceilingY,
     Number.isFinite(Number(options.floorMaxY)) ? Number(options.floorMaxY) : Infinity
   );
-  const alignedStart = Math.floor(desiredY / step) * step;
-  const globalLowerY = bounds
-    ? Math.ceil(bounds.minY / step) * step
-    : Math.min(
-        alignedStart - Math.max(1000, Number(options.maxBodyDistanceMm) || 1500),
-        Number(panelPoint.y) || alignedStart
-      );
-  const lowerY = Math.max(
-    globalLowerY,
-    Number.isFinite(Number(options.floorMinY))
-      ? Math.ceil(Number(options.floorMinY) / step) * step
-      : -Infinity
-  );
+  const probeStep=Math.max(25,Math.min(100,step/2));
+  const globalLowerY=bounds?bounds.minY:Math.min(desiredY-Math.max(1000,Number(options.maxBodyDistanceMm)||1500),Number(panelPoint.y)||desiredY);
+  const lowerY=Math.max(globalLowerY,Number.isFinite(Number(options.floorMinY))?Number(options.floorMinY):-Infinity);
 
   // A non-positive limit means "search every usable horizontal level".
   // The previous fixed three-level search could reject a perfectly valid
@@ -2393,7 +2371,7 @@ function resolveNetworkRoutingLevels(panelPoint, options, levelLimit) {
 
   const levels = [];
 
-  for (let y = alignedStart; y >= lowerY - 0.001 && levels.length < limit; y -= step) {
+  for(let y=desiredY;y>=lowerY-0.001&&levels.length<limit;y-=probeStep){
     const candidate = pointAtRoutingY(panelPoint, y);
     if (!pointWithinRoutingBounds(candidate, options)) continue;
     if (!pointWithinBodyDistanceForRouting(candidate, options)) continue;
@@ -2593,17 +2571,15 @@ function resolveParallelMainCorridorCandidates(prepared, options) {
     ? secondaryLevels[secondaryLevels.length - 1] - secondaryLevels[0]
     : 0;
 
-  // Only activate this special topology when the loads visibly form two or
-  // more long, parallel rows. It must not replace ordinary network routing.
-  if (
-    secondaryLevels.length < 2 ||
-    primarySpan < gridStep * 3
-  ) {
-    return [];
+  // Use a shared trunk for one long equipment row as well as multiple parallel rows.
+  if(primarySpan<gridStep*3||secondaryLevels.length<1)return [];
+  const candidates=[];
+  if(secondaryLevels.length===1){
+    const secondary=secondaryValues.reduce(function(sum,value){return sum+value;},0)/secondaryValues.length;
+    return [{primaryAxis,secondaryAxis,primaryMin,primaryMax,secondary,balance:0,
+      cableDistance:secondaryValues.reduce(function(sum,value){return sum+Math.abs(value-secondary);},0)}];
   }
-
-  const candidates = [];
-  for (let i = 0; i < secondaryLevels.length - 1; i++) {
+  for(let i=0;i<secondaryLevels.length-1;i++){
     const low = secondaryLevels[i];
     const high = secondaryLevels[i + 1];
     const gap = high - low;
@@ -2834,7 +2810,9 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
     sameSideCandidates.forEach(function(value){secondaryCandidates.push(value);});
   }
 
-  for(let si=0;si<secondaryCandidates.length;si++){
+  let bestNetwork=null;
+  const candidatesToEvaluate=secondaryCandidates.slice(0,Math.min(4,secondaryCandidates.length));
+  for(let si=0;si<candidatesToEvaluate.length;si++){
     let sec=secondaryCandidates[si];
     for(let ti=0;ti<tailOptions.length;ti++){
       const tail=tailOptions[ti];
@@ -3128,18 +3106,24 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
       const panelConnectionPoints=panelConnectionLength>0.001
         ? shortenPolylineEnd(visiblePanelPath.slice().reverse(),panelGap)
         : [clonePoint(panelPoint)];
-      const length=plans.reduce(function(s,p){return s+routeLengthMeters(p.points);},0);
-      const turns=plans.reduce(function(s,p){return s+countPolylineTurns(p.points);},0);
-      return {routingY,panelHighPoint:clonePoint(panelPoint),panelDrop:cleanDrop,cablePlans:plans,connectedCount:plans.length,
+      const physicalTreeLengthMm=polylineLengthMm(spine)+
+        plans.reduce(function(sum,plan){return sum+physicalTrayLengthAtY(plan.branch_points,routingY);},0)+
+        physicalTrayLengthAtY(panelConnectionPoints,routingY);
+      const physicalTreeTurns=countPolylineTurns(spine)+
+        plans.reduce(function(sum,plan){return sum+countPolylineTurns(plan.branch_points);},0)+
+        countPolylineTurns(panelConnectionPoints);
+      const score=physicalTreeLengthMm+physicalTreeTurns*Math.max(1,step*0.05);
+      const candidateNetwork={routingY,panelHighPoint:clonePoint(panelPoint),panelDrop:cleanDrop,cablePlans:plans,connectedCount:plans.length,
         unresolved:[],networkNodes:Array.from(tree.nodes.values()).map(clonePoint),
-        main_spine_points:[mainPoint(physicalStartPrimary,sec),mainPoint(physicalEndPrimary,sec)],
-        panel_connection_points:panelConnectionPoints,
+        main_spine_points:[mainPoint(physicalStartPrimary,sec),mainPoint(physicalEndPrimary,sec)],panel_connection_points:panelConnectionPoints,
         parallel_main_corridor:true,main_corridor_axis:primaryAxis,
         main_corridor_secondary_coordinate_mm:Number(mainPoint(panelPrimary,sec)[secondaryAxis]),
-        score:length+turns*step*0.001};
+        score,physical_tree_length_mm:physicalTreeLengthMm,physical_tree_turns:physicalTreeTurns};
+      if(!bestNetwork||candidateNetwork.score<bestNetwork.score-0.001||
+        (Math.abs(candidateNetwork.score-bestNetwork.score)<=0.001&&candidateNetwork.physical_tree_turns<bestNetwork.physical_tree_turns))bestNetwork=candidateNetwork;
     }
   }
-  return null;
+  return bestNetwork;
 }
 
 
@@ -4766,54 +4750,41 @@ export function routeEngineeringNetwork(inputs) {
     const mainMinCables = Math.max(2, Number(options.mainMinCables) || 2);
     if (prepared.length < mainMinCables) {
       prepared.forEach(function(entry) {
-        const routingY = resolveHighestValidRoutingY(
-          [entry.start, panelStandoff.point],
-          routeOptions
-        );
-
-        const highPanelPoint = routingY == null
-          ? clonePoint(panelStandoff.point)
-          : pointAtRoutingY(panelStandoff.point, routingY);
-
-        const highRoute = findGridPath3D(
-          entry.start,
-          highPanelPoint,
-          obstacles,
-          {
-            ...(entry.branchRouteOptions || routeOptions),
-            preferredRoutingY:routingY
-          },
-          new Set()
-        );
-
-        if (!highRoute.points || !highRoute.points.length) {
-          warnings.push(
-            entry.equipment.name + ' → ' + group.panel.name +
-            ': no collision-free branch route was found.'
-          );
+        const preferredHighY=resolveHighestValidRoutingY([entry.start,panelStandoff.point],routeOptions);
+        const candidateYs=[];
+        if(preferredHighY!=null&&Number.isFinite(Number(preferredHighY)))candidateYs.push(Number(preferredHighY));
+        if(routeOptions.ceilingY!=null&&Number.isFinite(Number(routeOptions.ceilingY))){
+          resolveNetworkRoutingLevels(panelStandoff.point,routeOptions,0).forEach(function(value){
+            const y=Number(value);
+            if(Number.isFinite(y)&&!candidateYs.some(function(existing){return Math.abs(existing-y)<0.001;}))candidateYs.push(y);
+          });
+        }
+        candidateYs.sort(function(a,b){return b-a;});if(!candidateYs.length)candidateYs.push(null);
+        let routeChoice=null,branchRouteFound=false;
+        for(let levelIndex=0;levelIndex<candidateYs.length;levelIndex++){
+          const candidateY=candidateYs[levelIndex];
+          if(candidateY!=null){
+            const candidateStart=pointAtRoutingY(entry.start,candidateY),branchOptions=entry.branchRouteOptions||routeOptions;
+            if(!pointWithinRoutingBounds(candidateStart,branchOptions)||!pointWithinBodyDistanceForRouting(candidateStart,branchOptions))continue;
+          }
+          const highPanelPoint=candidateY==null?clonePoint(panelStandoff.point):pointAtRoutingY(panelStandoff.point,candidateY);
+          const fixedPlaneOptions=candidateY!=null&&Number.isFinite(Number(candidateY))
+            ? {fixedRoutingY:Number(candidateY),preferredRoutingY:Number(candidateY)}:{preferredRoutingY:candidateY};
+          const highRoute=findGridPath3D(entry.start,highPanelPoint,obstacles,{...(entry.branchRouteOptions||routeOptions),...fixedPlaneOptions},new Set());
+          if(!highRoute.points||!highRoute.points.length)continue;
+          branchRouteFound=true;
+          const panelDrop=highPanelPoint.y===panelStandoff.point.y
+            ? {points:[clonePoint(panelStandoff.point),clonePoint(highPanelPoint)],warning:null,fallback:false}
+            : findGridPath3D(panelStandoff.point,highPanelPoint,obstacles,{...routeOptions,...fixedPlaneOptions},new Set());
+          if(!panelDrop.points||!panelDrop.points.length)continue;
+          routeChoice={routingY:candidateY,highPanelPoint,highRoute,panelDrop};break;
+        }
+        if(!routeChoice){
+          warnings.push(entry.equipment.name+' → '+group.panel.name+
+            (branchRouteFound?': no collision-free final drop to the panel was found.':': no collision-free branch route was found.'));
           return;
         }
-
-        const panelDrop = highPanelPoint.y === panelStandoff.point.y
-          ? {points:[clonePoint(panelStandoff.point),clonePoint(highPanelPoint)], warning:null, fallback:false}
-          : findGridPath3D(
-            panelStandoff.point,
-            highPanelPoint,
-            obstacles,
-            {
-              ...routeOptions,
-              preferredRoutingY:routingY
-            },
-            new Set()
-          );
-
-        if (!panelDrop.points || !panelDrop.points.length) {
-          warnings.push(
-            entry.equipment.name + ' → ' + group.panel.name +
-            ': no collision-free final drop to the panel was found.'
-          );
-          return;
-        }
+        const routingY=routeChoice.routingY,highPanelPoint=routeChoice.highPanelPoint,highRoute=routeChoice.highRoute,panelDrop=routeChoice.panelDrop;
 
         const branchPoints = [];
         (highRoute.points || []).forEach(function(point){ branchPoints.push(clonePoint(point)); });
