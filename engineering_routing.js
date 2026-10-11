@@ -4510,7 +4510,6 @@ function buildOutsideEscapeNetwork(equipment,panels,obstacles,options){
   const minX=Math.min.apply(Math,allX.concat(Number.isFinite(Number(bounds.minX))?[Number(bounds.minX)]:[]));
   const maxX=Math.max.apply(Math,allX.concat(Number.isFinite(Number(bounds.maxX))?[Number(bounds.maxX)]:[]));
   const minY=Math.min.apply(Math,anchorPoints.map(function(p){return p.y;}).concat(modelObstacles.map(function(o){return Number(o.minY); })));
-  const maxY=Math.max.apply(Math,anchorPoints.map(function(p){return p.y;}).concat(modelObstacles.map(function(o){return Number(o.maxY); })));
   const minZ=Math.min.apply(Math,allZ.concat(Number.isFinite(Number(bounds.minZ))?[Number(bounds.minZ)]:[]));
   const maxZ=Math.max.apply(Math,allZ.concat(Number.isFinite(Number(bounds.maxZ))?[Number(bounds.maxZ)]:[]));
   const clearance=Math.max(0,Number(options.clearanceMm)||0);
