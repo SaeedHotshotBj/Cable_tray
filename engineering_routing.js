@@ -1428,17 +1428,11 @@ function buildTrayRuns(cablePlans, options, mainCorridors) {
         Array.isArray(plan.main_corridor_segment_keys) &&
         plan.main_corridor_segment_keys.indexOf(segment.key) >= 0;
 
-      segment.parallel_main_eligible =
-        plan.parallel_main_corridor === true &&
-        plan.main_corridor_axis === segment.axis &&
-        segment.main_level_eligible &&
-        (
-          !Number.isFinite(Number(plan.main_corridor_secondary_coordinate_mm)) ||
-          Math.abs(
-            Number(segment.start[plan.main_corridor_axis === 'x' ? 'z' : 'x']) -
-            Number(plan.main_corridor_secondary_coordinate_mm)
-          ) < Math.max(1, (Number(options.gridStepMm) || 100) * 0.5)
-        );
+      // In a shared-network plan, the physical Main spine is inserted
+      // exactly once from mainCorridors below. A nearby cable branch is not
+      // itself a Main merely because it runs parallel within half a grid cell;
+      // that tolerance can create a nested second tray inside the real Main.
+      segment.parallel_main_eligible = false;
 
       rawSegments.push(segment);
     }
@@ -1689,6 +1683,109 @@ function buildTrayRuns(cablePlans, options, mainCorridors) {
       required_width_mm:width
     });
   });
+
+  // Do not draw a second, narrower tray where a branch runs parallel
+  // inside the physical width of this network's Main Tray. Preserve any part
+  // of the branch outside the Main footprint by subtracting the covered
+  // longitudinal intervals instead of dropping the complete branch.
+  const physicalMainSegments = classified.filter(function(segment) {
+    return segment.classification === 'main' &&
+      (segment.axis === 'x' || segment.axis === 'z') &&
+      segment.main_level_eligible !== false;
+  });
+  const deNested = [];
+
+  classified.forEach(function(segment) {
+    if (segment.classification !== 'branch' ||
+        (segment.axis !== 'x' && segment.axis !== 'z')) {
+      deNested.push(segment);
+      return;
+    }
+
+    const axis = segment.axis;
+    const crossAxis = axis === 'x' ? 'z' : 'x';
+    const segmentLow = axis === 'x' ? segment.minPoint.x : segment.minPoint.z;
+    const segmentHigh = axis === 'x' ? segment.maxPoint.x : segment.maxPoint.z;
+    const covered = [];
+
+    physicalMainSegments.forEach(function(main) {
+      if (String(main.network_id || '') !== String(segment.network_id || '')) return;
+      if (main.axis !== axis) return;
+
+      const verticalOverlap =
+        Math.abs(Number(main.start.y) - Number(segment.start.y)) <
+        (Math.max(1, Number(main.height_mm) || trayHeightMm) +
+         Math.max(1, Number(segment.height_mm) || trayHeightMm)) / 2 - 0.001;
+      if (!verticalOverlap) return;
+
+      const crossDistance = Math.abs(
+        Number(main.start[crossAxis]) - Number(segment.start[crossAxis])
+      );
+      const physicalHalfWidth =
+        (Math.max(1, Number(main.width_mm) || 100) +
+         Math.max(1, Number(segment.width_mm) || 100)) / 2;
+      if (crossDistance >= physicalHalfWidth - 0.001) return;
+
+      const mainLow = axis === 'x' ? main.minPoint.x : main.minPoint.z;
+      const mainHigh = axis === 'x' ? main.maxPoint.x : main.maxPoint.z;
+      const low = Math.max(segmentLow, mainLow);
+      const high = Math.min(segmentHigh, mainHigh);
+      if (high - low > 0.001) covered.push({low,high});
+    });
+
+    if (!covered.length) {
+      deNested.push(segment);
+      return;
+    }
+
+    covered.sort(function(a,b) { return a.low-b.low || a.high-b.high; });
+    const merged = [];
+    covered.forEach(function(interval) {
+      const last = merged[merged.length-1];
+      if (!last || interval.low > last.high + 0.001) {
+        merged.push({low:interval.low,high:interval.high});
+      } else {
+        last.high = Math.max(last.high,interval.high);
+      }
+    });
+
+    const fragments = [];
+    let cursor = segmentLow;
+    merged.forEach(function(interval) {
+      if (interval.low > cursor + 0.001) fragments.push({low:cursor,high:interval.low});
+      cursor = Math.max(cursor,interval.high);
+    });
+    if (cursor < segmentHigh - 0.001) fragments.push({low:cursor,high:segmentHigh});
+
+    fragments.forEach(function(fragment) {
+      if (fragment.high-fragment.low < 0.001) return;
+      const a = axis === 'x'
+        ? {x:fragment.low,y:segment.start.y,z:segment.start.z}
+        : {x:segment.start.x,y:segment.start.y,z:fragment.low};
+      const b = axis === 'x'
+        ? {x:fragment.high,y:segment.start.y,z:segment.start.z}
+        : {x:segment.start.x,y:segment.start.y,z:fragment.high};
+      const geometry = segmentRecord(
+        a,b,
+        Array.from(segment.cableIds)[0],
+        Number(segment.diameterByCable.values().next().value) || 0
+      );
+      if (!geometry) return;
+      deNested.push({
+        ...segment,
+        key:geometry.key,
+        start:geometry.start,
+        end:geometry.end,
+        minPoint:geometry.minPoint,
+        maxPoint:geometry.maxPoint,
+        length:geometry.length,
+        cableIds:new Set(segment.cableIds),
+        diameterByCable:new Map(segment.diameterByCable)
+      });
+    });
+  });
+
+  classified.splice(0,classified.length,...deNested);
 
   const grouped = new Map();
 
