@@ -4612,7 +4612,7 @@ function buildOutsideEscapeNetwork(equipment,panels,obstacles,options){
     const routeLift=Math.max(clearance+Math.max(mainWidth,trayHeight)/2+50,100);
     // The physical tray plane must stay beneath the panel and the equipment
     // working level. Do not route upward to the model roof as an escape path.
-    const baseY=Math.min(panelY,median(equipmentYs))-routeLift;
+    const baseY=Math.min.apply(Math,[panelY].concat(equipmentYs))-routeLift;
     const lowestSafeY=minY-clearance-Math.max(mainWidth,trayHeight)/2-1;
     const values=[];
     const maxSteps=Math.min(120,Math.max(1,Math.ceil((baseY-lowestSafeY)/gridStep)));
