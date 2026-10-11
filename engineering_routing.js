@@ -4616,12 +4616,17 @@ function buildOutsideEscapeNetwork(equipment,panels,obstacles,options){
     const lowestSafeY=minY-clearance-Math.max(mainWidth,trayHeight)/2-1;
     const values=[];
     const maxSteps=Math.min(120,Math.max(1,Math.ceil((baseY-lowestSafeY)/gridStep)));
-    for(let i=0;i<=maxSteps;i++){
-      const y=baseY-i*gridStep;
-      if(y>=lowestSafeY-0.001)values.push(y);
-      else break;
+    // Try the intended below-panel level first, even when it is already
+    // below the lowest obstacle. Only descend farther when a collision blocks it.
+    values.push(baseY);
+    if(lowestSafeY<baseY-0.001){
+      for(let i=1;i<=maxSteps;i++){
+        const y=baseY-i*gridStep;
+        if(y>lowestSafeY+0.001)values.push(y);
+        else break;
+      }
+      values.push(lowestSafeY);
     }
-    values.push(lowestSafeY);
     return Array.from(new Set(values.filter(Number.isFinite))).sort(function(a,b){return b-a;});
   }
 
@@ -4735,7 +4740,7 @@ function buildOutsideEscapeNetwork(equipment,panels,obstacles,options){
     const panelConnectionPoints=[];
     appendDistinctPoints(panelConnectionPoints,[selected.panelSpine]);
     appendDistinctPoints(panelConnectionPoints,selected.panelLeg.slice().reverse());
-    corridors.push({
+    if(sideUsesSharedMain)corridors.push({
       panel_id:panel.id,floor_id:null,network_id:networkId,
       width_mm:mainWidth,height_mm:trayHeight,
       cable_ids:items.map(function(item){return item.id;}),
