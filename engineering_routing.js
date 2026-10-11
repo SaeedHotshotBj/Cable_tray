@@ -2623,24 +2623,26 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
   const step=Math.max(50,Number(options.gridStepMm)||100);
   let activeMainSlope=0;
   let activeMainPrimaryCenter=0;
-  let primaryAxis=options.structurePrimaryAxis==='x'||options.structurePrimaryAxis==='z'?options.structurePrimaryAxis:null;
-  if(!primaryAxis){
-    const xs=prepared.map(function(e){return Number(e.start.x);}),zs=prepared.map(function(e){return Number(e.start.z);});
-    primaryAxis=Math.max.apply(Math,xs)-Math.min.apply(Math,xs)>=Math.max.apply(Math,zs)-Math.min.apply(Math,zs)?'x':'z';
-  }
+  const requestedPrimaryAxis=options.structurePrimaryAxis==='x'||options.structurePrimaryAxis==='z'
+    ? options.structurePrimaryAxis
+    : null;
+  // Include the destination panel when selecting the shared-trunk direction.
+  // With motors close together along X but a panel far to the right, the panel
+  // still defines a long X-oriented Main corridor; row separation alone must
+  // not rotate that trunk across the equipment rows.
+  const layoutX=prepared.map(function(e){return Number(e.start.x);}).concat([Number(panelStandoff.point.x)]);
+  const layoutZ=prepared.map(function(e){return Number(e.start.z);}).concat([Number(panelStandoff.point.z)]);
+  const spanX=Math.max.apply(Math,layoutX)-Math.min.apply(Math,layoutX);
+  const spanZ=Math.max.apply(Math,layoutZ)-Math.min.apply(Math,layoutZ);
+  let primaryAxis=requestedPrimaryAxis || (spanX>=spanZ?'x':'z');
   let secondaryAxis=primaryAxis==='x'?'z':'x';
   let primary=prepared.map(function(e){return Number(e.start[primaryAxis]);});
   let secondaryValues=prepared.map(function(e){return Number(e.start[secondaryAxis]);});
-  let primarySpan=Math.max.apply(Math,primary)-Math.min.apply(Math,primary);
-  const secondarySpan=Math.max.apply(Math,secondaryValues)-Math.min.apply(Math,secondaryValues);
-  let candidates=resolveParallelMainCorridorCandidates(prepared,options);
-  if(primarySpan<step*3&&secondarySpan>primarySpan){
-    primaryAxis=secondaryAxis;secondaryAxis=primaryAxis==='x'?'z':'x';
-    primary=prepared.map(function(e){return Number(e.start[primaryAxis]);});
-    secondaryValues=prepared.map(function(e){return Number(e.start[secondaryAxis]);});
-    primarySpan=Math.max.apply(Math,primary)-Math.min.apply(Math,primary);candidates=[];
-  }
+  const primarySpan=Math.max.apply(Math,primary.concat([Number(panelStandoff.point[primaryAxis])]))-
+    Math.min.apply(Math,primary.concat([Number(panelStandoff.point[primaryAxis])]));
+  let candidates=resolveParallelMainCorridorCandidates(prepared,{...options,structurePrimaryAxis:primaryAxis});
   if(primarySpan<step*3)return null;
+ 
   if(!candidates.length){
     const avg=secondaryValues.reduce(function(a,b){return a+b;},0)/secondaryValues.length;
     const panelSecondaryForFallback=Number(panelStandoff.point[secondaryAxis]);
@@ -3255,8 +3257,12 @@ function buildGlobalMainBackboneNetwork(group, prepared, panelStandoff, obstacle
   for (let axisIndex = 0; axisIndex < axisOrder.length; axisIndex++) {
     const axis = axisOrder[axisIndex];
     const secondaryAxis = axis === 'x' ? 'z' : 'x';
+    // Include the panel as an endpoint of the global Main spine. Otherwise,
+    // a compact equipment cluster can produce a short cross-row spine while
+    // the long shared run to the panel is treated as a separate connector.
     const primaryValues = prepared
       .map(function(entry){ return Number(entry.start[axis]); })
+      .concat([Number(panelStandoff.point[axis])])
       .filter(Number.isFinite);
 
     if (!primaryValues.length) continue;
@@ -3618,7 +3624,6 @@ function buildPanelMultiTerminalNetwork(group, prepared, panelStandoff, obstacle
     seedCandidates.length,
     Math.max(1, Number(options.networkSeedAttempts) || 4)
   );
-  const attachLimit = Math.max(1, Number(options.networkAttachmentCandidateLimit) || 4);
 
   let bestPartial = null;
 
@@ -3679,7 +3684,8 @@ function buildPanelMultiTerminalNetwork(group, prepared, panelStandoff, obstacle
   // Larger groups use a global Main backbone so every equipment item gets
   // a real Main attachment node. The previous seed corridor must not become
   // the only usable Main target when the equipment count grows.
-  const backboneThreshold = Math.max(5, attachLimit + 1);
+  // Retry a global shared backbone for every multi-equipment network when the straight corridor cannot connect all branches. Small groups must not fall through to seed-local routes that duplicate the trunk.
+  const backboneThreshold = 2;
 
   if (prepared.length >= backboneThreshold) {
     for (let levelIndex = 0; levelIndex < levels.length; levelIndex++) {
