@@ -4607,7 +4607,7 @@ function buildOutsideEscapeNetwork(equipment,panels,options){
 
     if(sideUsesSharedMain){
       corridors.push({
-        panel_id:p.id,floor_id:null,network_id:networkId,
+        panel_id:panel.id,floor_id:null,network_id:networkId,
         width_mm:mainWidth,height_mm:trayHeight,
         cable_ids:items.map(function(item){return item.id;}),
         points:[spineStart,spineEnd],
