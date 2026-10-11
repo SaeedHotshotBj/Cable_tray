@@ -2606,10 +2606,10 @@ function makeNetworkCablePlan(entry, group, branchPath, tree, attachmentPoint, p
       ? mainCorridorSegmentKeys.slice()
       : [],
     engineering_network_id:group.network_id || String(group.panel.id),
-    engineering_floor_id:group.floor_id || null,
-    engineering_floor_name:group.floor_name || null,
-    engineering_floor_id:group.floor_id || null,
-    engineering_floor_name:group.floor_name || null,
+    engineering_floor_id:group.floor_id||null,
+    engineering_floor_name:group.floor_name||null,
+    engineering_route_below_floor:group.route_below_floor===true,
+    engineering_floor_surface_y_mm:group.route_below_floor&&group.floor_zone?floorZoneSurfaceYAtPoint(group.floor_zone,entry.equipment.anchor.point):null,
     points,
     warning:null,
     fallback:false
@@ -4190,14 +4190,31 @@ function buildDirectFallbackCablePlan(entry, group, panelStandoff, obstacles, ro
     main_corridor_routing_y_mm:Number.isFinite(Number(routingY)) ? Number(routingY) : null,
     standoff_distance_mm:Math.max(entry.startDistanceMm, targetStandoff.distance_mm),
     planning_tray_width_mm:planningTrayWidth,
-    engineering_network_id:group.network_id || String(group.panel.id),
-    branch_points:branchPoints,
-    main_corridor_segment_keys:[],
-    points,
+    engineering_network_id:group.network_id||String(group.panel.id),
+    engineering_floor_id:group.floor_id||null,
+    engineering_floor_name:group.floor_name||null,
+    engineering_route_below_floor:group.route_below_floor===true,
+    engineering_floor_surface_y_mm:group.route_below_floor&&group.floor_zone?floorZoneSurfaceYAtPoint(group.floor_zone,entry.equipment.anchor.point):null,
+    branch_points:branchPoints,main_corridor_segment_keys:[],points,
     warning:'Shared Main Tray attachment was unavailable for this equipment; a direct branch route was used.',
     fallback:true
   };
 }
+
+function floorZoneSurfaceYAtPoint(zone, point) {
+  if(!zone||!Array.isArray(zone.points)||zone.points.length<3||!point)return Number(zone&&zone.base_y_mm);
+  const p0=zone.points[0],p1=zone.points[1],p2=zone.points[2];
+  const dx1=Number(p1.x)-Number(p0.x),dz1=Number(p1.z)-Number(p0.z),dx2=Number(p2.x)-Number(p0.x),dz2=Number(p2.z)-Number(p0.z);
+  const dy1=Number(p1.y)-Number(p0.y),dy2=Number(p2.y)-Number(p0.y),det=dx1*dz2-dx2*dz1;
+  if(Math.abs(det)<1e-9)return Number(zone.base_y_mm);
+  const sx=(dy1*dz2-dy2*dz1)/det,sz=(dx1*dy2-dx2*dy1)/det;
+  const y=Number(p0.y)+sx*(Number(point.x)-Number(p0.x))+sz*(Number(point.z)-Number(p0.z));
+  return Number.isFinite(y)?y:Number(zone.base_y_mm);
+}
+function floorZoneMinSurfaceY(zone){const v=(zone&&Array.isArray(zone.points)?zone.points:[]).map(p=>Number(p.y)).filter(Number.isFinite);return v.length?Math.min.apply(null,v):Number(zone&&zone.base_y_mm);}
+function floorZoneMaxSurfaceY(zone){const v=(zone&&Array.isArray(zone.points)?zone.points:[]).map(p=>Number(p.y)).filter(Number.isFinite);return v.length?Math.max.apply(null,v):Number(zone&&zone.base_y_mm);}
+function floorZoneThicknessEstimateMm(zone){return Math.max(10,floorZoneMaxSurfaceY(zone)-floorZoneMinSurfaceY(zone));}
+function routeCanPassUnderFloor(item,zone){if(!item||!item.anchor||!item.anchor.point||!zone)return false;const y=floorZoneSurfaceYAtPoint(zone,item.anchor.point);return Number.isFinite(y)&&Math.abs(Number(item.anchor.point.y)-y)<=1000;}
 
 function floorZoneContainsPoint(zone, point, boundaryToleranceMm) {
   if (!zone || !Array.isArray(zone.points) || zone.points.length < 3 || !point) return false;
@@ -4343,7 +4360,7 @@ function resolveEquipmentFloorZone(item, floorZones, options) {
   });
 
   candidates.sort(function(a,b){
-    return Math.abs(y - Number(a.base_y_mm)) - Math.abs(y - Number(b.base_y_mm));
+    return Math.abs(y-floorZoneSurfaceYAtPoint(a,item.anchor.point))-Math.abs(y-floorZoneSurfaceYAtPoint(b,item.anchor.point));
   });
 
   return candidates[0] || null;
@@ -4449,6 +4466,48 @@ function prepareFloorPanelConnections(group, prepared, panelStandoff, panelHighP
   return cache;
 }
 
+function buildOutsideEscapeNetwork(equipment,panels,options){
+  const byPanel=new Map(),panelById=new Map(),warnings=[];
+  (panels||[]).forEach(function(panel){if(panel&&panel.id)panelById.set(String(panel.id),panel);});
+  (equipment||[]).forEach(function(item){
+    const panel=panelById.get(String(item&&item.destination_panel_id||''));
+    if(!panel||!panel.anchor||!panel.anchor.point){warnings.push((item&&item.name||'Equipment')+': no valid destination panel for the outside route.');return;}
+    const key=String(panel.id);if(!byPanel.has(key))byPanel.set(key,{panel,equipment:[]});byPanel.get(key).equipment.push(item);
+  });
+  const bounds=options.outsideRoutingBounds||{};
+  const maxY=Math.max(Number(bounds.maxY)||-Infinity,...equipment.map(e=>Number(e&&e.anchor&&e.anchor.point&&e.anchor.point.y)||-Infinity),...panels.map(p=>Number(p&&p.anchor&&p.anchor.point&&p.anchor.point.y)||-Infinity));
+  const y=maxY+Math.max(0,Number(options.clearanceMm)||0)+Math.max(1,Number(options.trayHeightMm)||100)/2+Math.max(0,Number(options.ceilingSafetyGapMm)||0)+Math.max(250,(Number(options.gridStepMm)||100)*2);
+  const plans=[],corridors=[],widths=(options.standardTrayWidthsMm||[100,150,200,300,400,500,600,800,1000,1200]).map(Number).filter(w=>Number.isFinite(w)&&w>0).sort((a,b)=>a-b);
+  byPanel.forEach(function(group,panelKey){
+    const items=group.equipment,panel=group.panel,p=clonePoint(panel.anchor.point),xs=items.map(e=>Number(e.anchor.point.x)).concat([p.x]),zs=items.map(e=>Number(e.anchor.point.z)).concat([p.z]);
+    const sx=Math.max.apply(Math,xs)-Math.min.apply(Math,xs),sz=Math.max.apply(Math,zs)-Math.min.apply(Math,zs);
+    const axis=options.structurePrimaryAxis==='x'||options.structurePrimaryAxis==='z'?options.structurePrimaryAxis:(sx>=sz?'x':'z');
+    const cross=axis==='x'?'z':'x',values=items.map(e=>Number(e.anchor.point[cross])).sort((a,b)=>a-b),secondary=values[Math.floor(values.length/2)];
+    const primaries=items.map(e=>Number(e.anchor.point[axis])).concat([Number(p[axis])]),lo=Math.min.apply(Math,primaries),hi=Math.max.apply(Math,primaries);
+    const diameterSum=items.reduce((sum,e)=>sum+Math.max(0,Number(e.cable_diameter_mm)||0),0),fill=Math.max(1,Math.min(100,Number(options.fillLimitPercent)||80))/100,margin=Math.max(0,Number(options.traySideMarginMm)||25);
+    const mainWidth=chooseTrayWidth((diameterSum+margin*2)/fill,widths),networkId='outside::'+panelKey,panelHigh=pointAtRoutingY(p,y),panelSpine=clonePoint(panelHigh);panelSpine[cross]=secondary;
+    items.forEach(function(item){
+      const anchor=clonePoint(item.anchor.point),high=pointAtRoutingY(anchor,y),turn=clonePoint(high);turn[cross]=secondary;
+      const branchWidth=chooseTrayWidth(((Math.max(0,Number(item.cable_diameter_mm)||0)+margin*2)/fill),widths),points=[];
+      appendDistinctPoints(points,[anchor]);appendDistinctPoints(points,[high]);appendDistinctPoints(points,[turn]);appendDistinctPoints(points,[panelSpine]);appendDistinctPoints(points,[panelHigh]);appendDistinctPoints(points,[p]);
+      plans.push({equipment:item,panel,cable:{name:item.cable_name||'Power Cable',diameter_mm:Number(item.cable_diameter_mm)||0},routing_start:high,routing_goal:turn,main_corridor_equipment_id:null,
+        main_corridor_routing_y_mm:y,standoff_distance_mm:Math.abs(y-anchor.y),planning_tray_width_mm:mainWidth,branch_tray_width_mm:branchWidth,
+        branch_points:[clonePoint(high),clonePoint(turn)],main_corridor_segment_keys:[],engineering_network_id:networkId,engineering_floor_id:null,engineering_floor_name:null,
+        engineering_route_below_floor:false,parallel_main_corridor:items.length>=Math.max(2,Number(options.mainMinCables)||2),main_corridor_axis:axis,
+        main_corridor_secondary_coordinate_mm:secondary,points,warning:'Outside route selected after internal routing was unavailable; review shell penetrations and clearance.',fallback:false});
+    });
+    if(items.length>=Math.max(2,Number(options.mainMinCables)||2)){
+      const a=pointAtRoutingY(axis==='x'?{x:lo,y:p.y,z:secondary}:{x:secondary,y:p.y,z:lo},y),b=pointAtRoutingY(axis==='x'?{x:hi,y:p.y,z:secondary}:{x:secondary,y:p.y,z:hi},y),spine=[a,b];
+      corridors.push({panel_id:p.id,floor_id:null,network_id:networkId,width_mm:mainWidth,height_mm:Number(options.trayHeightMm)||100,cable_ids:items.map(e=>e.id),points:spine,network_nodes:spine.map(clonePoint),panel_drop_points:[panelHigh],
+        main_level_y_mm:y,main_corridor_secondary_coordinate_mm:secondary,parallel_main_corridor:true,panel_connection_points:[panelSpine,panelHigh].map(clonePoint)});
+    }
+  });
+  const runs=buildTrayRuns(plans,options,corridors),summary=buildTraySummary(runs),results=buildEquipmentResults(plans,runs);
+  const totalCable=runs.length?plans.reduce((sum,p)=>sum+routeLengthMeters(p.points),0):0,totalTray=runs.reduce((sum,r)=>sum+r.length_m,0);
+  if(plans.length)warnings.push('Approved outside routing was used. Verify shell penetrations and clearance on the CAD model.');
+  return {cable_plans:plans,tray_runs:runs,main_corridors:corridors,tray_summary:summary,equipment_results:results,warnings,total_cable_length_m:totalCable,total_tray_length_m:totalTray,
+    options:{...options,routing_method:'approved_external_escape_shared_trunk',routing_priority:'external trunk above model envelope'}};
+}
 export function routeEngineeringNetwork(inputs) {
   const equipment = Array.isArray(inputs && inputs.equipment) ? inputs.equipment : [];
   const panels = Array.isArray(inputs && inputs.panels) ? inputs.panels : [];
@@ -4473,9 +4532,8 @@ export function routeEngineeringNetwork(inputs) {
     ceilingSafetyGapMm:Number.isFinite(Number(inputs && inputs.options && inputs.options.ceilingSafetyGapMm))
       ? Math.max(0, Number(inputs.options.ceilingSafetyGapMm))
       : 50,
-    routingBounds:inputs && inputs.options && inputs.options.routingBounds
-      ? { ...inputs.options.routingBounds }
-      : null,
+    routingBounds:inputs&&inputs.options&&inputs.options.routingBounds?{...inputs.options.routingBounds}:null,
+    outsideRoutingBounds:inputs&&inputs.options&&inputs.options.outsideRoutingBounds?{...inputs.options.outsideRoutingBounds}:null,
     preferredYPenaltyRatio:Number(inputs && inputs.options && inputs.options.preferredYPenaltyRatio) || 1,
     structurePrimaryAxis:(inputs && inputs.options && ['x','z'].indexOf(inputs.options.structurePrimaryAxis) >= 0)
       ? inputs.options.structurePrimaryAxis
@@ -4519,7 +4577,8 @@ export function routeEngineeringNetwork(inputs) {
       : null
   };
 
-  const obstacles = Array.isArray(inputs && inputs.obstacles) ? inputs.obstacles : [];
+  const obstacles=Array.isArray(inputs&&inputs.obstacles)?inputs.obstacles:[];
+  if(options.allowOutsideRouting===true&&options.outsideRoutingBounds)return buildOutsideEscapeNetwork(equipment,panels,options);
   const validPanels = new Map();
   panels.forEach(function(panel){ validPanels.set(panel.id, panel); });
 
@@ -4548,18 +4607,15 @@ export function routeEngineeringNetwork(inputs) {
     }
 
     const floorZone = resolveEquipmentFloorZone(item, normalizedFloorZones, options);
+    const routeBelowFloor = routeCanPassUnderFloor(item,floorZone);
     const autoFloor = autoFloorByEquipmentId.get(item.id) || null;
     const floorKey = floorZone
-      ? 'floor:' + String(floorZone.id)
+      ? 'floor:' + String(floorZone.id) + (routeBelowFloor ? '::under-floor' : '::room')
       : (autoFloor ? 'auto:' + autoFloor.key : 'auto-floor-unknown');
-
     const group = groups.get(floorKey) || {
-      panel:null,
-      panels:new Map(),
-      equipment:[],
-      floor_zone:floorZone,
-      floor_id:floorZone ? String(floorZone.id) : (autoFloor ? String(autoFloor.key) : null),
-      floor_name:floorZone ? floorZone.name : (autoFloor ? 'Auto Floor' : 'Unassigned Floor')
+      panel:null,panels:new Map(),equipment:[],floor_zone:floorZone,route_below_floor:routeBelowFloor,
+      floor_id:floorZone?String(floorZone.id):(autoFloor?String(autoFloor.key):null),
+      floor_name:floorZone?floorZone.name:(autoFloor?'Auto Floor':'Unassigned Floor')
     };
 
     group.equipment.push({
@@ -4609,42 +4665,20 @@ export function routeEngineeringNetwork(inputs) {
       ? (item.meanY + next.meanY) * 0.5
       : globalMaxY;
 
-    if (item.group.floor_zone) {
-      const zone = item.group.floor_zone;
-      const higherOverlappingZones = normalizedFloorZones.filter(function(other){
-        return String(other.id) !== String(zone.id) &&
-          Number(other.base_y_mm) > Number(zone.base_y_mm) + 50 &&
-          floorZoneBoundsOverlap(zone, other);
-      }).sort(function(a,b){
-        return Number(a.base_y_mm) - Number(b.base_y_mm);
-      });
-
-      // Most floor zones define the lower support surface of their level.
-      // If a zone lies very close to the model's global top, however, it is the
-      // upper shell/ceiling surface: route inside the model below it, down to
-      // the nearest lower overlapping zone, rather than searching outside the shell.
-      const topSurfaceToleranceMm = Math.max(100, Number(options.clearanceMm || 0) + Number(options.trayHeightMm || 100));
-      const zoneTouchesModelTop = Number.isFinite(globalMaxY) &&
-        Number(zone.base_y_mm) >= globalMaxY - topSurfaceToleranceMm;
-      if (zoneTouchesModelTop && !higherOverlappingZones.length) {
-        const lowerOverlappingZones = normalizedFloorZones.filter(function(other){
-          return String(other.id) !== String(zone.id) &&
-            Number(other.base_y_mm) < Number(zone.base_y_mm) - 50 &&
-            floorZoneBoundsOverlap(zone, other);
-        }).sort(function(a,b){
-          return Number(b.base_y_mm) - Number(a.base_y_mm);
-        });
-        floorMinY = lowerOverlappingZones.length
-          ? Number(lowerOverlappingZones[0].base_y_mm)
-          : globalMinY;
-        floorMaxY = Number(zone.base_y_mm);
-      } else {
-        // A higher overlapping floor defines the ceiling boundary for the
-        // current lower floor.
-        floorMinY = Number(zone.base_y_mm);
-        floorMaxY = higherOverlappingZones.length
-          ? Number(higherOverlappingZones[0].base_y_mm)
-          : globalMaxY;
+    if(item.group.floor_zone){
+      const zone=item.group.floor_zone;
+      const higher=normalizedFloorZones.filter(function(other){return String(other.id)!==String(zone.id)&&Number(other.base_y_mm)>Number(zone.base_y_mm)+50&&floorZoneBoundsOverlap(zone,other);}).sort(function(a,b){return Number(a.base_y_mm)-Number(b.base_y_mm);});
+      const lower=normalizedFloorZones.filter(function(other){return String(other.id)!==String(zone.id)&&Number(other.base_y_mm)<Number(zone.base_y_mm)-50&&floorZoneBoundsOverlap(zone,other);}).sort(function(a,b){return Number(b.base_y_mm)-Number(a.base_y_mm);});
+      if(item.group.route_below_floor===true){
+        const thickness=floorZoneThicknessEstimateMm(zone);
+        const guard=Math.max(0,Number(options.clearanceMm)||0)+Math.max(1,Number(options.trayHeightMm)||100)/2+Math.max(0,Number(options.ceilingSafetyGapMm)||0)+thickness;
+        floorMinY=lower.length?floorZoneMaxSurfaceY(lower[0])+guard:globalMinY;
+        floorMaxY=floorZoneMinSurfaceY(zone)-thickness;
+      }else{
+        const tolerance=Math.max(100,Number(options.clearanceMm||0)+Number(options.trayHeightMm||100));
+        const touchesTop=Number.isFinite(globalMaxY)&&floorZoneMaxSurfaceY(zone)>=globalMaxY-tolerance;
+        if(touchesTop&&!higher.length){floorMinY=lower.length?Number(lower[0].base_y_mm):globalMinY;floorMaxY=floorZoneMinSurfaceY(zone);}
+        else{floorMinY=Number(zone.base_y_mm);floorMaxY=higher.length?Number(higher[0].base_y_mm):globalMaxY;}
       }
     }
 
@@ -4805,6 +4839,7 @@ export function routeEngineeringNetwork(inputs) {
         panels:batchRecord.panels || group.panels,
         equipment:batchRecord.equipment,
         floor_zone:group.floor_zone,
+        route_below_floor:group.route_below_floor===true,
         floor_id:group.floor_id,
         floor_name:group.floor_name,
         floor_base_y_mm:group.floor_base_y_mm,
@@ -4837,9 +4872,16 @@ export function routeEngineeringNetwork(inputs) {
       floorMinY:Number.isFinite(Number(group.floor_min_y_mm))
         ? Number(group.floor_min_y_mm)
         : null,
-      floorMaxY:Number.isFinite(Number(group.floor_max_y_mm))
-        ? Number(group.floor_max_y_mm)
-        : null,
+      floorMaxY:Number.isFinite(Number(group.floor_max_y_mm))?Number(group.floor_max_y_mm):null,
+      routeBelowFloor:group.route_below_floor===true,
+      floorSurfaceYmm:group.route_below_floor===true&&group.floor_zone?floorZoneMinSurfaceY(group.floor_zone):null,
+      floorZone:group.floor_zone||null,
+      routingBounds:group.route_below_floor===true&&group.floor_zone?(function(){
+        const zone=group.floor_zone,base=options.routingBounds||{};
+        const pad=Math.max(250,Number(options.clearanceMm)||0)+Math.max(1,Number(options.trayHeightMm)||100)/2+planningTrayWidth/2+Math.max(50,Number(options.gridStepMm)||100);
+        return {minX:Math.min(Number(base.minX),Number(zone.min_x_mm)-pad),maxX:Math.max(Number(base.maxX),Number(zone.max_x_mm)+pad),
+          minY:Number(base.minY),maxY:Number(base.maxY),minZ:Math.min(Number(base.minZ),Number(zone.min_z_mm)-pad),maxZ:Math.max(Number(base.maxZ),Number(zone.max_z_mm)+pad)};
+      })():options.routingBounds,
       centerlineClearanceMm:options.clearanceMm + planningTrayWidth / 2,
       routingTrayWidthMm:planningTrayWidth,
       occupiedMainCorridors:occupiedMainCorridors.map(function(corridor){return {
@@ -4880,11 +4922,15 @@ export function routeEngineeringNetwork(inputs) {
           options.clearanceMm + branchTrayWidth / 2 + options.gridStepMm
         )
       };
-      const equipmentStandoff = resolveAnchorStandoff(
-        item.anchor,
-        obstacles,
-        branchRouteOptions
-      );
+      let equipmentStandoff;
+      if(routeOptions.routeBelowFloor===true&&routeOptions.floorZone&&routeOptions.floorSurfaceYmm!=null){
+        const anchor=clonePoint(item.anchor&&item.anchor.point?item.anchor.point:{});
+        const thickness=floorZoneThicknessEstimateMm(routeOptions.floorZone);
+        const offset=Math.max(0,Number(options.clearanceMm)||0)+Math.max(1,Number(options.trayHeightMm)||100)/2+Math.max(0,Number(options.ceilingSafetyGapMm)||0)+thickness;
+        const below={x:Number(anchor.x),y:Math.min(Number(anchor.y),Number(routeOptions.floorSurfaceYmm)-offset),z:Number(anchor.z)};
+        const valid=pointWithinRoutingBounds(below,branchRouteOptions)&&pointWithinBodyDistanceForRouting(below,branchRouteOptions);
+        equipmentStandoff={point:below,distance_mm:Math.sqrt(Math.pow(below.x-anchor.x,2)+Math.pow(below.y-anchor.y,2)+Math.pow(below.z-anchor.z,2)),warning:valid?null:'Could not find a clear point directly beneath this floor-level equipment.',valid};
+      }else equipmentStandoff=resolveAnchorStandoff(item.anchor,obstacles,branchRouteOptions);
       if (equipmentStandoff.warning) warnings.push(item.name + ': ' + equipmentStandoff.warning);
       return {
         equipment:item,
@@ -5140,6 +5186,17 @@ export function routeEngineeringNetwork(inputs) {
 
   });
 
+  cablePlans.forEach(function(plan){
+    if(plan.engineering_route_below_floor!==true)return;
+    const zone=normalizedFloorZones.find(function(candidate){return String(candidate.id)===String(plan.engineering_floor_id);});
+    if(!zone||!plan.equipment||!plan.equipment.anchor||!plan.equipment.anchor.point)return;
+    const anchor=clonePoint(plan.equipment.anchor.point),surfaceY=floorZoneSurfaceYAtPoint(zone,anchor);
+    if(!(plan.points||[]).some(function(point){return Number(point.y)<floorZoneMinSurfaceY(zone)-0.001;}))return;
+    const holePoint={x:anchor.x,y:surfaceY,z:anchor.z},rebuilt=[];
+    appendDistinctPoints(rebuilt,[anchor]);appendDistinctPoints(rebuilt,[holePoint]);appendDistinctPoints(rebuilt,(plan.points||[]).slice(1),0);
+    plan.points=rebuilt;
+    plan.floor_hole={floor_id:String(zone.id),floor_name:zone.name,point:holePoint,diameter_mm:Math.max(0,Number(plan.cable&&plan.cable.diameter_mm)||0),depth_mm:Math.max(20,floorZoneThicknessEstimateMm(zone)+10)};
+  });
   const trayRuns = buildTrayRuns(cablePlans, options, mainCorridors);
   const traySummary = buildTraySummary(trayRuns);
   const equipmentResults = buildEquipmentResults(cablePlans, trayRuns);
