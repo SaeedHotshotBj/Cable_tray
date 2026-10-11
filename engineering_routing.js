@@ -4195,7 +4195,7 @@ function buildDirectFallbackCablePlan(entry, group, panelStandoff, obstacles, ro
   };
 }
 
-function floorZoneContainsPoint(zone, point) {
+function floorZoneContainsPoint(zone, point, boundaryToleranceMm) {
   if (!zone || !Array.isArray(zone.points) || zone.points.length < 3 || !point) return false;
 
   const x = Number(point.x);
@@ -4208,16 +4208,37 @@ function floorZoneContainsPoint(zone, point) {
 
   let inside = false;
   for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
-    const xi = polygon[i].x;
-    const zi = polygon[i].z;
-    const xj = polygon[j].x;
-    const zj = polygon[j].z;
-
-    const intersects = ((zi > z) !== (zj > z)) &&
-      (x < (xj - xi) * (z - zi) / ((zj - zi) || 1e-12) + xi);
+    const a = polygon[j];
+    const b = polygon[i];
+    const intersects = ((a.z > z) !== (b.z > z)) &&
+      (x < (b.x - a.x) * (z - a.z) / ((b.z - a.z) || 1e-12) + a.x);
     if (intersects) inside = !inside;
   }
-  return inside;
+  if (inside) return true;
+
+  // Floor polygons are sketched on CAD surfaces, while equipment anchors are
+  // picked on motor bodies. Treat a point just outside an edge as belonging
+  // to the floor when the offset is within the small modelling tolerance.
+  const tolerance = Math.max(0, Number(boundaryToleranceMm) || 0);
+  if (tolerance <= 0) return false;
+  const toleranceSq = tolerance * tolerance;
+
+  for (let i = 0; i < polygon.length; i++) {
+    const a = polygon[i];
+    const b = polygon[(i + 1) % polygon.length];
+    const dx = b.x - a.x;
+    const dz = b.z - a.z;
+    const lengthSq = dx * dx + dz * dz;
+    const t = lengthSq > 1e-12
+      ? Math.max(0, Math.min(1, ((x - a.x) * dx + (z - a.z) * dz) / lengthSq))
+      : 0;
+    const nearestX = a.x + dx * t;
+    const nearestZ = a.z + dz * t;
+    const distanceSq = Math.pow(x - nearestX, 2) + Math.pow(z - nearestZ, 2);
+    if (distanceSq <= toleranceSq) return true;
+  }
+
+  return false;
 }
 
 function normalizeFloorZones(floorZones, globalBounds) {
@@ -4298,16 +4319,23 @@ function floorZoneBoundsOverlap(a, b) {
     a.max_z_mm >= b.min_z_mm;
 }
 
-function resolveEquipmentFloorZone(item, floorZones) {
+function resolveEquipmentFloorZone(item, floorZones, options) {
   if (!item || !item.anchor || !item.anchor.point || !floorZones.length) return null;
 
   const y = Number(item.anchor.point.y);
+  // Anchor points picked from a motor body can lie a few millimetres outside
+  // the sketched floor footprint. Use a bounded fraction of the routing grid
+  // as an XZ edge tolerance, then disambiguate overlapping floors by elevation.
+  const boundaryToleranceMm = Math.max(
+    10,
+    Math.min(100, (Number(options && options.gridStepMm) || 100) * 0.5)
+  );
   // Equipment anchors sit on equipment bodies, not necessarily on the floor
   // plane. The four-point zone defines a footprint; when floors overlap in
   // plan, choose the nearest floor elevation rather than imposing a fixed
   // 1000 mm vertical cutoff.
   const candidates = floorZones.filter(function(zone){
-    return floorZoneContainsPoint(zone, item.anchor.point);
+    return floorZoneContainsPoint(zone, item.anchor.point, boundaryToleranceMm);
   });
 
   candidates.sort(function(a,b){
@@ -4515,7 +4543,7 @@ export function routeEngineeringNetwork(inputs) {
       return;
     }
 
-    const floorZone = resolveEquipmentFloorZone(item, normalizedFloorZones);
+    const floorZone = resolveEquipmentFloorZone(item, normalizedFloorZones, options);
     const autoFloor = autoFloorByEquipmentId.get(item.id) || null;
     const floorKey = floorZone
       ? 'floor:' + String(floorZone.id)
