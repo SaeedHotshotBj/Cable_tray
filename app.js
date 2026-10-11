@@ -2821,15 +2821,27 @@ function applyEngineeringFloorHoleCutouts() {
   holes.sort(function(a,b) {
     return a.floor_id.localeCompare(b.floor_id)||a.x-b.x||a.z-b.z||a.diameter_mm-b.diameter_mm;
   });
-  const signature=holes.map(function(hole) {
+  const modelFragments=[];
+  state.modelRoots.forEach(function(root,rootId) {
+    root.updateMatrixWorld(true);
+    root.traverse(function(mesh) {
+      if(!mesh.isMesh||!mesh.geometry)return;
+      const baseGeometry=engineeringFloorHoleBaseGeometryByMesh.get(mesh)||mesh.geometry;
+      const matrix=mesh.matrixWorld.elements.map(function(value){return Number(value).toFixed(5);}).join(',');
+      modelFragments.push([rootId,mesh.uuid,baseGeometry.uuid,matrix].join(':'));
+    });
+  });
+  modelFragments.sort();
+  const holeSignature=holes.map(function(hole) {
     return [hole.floor_id,hole.x.toFixed(2),hole.y.toFixed(2),hole.z.toFixed(2),hole.diameter_mm.toFixed(2),hole.depth_mm.toFixed(2)].join('|');
   }).join(';');
-  if (signature===engineeringFloorHoleCutSignature) return;
+  const signature=modelFragments.join(';')+'::holes::'+holeSignature;
+  if(signature===engineeringFloorHoleCutSignature)return;
   restoreEngineeringFloorHoleBaseGeometries(false);
-  if (!holes.length) return;
+  if(!holes.length){engineeringFloorHoleCutSignature=signature;return;}
 
   const roots=Array.from(state.modelRoots.values());
-  if (!roots.length) { engineeringFloorHoleCutSignature=signature; return; }
+  if(!roots.length){engineeringFloorHoleCutSignature=signature;return;}
   roots.forEach(function(root){root.updateMatrixWorld(true);});
   const ray=new THREE.Raycaster(),holesByMesh=new Map(),misses=[];
   const modelTopY=getEngineeringModelMaxY();
