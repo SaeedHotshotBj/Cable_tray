@@ -4490,7 +4490,7 @@ function buildOutsideEscapeNetwork(equipment,panels,options){
     return {cable_plans:[],tray_runs:[],main_corridors:[],tray_summary:[],equipment_results:[],
       warnings:['No equipment or panel anchors are available for an outside route.'],
       total_cable_length_m:0,total_tray_length_m:0,
-      options:{...options,routing_method:'approved_external_escape_side_perimeter'}};
+      options:{...options,routing_method:'approved_external_escape_shared_trunk'}};
   }
 
   const xs=validPoints.map(function(p){return p.x;}),zs=validPoints.map(function(p){return p.z;});
@@ -4630,7 +4630,7 @@ function buildOutsideEscapeNetwork(equipment,panels,options){
   return {
     cable_plans:plans,tray_runs:runs,main_corridors:corridors,tray_summary:summary,
     equipment_results:results,warnings,total_cable_length_m:totalCable,total_tray_length_m:totalTray,
-    options:{...options,routing_method:'approved_external_escape_side_perimeter',routing_priority:'short side exit and exterior perimeter trunk at endpoint-relative elevation'}
+    options:{...options,routing_method:'approved_external_escape_shared_trunk',routing_priority:'short side exit and exterior perimeter trunk at endpoint-relative elevation'}
   };
 }
 export function routeEngineeringNetwork(inputs) {
