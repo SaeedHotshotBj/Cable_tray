@@ -8,6 +8,8 @@ import { OBJExporter } from 'three/addons/exporters/OBJExporter.js';
 import { STLExporter } from 'three/addons/exporters/STLExporter.js';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
 import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast } from 'three-mesh-bvh';
+import { Brush, Evaluator, SUBTRACTION, HOLLOW_SUBTRACTION } from 'three-bvh-csg';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { routeEngineeringNetwork } from './engineering_routing.js';
 
 const state = {
@@ -116,6 +118,8 @@ const mouse = new THREE.Vector2();
 let engineeringCollisionCache = new Map();
 let engineeringBodyDistanceCache = new Map();
 let engineeringCollisionMeshCache = [];
+let engineeringFloorHoleBaseGeometryByMesh = new Map();
+let engineeringFloorHoleCutSignature = '';
 
 function resize() {
   const r = viewport.getBoundingClientRect();
@@ -1462,7 +1466,8 @@ async function runEngineeringAutoDesign() {
       engineering_main_corridor_secondary_coordinate_mm:Number(plan.main_corridor_secondary_coordinate_mm),
       engineering_shared_segment_keys:Array.from(
         sharedSegmentKeysByCable.get(item.id) || []
-      )
+      ),
+      engineering_floor_hole:plan.floor_hole || null
     });
   });
 
@@ -2016,6 +2021,7 @@ function createRoute(type, points, options) {
     engineering_network_id: config.engineering_network_id || null,
     engineering_floor_id: config.engineering_floor_id || null,
     engineering_floor_name: config.engineering_floor_name || null,
+    engineering_floor_hole: config.engineering_floor_hole || null,
     engineering_classification: config.engineering_classification || null,
     engineering_cable_ids: Array.isArray(config.engineering_cable_ids) ? config.engineering_cable_ids.slice() : [],
     engineering_shared_segment_keys: Array.isArray(config.engineering_shared_segment_keys)
@@ -2709,6 +2715,161 @@ function rebuildEngineeringAccessories() {
 }
 
 
+function invalidateEngineeringCollisionCaches() {
+  engineeringCollisionCache = new Map();
+  engineeringBodyDistanceCache = new Map();
+  engineeringCollisionMeshCache = [];
+}
+function restoreEngineeringFloorHoleBaseGeometries(clearMap) {
+  engineeringFloorHoleBaseGeometryByMesh.forEach(function(baseGeometry, mesh) {
+    if (!mesh || !mesh.geometry || mesh.geometry === baseGeometry) return;
+    const current = mesh.geometry;
+    if (current.disposeBoundsTree) current.disposeBoundsTree();
+    current.dispose();
+    mesh.geometry = baseGeometry;
+    if (!baseGeometry.boundsTree) baseGeometry.computeBoundsTree();
+  });
+  if (clearMap === true) engineeringFloorHoleBaseGeometryByMesh.clear();
+  engineeringFloorHoleCutSignature = '';
+  invalidateEngineeringCollisionCaches();
+}
+function modelSnapshotPreservingFloorHoleCuts(root) {
+  if (!root) return null;
+  const restore = [];
+  root.traverse(function(mesh) {
+    const baseGeometry = engineeringFloorHoleBaseGeometryByMesh.get(mesh);
+    if (baseGeometry && mesh.geometry && mesh.geometry !== baseGeometry) {
+      restore.push({mesh, geometry:mesh.geometry});
+      mesh.geometry = baseGeometry;
+    }
+  });
+  try {
+    return root.toJSON();
+  } finally {
+    restore.forEach(function(item) { item.mesh.geometry = item.geometry; });
+  }
+}
+function applyEngineeringFloorHoleCutouts() {
+  const holes = state.objects.filter(function(obj) {
+    const hole = obj && obj.kind === 'cable' && obj.engineering_generated ? obj.engineering_floor_hole : null;
+    return hole && hole.point &&
+      Number.isFinite(Number(hole.point.x)) && Number.isFinite(Number(hole.point.y)) &&
+      Number.isFinite(Number(hole.point.z)) && Number.isFinite(Number(hole.diameter_mm)) &&
+      Number(hole.diameter_mm) > 0;
+  }).map(function(obj) {
+    const hole = obj.engineering_floor_hole;
+    return {
+      floor_id:String(hole.floor_id || ''),
+      x:Number(hole.point.x), y:Number(hole.point.y), z:Number(hole.point.z),
+      diameter_mm:Number(hole.diameter_mm), depth_mm:Math.max(20,Number(hole.depth_mm)||20)
+    };
+  });
+  holes.sort(function(a,b) {
+    return a.floor_id.localeCompare(b.floor_id)||a.x-b.x||a.z-b.z||a.diameter_mm-b.diameter_mm;
+  });
+  const signature=holes.map(function(hole) {
+    return [hole.floor_id,hole.x.toFixed(2),hole.y.toFixed(2),hole.z.toFixed(2),hole.diameter_mm.toFixed(2),hole.depth_mm.toFixed(2)].join('|');
+  }).join(';');
+  if (signature===engineeringFloorHoleCutSignature) return;
+  restoreEngineeringFloorHoleBaseGeometries(false);
+  if (!holes.length) return;
+
+  const roots=Array.from(state.modelRoots.values());
+  if (!roots.length) { engineeringFloorHoleCutSignature=signature; return; }
+  roots.forEach(function(root){root.updateMatrixWorld(true);});
+  const ray=new THREE.Raycaster(),holesByMesh=new Map(),misses=[];
+  const modelTopY=getEngineeringModelMaxY();
+
+  holes.forEach(function(hole) {
+    const originY=Math.max(modelTopY+1000,hole.y+1000);
+    ray.set(new THREE.Vector3(mmToScene(hole.x),mmToScene(originY),mmToScene(hole.z)),new THREE.Vector3(0,-1,0));
+    const hits=ray.intersectObjects(roots,true).filter(function(hit) {
+      return hit.object&&hit.object.isMesh&&hit.object.geometry&&hit.object.visible!==false;
+    });
+    const nearby=hits.filter(function(hit){return Math.abs(hit.point.y*10-hole.y)<=150;})
+      .sort(function(a,b){return Math.abs(a.point.y*10-hole.y)-Math.abs(b.point.y*10-hole.y);});
+    if(!nearby.length){misses.push(hole);return;}
+    const topHit=nearby[0],topYmm=topHit.point.y*10;
+    const lowerHits=hits.filter(function(hit){
+      const yMm=hit.point.y*10;return yMm<topYmm-0.5&&topYmm-yMm<=300;
+    }).sort(function(a,b){return (topYmm-a.point.y*10)-(topYmm-b.point.y*10);});
+    const measuredThickness=lowerHits.length?topYmm-lowerHits[0].point.y*10:0;
+    const depthMm=Math.max(20,Math.min(500,Math.max(hole.depth_mm,measuredThickness+10)));
+    const entry={x:hole.x,z:hole.z,centerYmm:topYmm-depthMm/2+0.5,depthMm,diameterMm:hole.diameter_mm,topYmm};
+    const list=holesByMesh.get(topHit.object)||[];
+    if(!list.some(function(existing){
+      return Math.hypot(existing.x-entry.x,existing.z-entry.z)<Math.max(existing.diameterMm,entry.diameterMm)*0.25&&Math.abs(existing.topYmm-entry.topYmm)<2;
+    }))list.push(entry);
+    holesByMesh.set(topHit.object,list);
+  });
+
+  const evaluator=new Evaluator(),failed=[];
+  holesByMesh.forEach(function(meshHoles,mesh) {
+    if(!mesh||!mesh.geometry||!meshHoles.length)return;
+    const baseGeometry=engineeringFloorHoleBaseGeometryByMesh.get(mesh)||mesh.geometry;
+    engineeringFloorHoleBaseGeometryByMesh.set(mesh,baseGeometry);
+    mesh.updateWorldMatrix(true,false);
+    const worldMatrix=mesh.matrixWorld.clone(),inverseWorld=worldMatrix.clone().invert();
+    const worldGeometry=baseGeometry.clone();
+    worldGeometry.applyMatrix4(worldMatrix);
+    if(!worldGeometry.boundsTree)worldGeometry.computeBoundsTree();
+    const cutters=meshHoles.map(function(hole) {
+      const radius=mmToScene(hole.diameterMm/2),depth=mmToScene(hole.depthMm);
+      const geometry=new THREE.CylinderGeometry(radius,radius,depth,48,1,false);
+      geometry.translate(mmToScene(hole.x),mmToScene(hole.centerYmm),mmToScene(hole.z));
+      geometry.computeVertexNormals();
+      if(!geometry.boundsTree)geometry.computeBoundsTree();
+      return geometry;
+    });
+    let cutterGeometry=null,result=null;
+    try {
+      cutterGeometry=cutters.length===1?cutters[0]:mergeGeometries(cutters,false);
+      if(!cutterGeometry)throw new Error('Could not combine floor-hole cutters.');
+      if(!cutterGeometry.boundsTree)cutterGeometry.computeBoundsTree();
+      const targetBrush=new Brush(worldGeometry,mesh.material),cutterBrush=new Brush(cutterGeometry,mesh.material);
+      targetBrush.updateMatrixWorld(true);cutterBrush.updateMatrixWorld(true);
+      try {result=evaluator.evaluate(targetBrush,cutterBrush,SUBTRACTION);}
+      catch(solidError){result=evaluator.evaluate(targetBrush,cutterBrush,HOLLOW_SUBTRACTION);}
+      if(!result||!result.geometry)throw new Error('Floor-hole subtraction returned no geometry.');
+      const cutGeometry=result.geometry;
+      cutGeometry.applyMatrix4(inverseWorld);
+      cutGeometry.computeVertexNormals();
+      if(cutGeometry.boundsTree)cutGeometry.disposeBoundsTree();
+      cutGeometry.computeBoundsTree();
+      mesh.geometry=cutGeometry;
+    } catch(error) {
+      failed.push(error&&error.message?error.message:'Unknown CSG failure');
+    } finally {
+      if(cutterGeometry&&cutters.indexOf(cutterGeometry)<0){
+        if(cutterGeometry.disposeBoundsTree)cutterGeometry.disposeBoundsTree();
+        cutterGeometry.dispose();
+      }
+      cutters.forEach(function(geometry){
+        if(geometry!==cutterGeometry){
+          if(geometry.disposeBoundsTree)geometry.disposeBoundsTree();
+          geometry.dispose();
+        }
+      });
+      if(result&&result.geometry&&result.geometry!==mesh.geometry){
+        if(result.geometry.disposeBoundsTree)result.geometry.disposeBoundsTree();
+        result.geometry.dispose();
+      }
+      if(worldGeometry!==(result&&result.geometry)){
+        if(worldGeometry.disposeBoundsTree)worldGeometry.disposeBoundsTree();
+        worldGeometry.dispose();
+      }
+    }
+  });
+  engineeringFloorHoleCutSignature=signature;
+  invalidateEngineeringCollisionCaches();
+  rebuildEngineeringCollisionMeshCache();
+  if(misses.length||failed.length){
+    const messages=[];
+    if(misses.length)messages.push(misses.length+' floor opening(s) were not found on the imported mesh');
+    if(failed.length)messages.push(failed.length+' floor mesh subtraction(s) failed');
+    toast('Floor-hole warning: '+messages.join('; ')+'. Tray routes remain available; verify the openings.');
+  }
+}
 function rebuildRoutes() {
   state.routeRoots.forEach(function(root){
     if(root.parent) root.parent.remove(root);
@@ -2721,6 +2882,7 @@ function rebuildRoutes() {
     state.routeRoots.set(o.id,g);
   });
 
+  applyEngineeringFloorHoleCutouts();
   rebuildEngineeringAccessories();
 }
 function finishRoute() {
@@ -4731,7 +4893,7 @@ function projectData() {
         path:m.path,
         native_format:m.native_format,
         format:m.format,
-        snapshot: root ? root.toJSON() : (m.snapshot || null)
+        snapshot: root ? modelSnapshotPreservingFloorHoleCuts(root) : (m.snapshot || null)
       };
     }),
     objects: state.objects
@@ -4753,6 +4915,7 @@ function projectData() {
           engineering_network_id:o.engineering_network_id || null,
           engineering_floor_id:o.engineering_floor_id || null,
           engineering_floor_name:o.engineering_floor_name || null,
+          engineering_floor_hole:o.engineering_floor_hole || null,
           engineering_classification:o.engineering_classification || null,
           engineering_cable_ids:Array.isArray(o.engineering_cable_ids) ? o.engineering_cable_ids.slice() : [],
           engineering_shared_segment_keys:Array.isArray(o.engineering_shared_segment_keys)
@@ -4948,6 +5111,7 @@ $('saveProjectBtn').addEventListener('click', saveProjectFile);
 function loadProject(data) {
   if (!data || data.schema !== 'cable-tray-project') throw new Error('Not a Cable_tray project');
 
+  restoreEngineeringFloorHoleBaseGeometries(true);
   state.modelRoots.forEach(function(root){
     disposeEngineeringCollisionGeometry(root);
     scene.remove(root);
