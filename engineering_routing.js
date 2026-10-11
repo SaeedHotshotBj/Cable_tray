@@ -4468,45 +4468,170 @@ function prepareFloorPanelConnections(group, prepared, panelStandoff, panelHighP
 
 function buildOutsideEscapeNetwork(equipment,panels,options){
   const byPanel=new Map(),panelById=new Map(),warnings=[];
-  (panels||[]).forEach(function(panel){if(panel&&panel.id)panelById.set(String(panel.id),panel);});
+  (panels||[]).forEach(function(panel){
+    if(panel&&panel.id)panelById.set(String(panel.id),panel);
+  });
   (equipment||[]).forEach(function(item){
     const panel=panelById.get(String(item&&item.destination_panel_id||''));
-    if(!panel||!panel.anchor||!panel.anchor.point){warnings.push((item&&item.name||'Equipment')+': no valid destination panel for the outside route.');return;}
-    const key=String(panel.id);if(!byPanel.has(key))byPanel.set(key,{panel,equipment:[]});byPanel.get(key).equipment.push(item);
+    if(!panel||!panel.anchor||!panel.anchor.point){
+      warnings.push((item&&item.name||'Equipment')+': no valid destination panel for the outside route.');
+      return;
+    }
+    const key=String(panel.id);
+    if(!byPanel.has(key))byPanel.set(key,{panel,equipment:[]});
+    byPanel.get(key).equipment.push(item);
   });
+
   const bounds=options.outsideRoutingBounds||{};
-  const maxY=Math.max(Number(bounds.maxY)||-Infinity,...equipment.map(e=>Number(e&&e.anchor&&e.anchor.point&&e.anchor.point.y)||-Infinity),...panels.map(p=>Number(p&&p.anchor&&p.anchor.point&&p.anchor.point.y)||-Infinity));
-  const y=maxY+Math.max(0,Number(options.clearanceMm)||0)+Math.max(1,Number(options.trayHeightMm)||100)/2+Math.max(0,Number(options.ceilingSafetyGapMm)||0)+Math.max(250,(Number(options.gridStepMm)||100)*2);
-  const plans=[],corridors=[],widths=(options.standardTrayWidthsMm||[100,150,200,300,400,500,600,800,1000,1200]).map(Number).filter(w=>Number.isFinite(w)&&w>0).sort((a,b)=>a-b);
-  byPanel.forEach(function(group,panelKey){
-    const items=group.equipment,panel=group.panel,p=clonePoint(panel.anchor.point),xs=items.map(e=>Number(e.anchor.point.x)).concat([p.x]),zs=items.map(e=>Number(e.anchor.point.z)).concat([p.z]);
-    const sx=Math.max.apply(Math,xs)-Math.min.apply(Math,xs),sz=Math.max.apply(Math,zs)-Math.min.apply(Math,zs);
-    const axis=options.structurePrimaryAxis==='x'||options.structurePrimaryAxis==='z'?options.structurePrimaryAxis:(sx>=sz?'x':'z');
-    const cross=axis==='x'?'z':'x',values=items.map(e=>Number(e.anchor.point[cross])).sort((a,b)=>a-b),secondary=values[Math.floor(values.length/2)];
-    const primaries=items.map(e=>Number(e.anchor.point[axis])).concat([Number(p[axis])]),lo=Math.min.apply(Math,primaries),hi=Math.max.apply(Math,primaries);
-    const diameterSum=items.reduce((sum,e)=>sum+Math.max(0,Number(e.cable_diameter_mm)||0),0),fill=Math.max(1,Math.min(100,Number(options.fillLimitPercent)||80))/100,margin=Math.max(0,Number(options.traySideMarginMm)||25);
-    const mainWidth=chooseTrayWidth((diameterSum+margin*2)/fill,widths),networkId='outside::'+panelKey,panelHigh=pointAtRoutingY(p,y),panelSpine=clonePoint(panelHigh);panelSpine[cross]=secondary;
-    items.forEach(function(item){
-      const anchor=clonePoint(item.anchor.point),high=pointAtRoutingY(anchor,y),turn=clonePoint(high);turn[cross]=secondary;
-      const branchWidth=chooseTrayWidth(((Math.max(0,Number(item.cable_diameter_mm)||0)+margin*2)/fill),widths),points=[];
-      appendDistinctPoints(points,[anchor]);appendDistinctPoints(points,[high]);appendDistinctPoints(points,[turn]);appendDistinctPoints(points,[panelSpine]);appendDistinctPoints(points,[panelHigh]);appendDistinctPoints(points,[p]);
-      plans.push({equipment:item,panel,cable:{name:item.cable_name||'Power Cable',diameter_mm:Number(item.cable_diameter_mm)||0},routing_start:high,routing_goal:turn,main_corridor_equipment_id:null,
-        main_corridor_routing_y_mm:y,standoff_distance_mm:Math.abs(y-anchor.y),planning_tray_width_mm:mainWidth,branch_tray_width_mm:branchWidth,
-        branch_points:[clonePoint(high),clonePoint(turn)],main_corridor_segment_keys:[],engineering_network_id:networkId,engineering_floor_id:null,engineering_floor_name:null,
-        engineering_route_below_floor:false,parallel_main_corridor:items.length>=Math.max(2,Number(options.mainMinCables)||2),main_corridor_axis:axis,
-        main_corridor_secondary_coordinate_mm:secondary,points,warning:'Outside route selected after internal routing was unavailable; review shell penetrations and clearance.',fallback:false});
+  const validPoints=(equipment||[]).concat(panels||[]).filter(function(item){
+    return item&&item.anchor&&item.anchor.point;
+  }).map(function(item){return clonePoint(item.anchor.point);});
+  if(!validPoints.length){
+    return {cable_plans:[],tray_runs:[],main_corridors:[],tray_summary:[],equipment_results:[],
+      warnings:['No equipment or panel anchors are available for an outside route.'],
+      total_cable_length_m:0,total_tray_length_m:0,
+      options:{...options,routing_method:'approved_external_escape_side_perimeter'}};
+  }
+
+  const xs=validPoints.map(function(p){return p.x;}),zs=validPoints.map(function(p){return p.z;});
+  const minX=Math.min.apply(Math,[...xs,Number.isFinite(Number(bounds.minX))?Number(bounds.minX):Infinity]);
+  const maxX=Math.max.apply(Math,[...xs,Number.isFinite(Number(bounds.maxX))?Number(bounds.maxX):-Infinity]);
+  const minZ=Math.min.apply(Math,[...zs,Number.isFinite(Number(bounds.minZ))?Number(bounds.minZ):Infinity]);
+  const maxZ=Math.max.apply(Math,[...zs,Number.isFinite(Number(bounds.maxZ))?Number(bounds.maxZ):-Infinity]);
+  const clearance=Math.max(0,Number(options.clearanceMm)||0);
+  const trayHeight=Math.max(1,Number(options.trayHeightMm)||100);
+  const gridStep=Math.max(1,Number(options.gridStepMm)||250);
+  // The exterior route is kept close to the equipment/panel working level.
+  // Model maxY is deliberately not used: a tall unrelated machine must not
+  // force every cable branch to climb to the roof of the entire CAD model.
+  const endpointYs=validPoints.map(function(p){return p.y;}).sort(function(a,b){return a-b;});
+  const middle=Math.floor(endpointYs.length/2);
+  const medianY=endpointYs.length%2?endpointYs[middle]:(endpointYs[middle-1]+endpointYs[middle])/2;
+  const requestedLift=Math.max(75,clearance+trayHeight/2+50);
+  const routeLift=Math.min(requestedLift,Math.max(250,gridStep));
+  const y=medianY+routeLift;
+  const exteriorOffset=Math.max(150,gridStep,clearance+trayHeight/2+50);
+  const exterior={minX:minX-exteriorOffset,maxX:maxX+exteriorOffset,minZ:minZ-exteriorOffset,maxZ:maxZ+exteriorOffset};
+  const plans=[],corridors=[];
+  const widths=(options.standardTrayWidthsMm||[100,150,200,300,400,500,600,800,1000,1200])
+    .map(Number).filter(function(w){return Number.isFinite(w)&&w>0;}).sort(function(a,b){return a-b;});
+  const fill=Math.max(1,Math.min(100,Number(options.fillLimitPercent)||80))/100;
+  const margin=Math.max(0,Number(options.traySideMarginMm)||25);
+  const minimumMainCables=Math.max(2,Number(options.mainMinCables)||2);
+
+  function median(values){
+    const sorted=values.slice().sort(function(a,b){return a-b;});
+    if(!sorted.length)return 0;
+    const mid=Math.floor(sorted.length/2);
+    return sorted.length%2?sorted[mid]:(sorted[mid-1]+sorted[mid])/2;
+  }
+
+  function chooseExteriorSide(items,panel){
+    const panelPoint=clonePoint(panel.anchor.point);
+    const candidates=[
+      {fixedAxis:'x',side:'min',coordinate:exterior.minX,crossAxis:'z'},
+      {fixedAxis:'x',side:'max',coordinate:exterior.maxX,crossAxis:'z'},
+      {fixedAxis:'z',side:'min',coordinate:exterior.minZ,crossAxis:'x'},
+      {fixedAxis:'z',side:'max',coordinate:exterior.maxZ,crossAxis:'x'}
+    ];
+    candidates.forEach(function(candidate){
+      const fixed=candidate.fixedAxis,cross=candidate.crossAxis,sideCoordinate=candidate.coordinate;
+      const crossValues=items.map(function(item){return Number(item.anchor.point[cross]);}).concat([panelPoint[cross]]);
+      const span=Math.max.apply(Math,crossValues)-Math.min.apply(Math,crossValues);
+      candidate.score=items.reduce(function(sum,item){
+        const a=item.anchor.point;
+        return sum+Math.abs(Number(a[fixed])-sideCoordinate);
+      },0)+span+Math.abs(Number(panelPoint[fixed])-sideCoordinate);
+      // Prefer fewer cable bends when sides have effectively equal length.
+      candidate.score+=Math.abs(median(crossValues)-panelPoint[cross])*0.001;
     });
-    if(items.length>=Math.max(2,Number(options.mainMinCables)||2)){
-      const a=pointAtRoutingY(axis==='x'?{x:lo,y:p.y,z:secondary}:{x:secondary,y:p.y,z:lo},y),b=pointAtRoutingY(axis==='x'?{x:hi,y:p.y,z:secondary}:{x:secondary,y:p.y,z:hi},y),spine=[a,b];
-      corridors.push({panel_id:p.id,floor_id:null,network_id:networkId,width_mm:mainWidth,height_mm:Number(options.trayHeightMm)||100,cable_ids:items.map(e=>e.id),points:spine,network_nodes:spine.map(clonePoint),panel_drop_points:[panelHigh],
-        main_level_y_mm:y,main_corridor_secondary_coordinate_mm:secondary,parallel_main_corridor:true,panel_connection_points:[panelSpine,panelHigh].map(clonePoint)});
+    candidates.sort(function(a,b){return a.score-b.score;});
+    return candidates[0];
+  }
+
+  byPanel.forEach(function(group,panelKey){
+    const items=group.equipment,panel=group.panel,p=clonePoint(panel.anchor.point);
+    if(!items.length)return;
+    const side=chooseExteriorSide(items,panel);
+    const fixedAxis=side.fixedAxis,crossAxis=side.crossAxis,sideCoordinate=side.coordinate;
+    const crossValues=items.map(function(item){return Number(item.anchor.point[crossAxis]);}).concat([p[crossAxis]]);
+    const lo=Math.min.apply(Math,crossValues),hi=Math.max.apply(Math,crossValues);
+    const diameterSum=items.reduce(function(sum,item){
+      return sum+Math.max(0,Number(item.cable_diameter_mm)||0);
+    },0);
+    const mainWidth=chooseTrayWidth((diameterSum+margin*2)/fill,widths);
+    const networkId='outside::'+panelKey;
+    const panelHigh=pointAtRoutingY(p,y);
+    const panelSpine=clonePoint(panelHigh);
+    panelSpine[fixedAxis]=sideCoordinate;
+    const spineStart=clonePoint(panelSpine),spineEnd=clonePoint(panelSpine);
+    spineStart[crossAxis]=lo;
+    spineEnd[crossAxis]=hi;
+    const sideUsesSharedMain=items.length>=minimumMainCables;
+
+    items.forEach(function(item){
+      const anchor=clonePoint(item.anchor.point);
+      const high=pointAtRoutingY(anchor,y);
+      const sideEntry=clonePoint(high);
+      sideEntry[fixedAxis]=sideCoordinate;
+      const branchWidth=chooseTrayWidth(
+        ((Math.max(0,Number(item.cable_diameter_mm)||0)+margin*2)/fill),widths
+      );
+      const points=[];
+      appendDistinctPoints(points,[anchor,high,sideEntry,panelSpine,panelHigh,p]);
+      plans.push({
+        equipment:item,panel,
+        cable:{name:item.cable_name||'Power Cable',diameter_mm:Number(item.cable_diameter_mm)||0},
+        routing_start:high,routing_goal:sideEntry,
+        main_corridor_equipment_id:null,
+        main_corridor_routing_y_mm:y,
+        standoff_distance_mm:Math.abs(y-anchor.y),
+        planning_tray_width_mm:mainWidth,
+        branch_tray_width_mm:branchWidth,
+        branch_points:[clonePoint(high),clonePoint(sideEntry)],
+        main_corridor_segment_keys:[],
+        engineering_network_id:networkId,
+        engineering_floor_id:null,
+        engineering_floor_name:null,
+        engineering_route_below_floor:false,
+        parallel_main_corridor:sideUsesSharedMain,
+        main_corridor_axis:crossAxis,
+        main_corridor_secondary_coordinate_mm:sideCoordinate,
+        points,
+        warning:'Outside route selected after internal routing was unavailable; review the side exit and shell penetration.',
+        fallback:false
+      });
+    });
+
+    if(sideUsesSharedMain){
+      corridors.push({
+        panel_id:p.id,floor_id:null,network_id:networkId,
+        width_mm:mainWidth,height_mm:trayHeight,
+        cable_ids:items.map(function(item){return item.id;}),
+        points:[spineStart,spineEnd],
+        network_nodes:[spineStart,spineEnd].map(clonePoint),
+        panel_drop_points:[panelHigh],
+        main_level_y_mm:y,
+        main_corridor_axis:crossAxis,
+        main_corridor_secondary_coordinate_mm:sideCoordinate,
+        exterior_side:fixedAxis+':'+side.side,
+        parallel_main_corridor:true,
+        panel_connection_points:[panelSpine,panelHigh].map(clonePoint)
+      });
     }
   });
-  const runs=buildTrayRuns(plans,options,corridors),summary=buildTraySummary(runs),results=buildEquipmentResults(plans,runs);
-  const totalCable=runs.length?plans.reduce((sum,p)=>sum+routeLengthMeters(p.points),0):0,totalTray=runs.reduce((sum,r)=>sum+r.length_m,0);
-  if(plans.length)warnings.push('Approved outside routing was used. Verify shell penetrations and clearance on the CAD model.');
-  return {cable_plans:plans,tray_runs:runs,main_corridors:corridors,tray_summary:summary,equipment_results:results,warnings,total_cable_length_m:totalCable,total_tray_length_m:totalTray,
-    options:{...options,routing_method:'approved_external_escape_shared_trunk',routing_priority:'external trunk above model envelope'}};
+
+  const runs=buildTrayRuns(plans,options,corridors);
+  const summary=buildTraySummary(runs);
+  const results=buildEquipmentResults(plans,runs);
+  const totalCable=runs.length?plans.reduce(function(sum,p){return sum+routeLengthMeters(p.points);},0):0;
+  const totalTray=runs.reduce(function(sum,r){return sum+r.length_m;},0);
+  if(plans.length)warnings.push('Approved outside routing uses a side-perimeter trunk near equipment/panel level. Verify shell penetrations and clearance on the CAD model.');
+  return {
+    cable_plans:plans,tray_runs:runs,main_corridors:corridors,tray_summary:summary,
+    equipment_results:results,warnings,total_cable_length_m:totalCable,total_tray_length_m:totalTray,
+    options:{...options,routing_method:'approved_external_escape_side_perimeter',routing_priority:'short side exit and exterior perimeter trunk at endpoint-relative elevation'}
+  };
 }
 export function routeEngineeringNetwork(inputs) {
   const equipment = Array.isArray(inputs && inputs.equipment) ? inputs.equipment : [];
