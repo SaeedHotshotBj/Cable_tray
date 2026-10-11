@@ -5037,6 +5037,12 @@ export function routeEngineeringNetwork(inputs) {
           standoff_distance_mm:Math.max(entry.startDistanceMm, panelStandoff.distance_mm),
           planning_tray_width_mm:planningTrayWidth,
           engineering_network_id:group.network_id || String(group.panel.id),
+          engineering_floor_id:group.floor_id || null,
+          engineering_floor_name:group.floor_name || null,
+          engineering_route_below_floor:group.route_below_floor===true,
+          engineering_floor_surface_y_mm:group.route_below_floor&&group.floor_zone
+            ? floorZoneSurfaceYAtPoint(group.floor_zone,entry.equipment.anchor.point)
+            : null,
           branch_points:branchPoints,
           points,
           warning:highRoute.warning || panelDrop.warning || null,
