@@ -658,9 +658,9 @@ function resolveAnchorStandoff(anchor, obstacles, options) {
       if (!pointClear) continue;
 
       const distancePreference = Math.abs(clampedDistance - preferredStandoffDistance);
-      const normalAlignment = Math.max(-1, Math.min(1,
+      const normalAlignment = Math.max(0, Math.min(1, Math.abs(
         direction.x * normal.x + direction.y * normal.y + direction.z * normal.z
-      ));
+      )));
       const normalAlignmentPenalty = 1 - normalAlignment;
       const diagonalPenalty =
         (Math.abs(direction.x) > 1e-6 ? 1 : 0) +
@@ -4619,13 +4619,33 @@ export function routeEngineeringNetwork(inputs) {
         return Number(a.base_y_mm) - Number(b.base_y_mm);
       });
 
-      // A higher overlapping floor defines the ceiling boundary for the
-      // current floor. Using the midpoint between floors kept the Main Tray
-      // unnecessarily low and made ceiling-gap settings ineffective.
-      floorMinY = Number(zone.base_y_mm);
-      floorMaxY = higherOverlappingZones.length
-        ? Number(higherOverlappingZones[0].base_y_mm)
-        : globalMaxY;
+      // Most floor zones define the lower support surface of their level.
+      // If a zone lies very close to the model's global top, however, it is the
+      // upper shell/ceiling surface: route inside the model below it, down to
+      // the nearest lower overlapping zone, rather than searching outside the shell.
+      const topSurfaceToleranceMm = Math.max(100, Number(options.clearanceMm || 0) + Number(options.trayHeightMm || 100));
+      const zoneTouchesModelTop = Number.isFinite(globalMaxY) &&
+        Number(zone.base_y_mm) >= globalMaxY - topSurfaceToleranceMm;
+      if (zoneTouchesModelTop && !higherOverlappingZones.length) {
+        const lowerOverlappingZones = normalizedFloorZones.filter(function(other){
+          return String(other.id) !== String(zone.id) &&
+            Number(other.base_y_mm) < Number(zone.base_y_mm) - 50 &&
+            floorZoneBoundsOverlap(zone, other);
+        }).sort(function(a,b){
+          return Number(b.base_y_mm) - Number(a.base_y_mm);
+        });
+        floorMinY = lowerOverlappingZones.length
+          ? Number(lowerOverlappingZones[0].base_y_mm)
+          : globalMinY;
+        floorMaxY = Number(zone.base_y_mm);
+      } else {
+        // A higher overlapping floor defines the ceiling boundary for the
+        // current lower floor.
+        floorMinY = Number(zone.base_y_mm);
+        floorMaxY = higherOverlappingZones.length
+          ? Number(higherOverlappingZones[0].base_y_mm)
+          : globalMaxY;
+      }
     }
 
     item.group.floor_base_y_mm = item.group.floor_zone &&
