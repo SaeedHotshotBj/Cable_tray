@@ -3139,7 +3139,12 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
         const rawAttachPrimary=Number(entry.start[primaryAxis]);
         const attachPrimary=Math.max(physicalStartPrimary,Math.min(physicalEndPrimary,rawAttachPrimary));
         let attach=mainPoint(attachPrimary,sec);
-        let branch=dedupe([entry.start,plane,attach]);
+        // Branches approach the Main with a perpendicular, axis-aligned leg.
+        // A clear diagonal shortcut must not override the reference tree layout.
+        const branchTurn=primaryAxis==='x'
+          ? {x:attach.x,y:routingY,z:plane.z}
+          : {x:plane.x,y:routingY,z:attach.z};
+        let branch=dedupe([entry.start,plane,branchTurn,attach]);
         if(!clearPath(branch,branchOptions)&&hasOccupiedMains&&panelLoopPivotPrimary!=null){
           // Bypass existing Main ends along the equipment's routing row, then
           // turn into this inward capacity lane beyond the occupied Main span.
