@@ -2767,6 +2767,7 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
     const sameSideLanes=[];
     occupiedCorridors.forEach(function(corridor){
       if(String(corridor.floor_id == null ? '' : corridor.floor_id)!==String(group.floor_id == null ? '' : group.floor_id))return;
+      if(String(corridor.panel_id == null ? '' : corridor.panel_id)!==String(group.panel.id))return;
       const points=Array.isArray(corridor.points)?corridor.points:[];
       if(points.length<2)return;
       const lanePrimary=points.map(function(point){return Number(point[primaryAxis]);}).filter(Number.isFinite);
@@ -2863,10 +2864,11 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
       if(hasOccupiedMains){
         const occupiedPrimary=[];
         occupiedCorridors.forEach(function(corridor){
+          if(String(corridor.panel_id == null ? '' : corridor.panel_id)!==String(group.panel.id))return;
           // The panel connector for this lane only needs to bypass existing
-          // Main lanes on the same side of the panel. Including the opposite
-          // equipment row forced the pivot beyond unrelated far-side tray ends,
-          // often outside the model even when a safe local connector existed.
+          // Main lanes on the same side of this panel. Including other panels'
+          // routes can force the pivot beyond unrelated tray ends and outside
+          // the model, even when a safe local connector exists.
           const laneCoordinate=Number(corridor.main_corridor_secondary_coordinate_mm);
           if(Number.isFinite(laneCoordinate) &&
               (laneCoordinate-panelSecondary)*preferredCorridorSide<=0.001)return;
@@ -2901,6 +2903,7 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
       if(hasOccupiedMains&&baseLevels.length){
         const panelLaneCoordinates=[];
         occupiedCorridors.forEach(function(corridor){
+          if(String(corridor.panel_id == null ? '' : corridor.panel_id)!==String(group.panel.id))return;
           const points=Array.isArray(corridor.points)?corridor.points:[];
           if(points.length<2)return;
           const a=points[0],b=points[points.length-1];
@@ -4695,6 +4698,7 @@ export function routeEngineeringNetwork(inputs) {
       routingTrayWidthMm:planningTrayWidth,
       occupiedMainCorridors:occupiedMainCorridors.map(function(corridor){return {
         network_id:corridor.network_id,
+        panel_id:corridor.panel_id == null ? null : String(corridor.panel_id),
         floor_id:corridor.floor_id == null ? null : String(corridor.floor_id),
         points:(corridor.points||[]).map(clonePoint),
         width_mm:Number(corridor.width_mm)||100,
@@ -4991,6 +4995,7 @@ export function routeEngineeringNetwork(inputs) {
       occupiedMainCorridors.push({
         signature,
         network_id:run.network_id||null,
+        panel_id:String(group.panel.id),
         floor_id:group.floor_id == null ? null : String(group.floor_id),
         points:run.points.map(clonePoint),
         main_corridor_secondary_coordinate_mm:Number(latestMainCorridor.main_corridor_secondary_coordinate_mm),
