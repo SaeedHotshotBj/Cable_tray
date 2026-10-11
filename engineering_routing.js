@@ -2882,8 +2882,15 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
         const overallMax=Math.max.apply(Math,[physicalEndPrimary].concat(occupiedPrimary));
         const laneLow=(usableMainBounds?(primaryAxis==='x'?usableMainBounds.minX:usableMainBounds.minZ):-Infinity);
         const laneHigh=(usableMainBounds?(primaryAxis==='x'?usableMainBounds.maxX:usableMainBounds.maxZ):Infinity);
-        const highPivot=overallMax+laneSpacing;
-        const lowPivot=overallMin-laneSpacing;
+        // With no earlier Main lane on this panel side, a short end extension
+        // is enough to take the panel branch around the current Main. Reserve
+        // full lane spacing only when this connector must bypass another lane
+        // that shares the same destination panel and side.
+        const pivotSpacing=occupiedPrimary.length
+          ? laneSpacing
+          : Math.max(step,Math.min(200,laneSpacing));
+        const highPivot=overallMax+pivotSpacing;
+        const lowPivot=overallMin-pivotSpacing;
         const highFits=highPivot<=laneHigh+0.001;
         const lowFits=lowPivot>=laneLow-0.001;
         if(!highFits&&!lowFits)continue;
