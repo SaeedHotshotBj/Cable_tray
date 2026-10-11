@@ -1320,8 +1320,28 @@ async function runEngineeringAutoDesign() {
     options:routingOptions
   });
 
-  const routedEquipmentIds=new Set(report.cable_plans.map(function(plan){ return plan.equipment.id; }));
-  const missingInternalRoutes=state.equipment.filter(function(item){ return !routedEquipmentIds.has(item.id); });
+  function equipmentMissingUsableTray(currentReport) {
+    const outsideMode = currentReport && currentReport.options &&
+      currentReport.options.routing_method === 'approved_external_escape_shared_trunk';
+    const plansById = new Map((currentReport.cable_plans || []).map(function(plan) {
+      return [plan && plan.equipment ? plan.equipment.id : null,plan];
+    }));
+    const trayEquipmentIds = new Set();
+    (currentReport.tray_runs || []).forEach(function(run) {
+      if (!run || !Array.isArray(run.points) || run.points.length < 2 ||
+          !Array.isArray(run.cable_ids) || !(Number(run.length_m) > 0.005)) return;
+      run.cable_ids.forEach(function(equipmentId) { trayEquipmentIds.add(equipmentId); });
+    });
+    return state.equipment.filter(function(item) {
+      const plan=plansById.get(item.id);
+      if (!plan || !trayEquipmentIds.has(item.id)) return true;
+      // Direct fallback plans are not counted as successful internal routes.
+      // Once outside routing has explicitly been approved, the dedicated
+      // external-tree builder is accepted despite its shell-penetration warning.
+      return !outsideMode && (plan.fallback === true || !!plan.warning);
+    });
+  }
+  const missingInternalRoutes=equipmentMissingUsableTray(report);
 
   if(missingInternalRoutes.length){
     const names=missingInternalRoutes.slice(0,3).map(function(item){ return item.name; }).join(', ');
@@ -1338,7 +1358,41 @@ async function runEngineeringAutoDesign() {
       return;
     }
 
-    routingOptions={...routingOptions,routingBounds:null,allowOutsideRouting:true};
+    let outsideBounds=routingBounds||getEngineeringRoutingBounds();
+    if(!outsideBounds){
+      const anchors=state.equipment.concat(state.panels).map(function(item){
+        return item&&item.anchor&&item.anchor.point?item.anchor.point:null;
+      }).filter(Boolean);
+      if(anchors.length){
+        const pad=Math.max(3000,settings.maxBodyDistanceMm+settings.gridStepMm*4);
+        const xs=anchors.map(function(point){return Number(point.x);});
+        const ys=anchors.map(function(point){return Number(point.y);});
+        const zs=anchors.map(function(point){return Number(point.z);});
+        outsideBounds={
+          minX:Math.min.apply(Math,xs)-pad,maxX:Math.max.apply(Math,xs)+pad,
+          minY:Math.min.apply(Math,ys)-pad,maxY:Math.max.apply(Math,ys)+pad,
+          minZ:Math.min.apply(Math,zs)-pad,maxZ:Math.max.apply(Math,zs)+pad
+        };
+      }
+    }
+    if(!outsideBounds||!Number.isFinite(Number(outsideBounds.maxY))){
+      state.lastEngineeringReport=report;
+      status('External routing could not start');
+      toast('No model bounds or equipment coordinates are available for an outside route.');
+      return;
+    }
+
+    routingOptions={
+      ...routingOptions,
+      routingBounds:null,
+      outsideRoutingBounds:outsideBounds,
+      floorZones:[],
+      allowOutsideRouting:true,
+      exactCollisionRouting:false,
+      segmentClear:null,
+      standoffClear:null,
+      pointBodyDistanceClear:null
+    };
     report=routeEngineeringNetwork({
       equipment:state.equipment,
       panels:state.panels,
@@ -1346,12 +1400,12 @@ async function runEngineeringAutoDesign() {
       options:routingOptions
     });
 
-    const reroutedIds=new Set(report.cable_plans.map(function(plan){ return plan.equipment.id; }));
-    const stillMissing=state.equipment.filter(function(item){ return !reroutedIds.has(item.id); });
+    const stillMissing=equipmentMissingUsableTray(report);
     if(stillMissing.length){
       state.lastEngineeringReport=report;
-      status('Engineering routing completed with unresolved routes');
-      toast('No valid route was found for all equipment, even with outside routing allowed.');
+      status('External routing completed with unresolved equipment');
+      const namesStillMissing=stillMissing.slice(0,4).map(function(item){return item.name;}).join(', ');
+      toast('No physical tray run was generated for: '+namesStillMissing+(stillMissing.length>4?' ...':''));
       return;
     }
   }
