@@ -4501,15 +4501,8 @@ function buildOutsideEscapeNetwork(equipment,panels,options){
   const clearance=Math.max(0,Number(options.clearanceMm)||0);
   const trayHeight=Math.max(1,Number(options.trayHeightMm)||100);
   const gridStep=Math.max(1,Number(options.gridStepMm)||250);
-  // The exterior route is kept close to the equipment/panel working level.
-  // Model maxY is deliberately not used: a tall unrelated machine must not
-  // force every cable branch to climb to the roof of the entire CAD model.
-  const endpointYs=validPoints.map(function(p){return p.y;}).sort(function(a,b){return a-b;});
-  const middle=Math.floor(endpointYs.length/2);
-  const medianY=endpointYs.length%2?endpointYs[middle]:(endpointYs[middle-1]+endpointYs[middle])/2;
-  const requestedLift=Math.max(75,clearance+trayHeight/2+50);
-  const routeLift=Math.min(requestedLift,Math.max(250,gridStep));
-  const y=medianY+routeLift;
+  // Model maxY is deliberately not used: external tray height is resolved
+  // per destination panel below, from only that panel's equipment anchors.
   const exteriorOffset=Math.max(150,gridStep,clearance+trayHeight/2+50);
   const exterior={minX:minX-exteriorOffset,maxX:maxX+exteriorOffset,minZ:minZ-exteriorOffset,maxZ:maxZ+exteriorOffset};
   const plans=[],corridors=[];
@@ -4552,6 +4545,15 @@ function buildOutsideEscapeNetwork(equipment,panels,options){
   byPanel.forEach(function(group,panelKey){
     const items=group.equipment,panel=group.panel,p=clonePoint(panel.anchor.point);
     if(!items.length)return;
+    // Keep each panel network at its own endpoint-relative elevation. A high
+    // machine serving another panel must not lift this entire network.
+    const endpointYs=items.map(function(item){return Number(item.anchor.point.y);})
+      .concat([p.y]).filter(Number.isFinite).sort(function(a,b){return a-b;});
+    const middle=Math.floor(endpointYs.length/2);
+    const medianY=endpointYs.length%2?endpointYs[middle]:(endpointYs[middle-1]+endpointYs[middle])/2;
+    const requestedLift=Math.max(75,clearance+trayHeight/2+50);
+    const routeLift=Math.min(requestedLift,Math.max(250,gridStep));
+    const y=medianY+routeLift;
     const side=chooseExteriorSide(items,panel);
     const fixedAxis=side.fixedAxis,crossAxis=side.crossAxis,sideCoordinate=side.coordinate;
     const crossValues=items.map(function(item){return Number(item.anchor.point[crossAxis]);}).concat([p[crossAxis]]);
