@@ -2863,6 +2863,13 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
       if(hasOccupiedMains){
         const occupiedPrimary=[];
         occupiedCorridors.forEach(function(corridor){
+          // The panel connector for this lane only needs to bypass existing
+          // Main lanes on the same side of the panel. Including the opposite
+          // equipment row forced the pivot beyond unrelated far-side tray ends,
+          // often outside the model even when a safe local connector existed.
+          const laneCoordinate=Number(corridor.main_corridor_secondary_coordinate_mm);
+          if(Number.isFinite(laneCoordinate) &&
+              (laneCoordinate-panelSecondary)*preferredCorridorSide<=0.001)return;
           const points=Array.isArray(corridor.points)?corridor.points:[];
           points.forEach(function(point){
             const value=Number(point[primaryAxis]);
