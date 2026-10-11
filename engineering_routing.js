@@ -658,6 +658,10 @@ function resolveAnchorStandoff(anchor, obstacles, options) {
       if (!pointClear) continue;
 
       const distancePreference = Math.abs(clampedDistance - preferredStandoffDistance);
+      const normalAlignment = Math.max(-1, Math.min(1,
+        direction.x * normal.x + direction.y * normal.y + direction.z * normal.z
+      ));
+      const normalAlignmentPenalty = 1 - normalAlignment;
       const diagonalPenalty =
         (Math.abs(direction.x) > 1e-6 ? 1 : 0) +
         (Math.abs(direction.y) > 1e-6 ? 1 : 0) +
@@ -674,6 +678,8 @@ function resolveAnchorStandoff(anchor, obstacles, options) {
         (
           Math.abs(distancePreference - best.distancePreference) < 0.001 &&
           (
+            normalAlignmentPenalty < best.normalAlignmentPenalty - 0.001 ||
+            (Math.abs(normalAlignmentPenalty - best.normalAlignmentPenalty) < 0.001 && (
             diagonalPenalty < best.diagonalPenalty ||
             (
               diagonalPenalty === best.diagonalPenalty &&
@@ -685,6 +691,7 @@ function resolveAnchorStandoff(anchor, obstacles, options) {
                 )
               )
             )
+            ))
           )
         )
       ) {
@@ -693,6 +700,7 @@ function resolveAnchorStandoff(anchor, obstacles, options) {
           distance:clampedDistance,
           directionIndex,
           distancePreference,
+          normalAlignmentPenalty,
           diagonalPenalty,
           structurePenalty
         };
@@ -1376,7 +1384,9 @@ function buildTrayRuns(cablePlans, options, mainCorridors) {
     if (plan.parallel_main_corridor === true) {
       const branchOnly = clipPolylineAtPoint(trayPoints, plan.routing_goal, 1);
       if (branchOnly.length >= 2) {
-        const requestedGap = Math.max(100, Math.min(220, (Number(options.gridStepMm) || 100) * 1.5));
+        const mainTrayWidth = Math.max(1, Number(plan.planning_tray_width_mm) || Number(options.trayHeightMm) || 100);
+        // End at the Main Tray outside edge with a tiny overlap, not a grid-sized gap.
+        const requestedGap = Math.max(0, mainTrayWidth / 2 - 1);
         const availableLength = polylineLengthMm(branchOnly);
         const gap = Math.min(requestedGap, Math.max(0, availableLength - 50));
         trayPoints = gap > 0 ? shortenPolylineEnd(branchOnly, gap) : branchOnly;
@@ -3023,22 +3033,10 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
           }
         }
       }
-      const requestedCrossShift=(panelSecondary-sec)*0.215;
-      const maxCrossShift=Math.tan(2.57*Math.PI/180)*physicalSpan;
-      const crossShift=Math.max(-maxCrossShift,Math.min(maxCrossShift,requestedCrossShift));
-      if(Number(group.source_row_batch_count)>1){
-        activeMainPrimaryCenter=mainCenterPrimary;
-        activeMainSlope=0;
-      }else if(atHigh){
-        activeMainPrimaryCenter=physicalStartPrimary;
-        activeMainSlope=crossShift/physicalSpan;
-      }else if(atLow){
-        activeMainPrimaryCenter=physicalEndPrimary;
-        activeMainSlope=-crossShift/physicalSpan;
-      }else{
-        activeMainPrimaryCenter=(physicalStartPrimary+physicalEndPrimary)/2;
-        activeMainSlope=crossShift/physicalSpan;
-      }
+      // Keep the shared physical Main Tray aligned to one structural axis.
+      // Do not tilt the trunk toward the panel; use an orthogonal panel branch instead.
+      activeMainPrimaryCenter=mainCenterPrimary;
+      activeMainSlope=0;
       const coordsSet=new Set([physicalStartPrimary,physicalEndPrimary]);
       terminal.forEach(function(v){
         if(v>=physicalStartPrimary-0.001&&v<=physicalEndPrimary+0.001)coordsSet.add(v);
@@ -3198,8 +3196,9 @@ function buildParallelMainCorridorNetwork(group, prepared, panelStandoff, obstac
       if(!valid||plans.length!==prepared.length)continue;
       const visiblePanelPath=panelPhysicalConnectionPath||panelConnectorPath;
       const panelConnectionLength=polylineLengthMm(visiblePanelPath);
+      const mainTrayWidthForPanel=Math.max(1,Number(routeOptions.routingTrayWidthMm)||Number(options.trayHeightMm)||100);
       const panelGap=Math.min(
-        Math.max(100,Math.min(220,step*1.5)),
+        Math.max(0,mainTrayWidthForPanel/2-1),
         Math.max(0,panelConnectionLength-50)
       );
       const panelConnectionPoints=panelConnectionLength>0.001
